@@ -1,0 +1,29 @@
+name: greeter
+card: agent-card.json
+persona: persona.md
+
+model:
+  id: ${GREETER_MODEL:-anthropic/claude-sonnet-4-5}
+  max_tokens: 1024
+  budget:
+    per_task_tokens: 50000
+
+transports:
+  - kind: cli
+
+tools:
+  provider: none
+  allow: []
+
+memory:
+  personal: none
+  team: none
+
+approvals:
+  ceiling:
+    write: false
+  gates:
+    - match: "files.write"
+      require: plan_approval
+  escalation:
+    route: cli
