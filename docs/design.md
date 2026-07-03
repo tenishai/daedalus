@@ -6,7 +6,7 @@ Daedalus is an open-source agent construction kit: the assembly layer of the
 tenish family. It defines a declarative **agent bundle** (a directory that *is*
 an agent), a small runtime that instantiates bundles, pluggable transports so
 one bundle runs in Slack, over A2A, or headless in CI, and a three-tier
-approval model. A companion GUI (working name **hephaestus**) edits bundles
+approval model. A companion GUI (**kaminos**, Greek for furnace) edits bundles
 the way NeXTSTEP Interface Builder edited nibs: live objects, no codegen.
 
 ## Lineage and clean-room policy
@@ -113,9 +113,10 @@ systems interoperate without translation:
 | 702 | budget exhausted | surface; maybe re-fund |
 | 704 | escalation requested | route to a human |
 
-In-progress/complete/failed are plain A2A Task states, not codes. Lesson
-learned twice over: the reason taxonomy is the durable part; the envelope
-should be someone else's standard.
+In-progress/complete/failed are plain A2A Task states, not codes. This
+taxonomy has already survived one protocol-generation migration (bespoke
+CHP envelope → standard A2A): the reason codes are the durable part; the
+envelope should be someone else's standard.
 
 ### 1.4 Correlation
 
@@ -212,12 +213,12 @@ FastAPI stays at the edge: nothing below a transport imports it.
 Secrets hygiene primitives (mask, placeholder-refusal) ship in core and are
 applied to anything approval-bound or logged.
 
-## 4. hephaestus — the builder GUI (companion repo)
+## 4. kaminos — the builder GUI (companion repo)
 
 Interface Builder for agents. Svelte 5 frontend, FastAPI backend, separate
 repo, talks to daedalus over a local API.
 
-| NeXTSTEP concept | hephaestus |
+| NeXTSTEP concept | kaminos |
 |---|---|
 | Palette | personas, models, transports, tool handlers, memory stores, approval policies, sibling agents |
 | Canvas + outlets/actions | the agent's object graph; drag connections (memory → store, escalation → channel, tool → allowlist) |
@@ -243,12 +244,12 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 
 | Phase | Deliverable |
 |---|---|
-| 0 | this doc reviewed; repos created (tenishai/daedalus, tenishai/hephaestus) |
+| 0 | this doc reviewed; repos created (tenishai/daedalus, tenishai/kaminos) |
 | 1 (v0.1) | bundle spec + loader, core runtime, LiteLLM loop, cli transport, `daedalus create/run/chat`, fakes + goldens |
 | 2 (v0.2) | approvals tiers 1–2, direct MCP `ToolProvider`, techne extra, checkpoints + budget |
 | 3 (v0.3) | a2a transport + card serving, slack transport + tier-3 escalation, limenal extra |
-| 4 (v0.4) | hephaestus: bundle editor (palette/canvas/inspector) + test mode over SSE |
-| 5 (v0.5) | hephaestus live wiring against a running cabal |
+| 4 (v0.4) | kaminos: bundle editor (palette/canvas/inspector) + test mode over SSE |
+| 5 (v0.5) | kaminos live wiring against a running cabal |
 
 ## 7. Open questions
 
@@ -258,6 +259,6 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 - Card signing: adopt cabal's JWS-signed AgentCards from v0.1 or defer until
   the a2a transport lands in v0.3? (Leaning: defer; identity without dispatch
   doesn't need signatures.)
-- hephaestus test-mode process model: run the agent in the GUI backend's
+- kaminos test-mode process model: run the agent in the GUI backend's
   process vs spawn `daedalus run` and attach? (Leaning: spawn-and-attach —
   what you test is what ships.)
