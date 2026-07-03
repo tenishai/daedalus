@@ -251,14 +251,15 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 | 4 (v0.4) | kaminos: bundle editor (palette/canvas/inspector) + test mode over SSE |
 | 5 (v0.5) | kaminos live wiring against a running cabal |
 
-## 7. Open questions
+## 7. Open questions — resolved 2026-07-02
 
-- Team-memory story: wait for techne's `teammem` relocation or spec a
-  `TeamMemory` Protocol now and let techne fill it later? (Leaning: spec later,
-  don't guess the seam.)
-- Card signing: adopt cabal's JWS-signed AgentCards from v0.1 or defer until
-  the a2a transport lands in v0.3? (Leaning: defer; identity without dispatch
-  doesn't need signatures.)
-- kaminos test-mode process model: run the agent in the GUI backend's
-  process vs spawn `daedalus run` and attach? (Leaning: spawn-and-attach —
-  what you test is what ships.)
+- **Team memory: half now, half later.** techne 0.8.0 ships the egress half —
+  the sync outbox with a pluggable `SyncAdapter` Protocol (entry-point
+  extensible). The v0.2 techne extra therefore wires personal memory *and*
+  optionally enables the outbox so curated knowledge ships to a team store.
+  Read-through team recall waits for techne to grow that seam
+  (the `teammem` relocation) rather than daedalus guessing it.
+- **Card signing: deferred to v0.3**, when the a2a transport lands. Identity
+  without dispatch doesn't need signatures; adopt cabal's JWS approach then.
+- **kaminos test mode: spawn-and-attach.** The GUI spawns `daedalus run` and
+  attaches to its SSE stream — what you test is exactly what ships.
