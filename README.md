@@ -15,7 +15,8 @@ Part of the tenish family:
 - **daedalus** — agent construction kit (this repo)
 - kaminos — the builder GUI (companion, coming)
 
-> Status: design. See [docs/design.md](docs/design.md). No usable code yet.
+> Status: v0.1 in progress — bundle loader, core runtime, and cli transport
+> are landing. Design: [docs/design.md](docs/design.md).
 
 ## The idea in one file tree
 
@@ -37,4 +38,4 @@ ever: the bundle is the source of truth, diffable and PR-reviewable.
 
 ## License
 
-Apache-2.0
+[AGPL-3.0-or-later](LICENSE)

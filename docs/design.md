@@ -61,6 +61,7 @@ persona: persona.md
 
 model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string
+  # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192
   budget:
     per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
@@ -178,6 +179,10 @@ arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
 LiteLLM route strings only — no provider SDK imports in core. Per-task token
 budget (reserve → refund), and a client-side circuit breaker so a flaky
 provider degrades all loops together rather than thundering.
+
+Reasoning-model think traces are split out of the reply into
+`LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
+DeepSeek R1 on vLLM). They will feed the kaminos trace pane over SSE.
 
 ### 2.4 Transports
 
