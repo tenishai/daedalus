@@ -11,3 +11,6 @@ build/
 .env
 .DS_Store
 .venv/
+
+# local dogfood bundles — never commit these
+/scout/
