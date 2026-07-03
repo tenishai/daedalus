@@ -1,0 +1,12 @@
+{
+  "name": "greeter",
+  "description": "A tiny golden-test agent that greets people.",
+  "version": "0.1.0",
+  "skills": [
+    {
+      "id": "greet",
+      "name": "Greeting",
+      "description": "Says hello, warmly."
+    }
+  ]
+}
