@@ -49,6 +49,17 @@ async def test_no_memory_default_adds_nothing():
     assert "Recalled context" not in llm.calls[0][0]["content"]
 
 
+def test_model_api_base_flows_into_default_llm(tmp_path):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: openai/some-local-model\n  api_base: http://10.0.0.15:8000/v1\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    agent = Agent.load(tmp_path)  # no llm override — default LiteLLMClient is built
+    assert agent.llm.model == "openai/some-local-model"
+    assert agent.llm.api_base == "http://10.0.0.15:8000/v1"
+
+
 def test_unknown_transport_kind_warns_and_is_skipped(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: telepathy\n  - kind: cli\n"

@@ -68,6 +68,7 @@ class BudgetSpec(BaseModel):
 class ModelSpec(BaseModel):
     id: str
     max_tokens: int = 8192
+    api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
 
 
