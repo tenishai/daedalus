@@ -12,7 +12,7 @@ from daedalus.bundle import BundleError
 from daedalus.llm import LLMError
 from daedalus.scaffold import create_bundle
 from daedalus.task import TaskState
-from daedalus.transports.cli import CliTransport, run_once
+from daedalus.transports.cli import CliApprover, CliTransport, run_once
 
 
 @click.group()
@@ -38,9 +38,9 @@ def create(name: str, parent: str) -> None:
     click.echo(f"  edit {root}/persona.md, then: daedalus chat {root}")
 
 
-def _load(bundle_path: str) -> Agent:
+def _load(bundle_path: str, **overrides) -> Agent:
     try:
-        return Agent.load(bundle_path)
+        return Agent.load(bundle_path, **overrides)
     except BundleError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -71,8 +71,12 @@ def run(bundle_path: str, message: str | None) -> None:
 @main.command()
 @click.argument("bundle_path")
 def chat(bundle_path: str) -> None:
-    """Interactive chat with the bundle, regardless of its declared transports."""
-    agent = _load(bundle_path)
+    """Interactive chat with the bundle, regardless of its declared transports.
+
+    A human is present, so tier-2 gates prompt here; headless `run` keeps
+    the fail-closed DenyAll default.
+    """
+    agent = _load(bundle_path, approver=CliApprover())
     try:
         asyncio.run(CliTransport().serve(agent))
     except KeyboardInterrupt:

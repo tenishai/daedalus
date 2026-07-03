@@ -251,7 +251,8 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 |---|---|
 | 0 | this doc reviewed; repos created (tenishai/daedalus, tenishai/kaminos) |
 | 1 (v0.1) | bundle spec + loader, core runtime, LiteLLM loop, cli transport, `daedalus create/run/chat`, fakes + goldens |
-| 2 (v0.2) | approvals tiers 1–2, direct MCP `ToolProvider`, techne extra, checkpoints + budget |
+| 2a (v0.2) | tool loop, direct MCP `ToolProvider`, approvals tiers 1–2 |
+| 2b (v0.2) | techne extra, checkpoints + budget |
 | 3 (v0.3) | a2a transport + card serving, slack transport + tier-3 escalation, limenal extra |
 | 4 (v0.4) | kaminos: bundle editor (palette/canvas/inspector) + test mode over SSE |
 | 5 (v0.5) | kaminos live wiring against a running cabal |

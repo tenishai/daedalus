@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from daedalus.protocols import Handler
 from daedalus.task import Message, Task, TaskState
+
+
+class CliApprover:
+    """Tier-2 gate approver for interactive sessions: show the plan, ask y/n.
+
+    Headless runs keep the DenyAll default — approval requires a human
+    who is actually present.
+    """
+
+    async def approve(self, action: str, plan: dict) -> bool:
+        print(f"\n[approval required] {action}")
+        print(json.dumps(plan, indent=2, default=str))
+        answer = await asyncio.to_thread(input, "approve? [y/N] ")
+        return answer.strip().lower() in {"y", "yes"}
 
 
 async def run_once(handler: Handler, text: str, *, context_id: str | None = None) -> Task:
