@@ -31,9 +31,12 @@ approvals:
 _PERSONA = """\
 # __NAME__
 
-You are __NAME__. Describe here who this agent is, what it is responsible
-for, and how it should behave. This file is the single persona source —
-every transport uses it.
+You are __NAME__, a helpful assistant. Be concise and direct.
+
+<!-- Replace the line above with this agent's real persona: who it is,
+     what it is responsible for, and how it should behave. This file is
+     the single persona source — every transport uses it. HTML comments
+     like this one are stripped before the persona reaches the model. -->
 """
 
 

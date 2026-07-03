@@ -3,7 +3,9 @@ card: agent-card.json
 persona: persona.md
 
 model:
-  id: ${DAEDALUS_MODEL:-anthropic/claude-sonnet-4-5}
+  model:
+  id: openai/neuralmagic/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic
+  api_base: http://10.0.0.15:8000/v1
   max_tokens: 4096
 
 transports:

@@ -18,6 +18,15 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_persona_comments(persona: str) -> str:
+    """Remove HTML comments — author-facing notes never reach the model.
+
+    A persona file is a prompt: everything else in it ships verbatim.
+    """
+    return _HTML_COMMENT.sub("", persona).strip() + "\n"
 
 
 class BundleError(Exception):
@@ -159,4 +168,9 @@ class Bundle:
         except json.JSONDecodeError as exc:
             raise BundleError(f"{card_file}: invalid JSON — {exc}") from exc
 
-        return cls(path=root, spec=spec, card=card, persona=persona_file.read_text())
+        return cls(
+            path=root,
+            spec=spec,
+            card=card,
+            persona=strip_persona_comments(persona_file.read_text()),
+        )

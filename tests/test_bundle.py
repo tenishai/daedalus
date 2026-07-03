@@ -48,6 +48,29 @@ def test_interpolation_walks_nested_structures():
     assert interpolate(value, env={}) == {"a": ["fallback"], "b": {"c": "other"}, "d": 7}
 
 
+def test_persona_html_comments_never_reach_the_model(tmp_path):
+    (tmp_path / "agent.yaml").write_text("name: x\nmodel:\n  id: m\n")
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text(
+        "You are x.\n\n<!-- author note:\ndelete me -->\n\nBe brief.\n"
+    )
+    persona = Bundle.load(tmp_path).persona
+    assert "author note" not in persona
+    assert "You are x." in persona and "Be brief." in persona
+
+
+def test_scaffolded_persona_is_a_working_prompt(tmp_path):
+    """The fresh-nib rule: a new bundle must not instruct the model to
+    'describe this agent' — that text gets executed (dogfood finding #4)."""
+    from daedalus.scaffold import create_bundle
+
+    create_bundle("fresh", tmp_path)
+    persona = Bundle.load(tmp_path / "fresh").persona
+    assert "<!--" not in persona
+    assert "Describe" not in persona
+    assert "You are fresh" in persona
+
+
 def test_missing_bundle_dir_is_a_bundle_error(tmp_path):
     with pytest.raises(BundleError, match="agent.yaml"):
         Bundle.load(tmp_path / "nope")
