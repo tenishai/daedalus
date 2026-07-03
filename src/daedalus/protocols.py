@@ -16,6 +16,7 @@ from daedalus.task import Task
 @dataclass
 class LLMResponse:
     text: str
+    reasoning: str = ""  # think-trace from reasoning models; never part of the reply
     input_tokens: int = 0
     output_tokens: int = 0
 

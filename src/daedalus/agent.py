@@ -40,7 +40,11 @@ class Agent:
         if llm is None:
             from daedalus.llm import LiteLLMClient
 
-            llm = LiteLLMClient(bundle.spec.model.id, max_tokens=bundle.spec.model.max_tokens)
+            llm = LiteLLMClient(
+                bundle.spec.model.id,
+                max_tokens=bundle.spec.model.max_tokens,
+                api_base=bundle.spec.model.api_base,
+            )
         self.llm = llm
         self.memory = memory if memory is not None else NoMemory()
         self.tools = tools if tools is not None else NoTools()
