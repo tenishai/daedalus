@@ -13,7 +13,7 @@ Part of the tenish family:
 - ladon — secrets
 - gojira — deploy
 - **daedalus** — agent construction kit (this repo)
-- hephaestus — the builder GUI (companion, coming)
+- kaminos — the builder GUI (companion, coming)
 
 > Status: design. See [docs/design.md](docs/design.md). No usable code yet.
 
