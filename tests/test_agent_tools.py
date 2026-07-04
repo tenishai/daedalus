@@ -160,6 +160,27 @@ async def test_runaway_tool_loop_hits_max_steps_and_fails_with_reason(tmp_path):
     assert len(llm.calls) == 10  # ToolsSpec.max_steps default
 
 
+def test_provider_mcp_without_extra_fails_at_load_not_mid_conversation(tmp_path):
+    """Dogfood finding #5: a missing extra must be a startup error with the
+    install command in it — not an 'error:' line on your first greeting."""
+    import importlib.util
+
+    import pytest
+
+    from daedalus.bundle import BundleError
+
+    if importlib.util.find_spec("mcp") is not None:
+        pytest.skip("mcp is installed in this env; load cannot fail")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  provider: mcp\n  servers:\n    - name: git\n      command: [echo]\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    with pytest.raises(BundleError, match=r"daedalus\[mcp\]"):
+        Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+
+
 async def test_provider_exception_becomes_a_tool_result_not_a_crash(tmp_path):
     class ExplodingTools(FakeTools):
         async def call(self, name: str, payload: dict) -> str:
