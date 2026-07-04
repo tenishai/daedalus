@@ -8,7 +8,7 @@ import warnings
 from fnmatch import fnmatch
 from pathlib import Path
 
-from daedalus.bundle import Bundle
+from daedalus.bundle import Bundle, BundleError
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -65,6 +65,13 @@ class Agent:
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
         if spec.provider == "mcp":
+            try:
+                import mcp  # noqa: F401  — fail at load time, not mid-conversation
+            except ImportError as exc:
+                raise BundleError(
+                    "tools.provider is 'mcp' but the mcp extra is not installed — "
+                    "pip install 'daedalus[mcp]'"
+                ) from exc
             from daedalus.tools.mcp import MCPToolProvider
 
             return MCPToolProvider(spec.servers)
