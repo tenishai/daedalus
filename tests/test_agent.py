@@ -60,6 +60,26 @@ def test_model_api_base_flows_into_default_llm(tmp_path):
     assert agent.llm.api_base == "http://10.0.0.15:8000/v1"
 
 
+def test_a2a_transport_wires_with_card_and_options(tmp_path):
+    import pytest
+
+    pytest.importorskip("fastapi")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntransports:\n  - kind: a2a\n    port: 9911\n"
+    )
+    (tmp_path / "agent-card.json").write_text('{"name": "x"}')
+    (tmp_path / "persona.md").write_text("persona")
+    agent = Agent.load(tmp_path, llm=ScriptedLLM())
+    # uvicorn is required to SERVE but not to construct in tests
+    try:
+        transports = agent.transports()
+    except Exception as exc:
+        assert "daedalus[a2a]" in str(exc)
+        return
+    assert transports[0].port == 9911
+    assert transports[0].card == {"name": "x"}
+
+
 def test_unknown_transport_kind_warns_and_is_skipped(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: telepathy\n  - kind: cli\n"
