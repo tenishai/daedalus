@@ -179,9 +179,10 @@ async def test_event_stream_traces_the_whole_tool_turn(tmp_path):
     agent.on_event = events.append
     await agent.handle_task(Task.from_text("read /x"))
     kinds = [e["type"] for e in events]
-    assert kinds == ["reasoning", "tool_call", "tool_result"]
-    assert events[1] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}
-    assert events[2]["content"] == "contents"
+    assert kinds == ["tools_offered", "reasoning", "tool_call", "tool_result"]
+    assert events[0] == {"type": "tools_offered", "names": ["files.read"]}
+    assert events[2] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}
+    assert events[3]["content"] == "contents"
 
 
 async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
