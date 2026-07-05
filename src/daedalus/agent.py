@@ -172,10 +172,11 @@ class Agent:
 
             messages.append(self._assistant_message(response.text, tool_calls))
             for call in tool_calls:
-                self._emit("tool_call", name=call.name, arguments=call.arguments)
+                canonical = by_munged.get(call.name, call.name)  # trace speaks canonical
+                self._emit("tool_call", name=canonical, arguments=call.arguments)
                 result = await self._execute(call, by_munged)
-                self._emit("tool_result", name=call.name, content=result)
-                last_attempt = f"{call.name} -> {result[:200]}"
+                self._emit("tool_result", name=canonical, content=result)
+                last_attempt = f"{canonical} -> {result[:200]}"
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
