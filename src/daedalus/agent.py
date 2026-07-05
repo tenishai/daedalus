@@ -125,6 +125,18 @@ class Agent:
 
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
+        providers: list[ToolProvider] = []
+
+        for key, config in spec.builtin.items():
+            if key != "files":
+                raise BundleError(f"unknown builtin tool group {key!r} (available: files)")
+            from daedalus.tools.builtin import FilesToolProvider
+
+            try:
+                providers.append(FilesToolProvider(**config))
+            except (TypeError, ValueError) as exc:
+                raise BundleError(f"tools.builtin.files: {exc}") from exc
+
         if spec.provider == "mcp":
             try:
                 import mcp  # noqa: F401  — fail at load time, not mid-conversation
@@ -135,10 +147,17 @@ class Agent:
                 ) from exc
             from daedalus.tools.mcp import MCPToolProvider
 
-            return MCPToolProvider(spec.servers)
-        if spec.provider == "limenal":
-            warnings.warn("tools.provider=limenal arrives in v0.3; using none", stacklevel=2)
-        return NoTools()
+            providers.append(MCPToolProvider(spec.servers))
+        elif spec.provider == "limenal":
+            warnings.warn("tools.provider=limenal arrives in v0.3; ignored", stacklevel=2)
+
+        if not providers:
+            return NoTools()
+        if len(providers) == 1:
+            return providers[0]
+        from daedalus.tools.compose import MultiToolProvider
+
+        return MultiToolProvider(providers)
 
     @classmethod
     def load(cls, path: str | Path, **overrides) -> Agent:

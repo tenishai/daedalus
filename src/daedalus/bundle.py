@@ -95,6 +95,7 @@ class TransportSpec(BaseModel):
 class ToolsSpec(BaseModel):
     provider: Literal["none", "mcp", "limenal"] = "none"
     servers: list[dict] = Field(default_factory=list)
+    builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
 
