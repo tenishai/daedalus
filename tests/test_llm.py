@@ -21,3 +21,17 @@ def test_split_reasoning_passes_plain_text_through():
 
 def test_llm_response_reasoning_defaults_empty():
     assert LLMResponse(text="hi").reasoning == ""
+
+
+def test_strip_special_tokens_removes_chatml_leakage():
+    from daedalus.llm import strip_special_tokens
+
+    spew = "answer here\n<|im_start|>\nmore\n<|im_end|><|endoftext|>"
+    assert strip_special_tokens(spew) == "answer here\n\nmore"
+
+
+def test_strip_special_tokens_leaves_normal_text_alone():
+    from daedalus.llm import strip_special_tokens
+
+    text = "a | b, x || y, and a <tag> too"
+    assert strip_special_tokens(text) == text

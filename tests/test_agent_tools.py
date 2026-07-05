@@ -172,14 +172,38 @@ def test_salvage_recovers_qwen_style_text_tool_call():
     assert calls[0].arguments == {"path": "/x"}
 
 
-def test_salvage_ignores_unknown_names_prose_and_malformed_json():
+def test_salvage_ignores_prose_malformed_json_and_non_toolish_names():
     from daedalus.agent import salvage_tool_calls
 
     known = {"files__read"}
-    assert salvage_tool_calls('{"name": "rm__rf", "arguments": {}}', known) == []
     assert salvage_tool_calls("use {braces} casually {in prose", known) == []
     assert salvage_tool_calls('{"name": "files__read", "arguments": "not-a-dict"}', known) == []
     assert salvage_tool_calls('{"name": "files__read"', known) == []  # truncated
+    # a plain name in ordinary JSON is prose, not a tool call
+    assert salvage_tool_calls('{"name": "Bob", "arguments": {}}', known) == []
+
+
+def test_salvage_surfaces_unknown_toolish_names_for_feedback_not_execution():
+    """Finding #8: a hallucinated git__git_ls_files blob must become 'unknown
+    tool' feedback the model can correct from, not the user's final answer.
+    Execution stays gated on the offered map — see the end-to-end test below."""
+    from daedalus.agent import salvage_tool_calls
+
+    calls = salvage_tool_calls('{"name": "git__git_ls_files", "arguments": {}}', {"files__read"})
+    assert len(calls) == 1
+    assert calls[0].name == "git__git_ls_files"
+
+
+def test_salvage_dedupes_repeats_and_caps():
+    from daedalus.agent import _SALVAGE_CAP, salvage_tool_calls
+
+    repeated = '\n<|im_start|>\n'.join(
+        '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
+    )
+    assert len(salvage_tool_calls(repeated, set())) == 1  # 15 identical -> 1
+
+    distinct = "\n".join(f'{{"name": "t__{i}", "arguments": {{}}}}' for i in range(10))
+    assert len(salvage_tool_calls(distinct, set())) == _SALVAGE_CAP
 
 
 async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
@@ -192,6 +216,25 @@ async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
     assert task.state is TaskState.COMPLETED
     assert tools.calls == [("files.read", {"path": "/x"})]
     assert task.agent_text() == "the repo is clean"
+
+
+async def test_degenerate_repeat_blob_becomes_one_feedback_then_recovery(tmp_path):
+    """The full finding-#8 transcript shape: 15 repeated hallucinated calls +
+    special tokens -> ONE 'unknown tool' feedback -> model recovers."""
+    spew = "sorry\n" + "\n<|im_start|>\n".join(
+        '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
+    )
+    llm = ScriptedLLM(LLMResponse(text=spew), "recovered: used the right tool")
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    task = await agent.handle_task(Task.from_text("go"))
+    assert task.state is TaskState.COMPLETED
+    assert tools.calls == []  # hallucinated tool never executed
+    second_call = llm.calls[1]
+    tool_results = [m for m in second_call if m["role"] == "tool"]
+    assert len(tool_results) == 1  # deduped: one feedback, not fifteen
+    assert "unknown or disallowed" in tool_results[0]["content"]
+    assert task.agent_text() == "recovered: used the right tool"
 
 
 async def test_salvage_never_fires_when_no_tools_were_offered(tmp_path):
