@@ -17,16 +17,18 @@ from daedalus.protocols import (
     Approver,
     Budget,
     CheckpointStore,
+    DenyAll,
     Handler,
     MemoryStore,
     NoBudget,
     NoCheckpoints,
     NoMemory,
     NoTools,
+    ToolCall,
     ToolProvider,
     Transport,
 )
-from tests.fakes import CannedMemory, ScriptedLLM
+from tests.fakes import CannedMemory, FakeTools, RecordingApprover, ScriptedLLM
 
 
 def test_public_names_exist():
@@ -45,11 +47,32 @@ def test_noop_defaults_satisfy_their_protocols():
     assert isinstance(NoCheckpoints(), CheckpointStore)
     assert isinstance(NoBudget(), Budget)
     assert isinstance(AllowAll(), Approver)
+    assert isinstance(DenyAll(), Approver)
+    assert ToolCall(id="1", name="a.b", arguments={}).name == "a.b"
 
 
 def test_fakes_satisfy_their_protocols():
     assert isinstance(ScriptedLLM(), LLM)
     assert isinstance(CannedMemory(), MemoryStore)
+    assert isinstance(FakeTools([]), ToolProvider)
+    assert isinstance(RecordingApprover(True), Approver)
+
+
+def test_cli_approver_satisfies_approver_protocol():
+    from daedalus.transports.cli import CliApprover
+
+    assert isinstance(CliApprover(), Approver)
+
+
+def test_mcp_provider_validates_config_without_mcp_installed():
+    import pytest
+
+    from daedalus.tools.mcp import MCPError, MCPToolProvider
+
+    with pytest.raises(MCPError, match="command"):
+        MCPToolProvider([{"name": "broken"}])
+    provider = MCPToolProvider([{"name": "files", "command": ["echo", "hi"]}])
+    assert "files" in provider._configs
 
 
 def test_agent_is_a_handler_and_transports_are_transports():

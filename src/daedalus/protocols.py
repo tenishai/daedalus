@@ -7,25 +7,43 @@ extras and entry points (techne, limenal, slack).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from daedalus.task import Task
 
 
 @dataclass
+class ToolCall:
+    """A model's request to invoke a tool. `name` is exactly what the model
+    said — mapping it back to a real tool is the runtime's job, so a
+    hallucinated name misses the map instead of crashing."""
+
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass
 class LLMResponse:
     text: str
     reasoning: str = ""  # think-trace from reasoning models; never part of the reply
+    tool_calls: list[ToolCall] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
 
 
 @runtime_checkable
 class LLM(Protocol):
-    """Model, max_tokens, etc. are construction-time config, not call args."""
+    """Model, max_tokens, etc. are construction-time config, not call args.
 
-    async def complete(self, messages: list[dict]) -> LLMResponse: ...
+    `tools`, when given, is OpenAI function-tool shaped:
+    [{"type": "function", "function": {"name", "description", "parameters"}}]
+    """
+
+    async def complete(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> LLMResponse: ...
 
 
 @runtime_checkable
@@ -113,7 +131,15 @@ class NoBudget:
 
 
 class AllowAll:
-    """Placeholder approver until gates are enforced in v0.2."""
+    """Explicit opt-out of gate approval. Never the default."""
 
     async def approve(self, action: str, plan: dict) -> bool:
         return True
+
+
+class DenyAll:
+    """The default approver: gates fail closed until a real approver is wired
+    (interactive chat wires a CLI prompt; headless runs stay denied)."""
+
+    async def approve(self, action: str, plan: dict) -> bool:
+        return False

@@ -3,21 +3,84 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import warnings
+from collections.abc import Callable
+from fnmatch import fnmatch
 from pathlib import Path
 
-from daedalus.bundle import Bundle
+from daedalus.bundle import Bundle, BundleError
 from daedalus.protocols import (
     LLM,
+    Approver,
     CheckpointStore,
+    DenyAll,
     MemoryStore,
     NoCheckpoints,
     NoMemory,
     NoTools,
+    ToolCall,
     ToolProvider,
     Transport,
 )
-from daedalus.task import Task, TaskState
+from daedalus.task import ReasonCode, Task, TaskState
+
+
+def _munge(name: str) -> str:
+    """Canonical `server.tool` -> LLM-safe function name (models dislike dots)."""
+    return name.replace(".", "__")
+
+
+_SALVAGE_CAP = 4
+
+
+def _json_objects(text: str):
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start == -1:
+            return
+        try:
+            obj, consumed = decoder.raw_decode(text[start:])
+        except ValueError:
+            index = start + 1
+            continue
+        if isinstance(obj, dict):
+            yield obj
+        index = start + max(consumed, 1)
+
+
+def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
+    """Recover tool calls that local models emit as text instead of structure.
+
+    (Qwen-Coder on vLLM writes {"name": ..., "arguments": ...} inside <tools>
+    tags — mimicking the definition format — so the server parser misses it.)
+
+    Known names get executed. Unknown-but-tool-shaped names (containing '__'
+    or '.') are salvaged too so the loop answers with 'unknown tool' feedback
+    the model can correct from, instead of dumping the blob on the user —
+    execution is still hard-gated on the offered-tool map. Plain prose,
+    malformed JSON, and non-toolish names pass through as text. Duplicates
+    are collapsed (degenerating models repeat themselves) and at most
+    _SALVAGE_CAP calls are taken per reply.
+    """
+    calls: list[ToolCall] = []
+    seen: set[tuple] = set()
+    for obj in _json_objects(text):
+        name, args = obj.get("name"), obj.get("arguments")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            continue
+        if name not in known and "__" not in name and "." not in name:
+            continue
+        key = (name, json.dumps(args, sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append(ToolCall(id=f"salvaged-{len(calls)}", name=name, arguments=args))
+        if len(calls) == _SALVAGE_CAP:
+            return calls
+    return calls
 
 
 class Agent:
@@ -35,6 +98,8 @@ class Agent:
         memory: MemoryStore | None = None,
         tools: ToolProvider | None = None,
         checkpoints: CheckpointStore | None = None,
+        approver: Approver | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ):
         self.bundle = bundle
         if llm is None:
@@ -47,8 +112,52 @@ class Agent:
             )
         self.llm = llm
         self.memory = memory if memory is not None else NoMemory()
-        self.tools = tools if tools is not None else NoTools()
+        self.tools = tools if tools is not None else self._tools_from_spec()
         self.checkpoints = checkpoints if checkpoints is not None else NoCheckpoints()
+        self.approver = approver if approver is not None else DenyAll()
+        self.on_event = on_event
+
+    def _emit(self, event_type: str, **fields) -> None:
+        """The runtime's trace stream: --verbose renders it in the terminal
+        today; the kaminos trace pane consumes it over SSE later."""
+        if self.on_event is not None:
+            self.on_event({"type": event_type, **fields})
+
+    def _tools_from_spec(self) -> ToolProvider:
+        spec = self.bundle.spec.tools
+        providers: list[ToolProvider] = []
+
+        for key, config in spec.builtin.items():
+            if key != "files":
+                raise BundleError(f"unknown builtin tool group {key!r} (available: files)")
+            from daedalus.tools.builtin import FilesToolProvider
+
+            try:
+                providers.append(FilesToolProvider(**config))
+            except (TypeError, ValueError) as exc:
+                raise BundleError(f"tools.builtin.files: {exc}") from exc
+
+        if spec.provider == "mcp":
+            try:
+                import mcp  # noqa: F401  — fail at load time, not mid-conversation
+            except ImportError as exc:
+                raise BundleError(
+                    "tools.provider is 'mcp' but the mcp extra is not installed — "
+                    "pip install 'daedalus[mcp]'"
+                ) from exc
+            from daedalus.tools.mcp import MCPToolProvider
+
+            providers.append(MCPToolProvider(spec.servers))
+        elif spec.provider == "limenal":
+            warnings.warn("tools.provider=limenal arrives in v0.3; ignored", stacklevel=2)
+
+        if not providers:
+            return NoTools()
+        if len(providers) == 1:
+            return providers[0]
+        from daedalus.tools.compose import MultiToolProvider
+
+        return MultiToolProvider(providers)
 
     @classmethod
     def load(cls, path: str | Path, **overrides) -> Agent:
@@ -61,8 +170,102 @@ class Agent:
     async def handle_task(self, task: Task) -> Task:
         task.state = TaskState.WORKING
         recalled = await self.memory.recall(task.user_text())
-        response = await self.llm.complete(self._messages(task, recalled))
-        return task.reply(response.text)
+        messages = self._messages(task, recalled)
+
+        allowed = await self._allowed_tools()
+        self._emit("tools_offered", names=[spec["name"] for spec in allowed])
+        llm_tools = [self._to_openai(spec) for spec in allowed] or None
+        by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
+
+        last_attempt = ""
+        for _ in range(self.bundle.spec.tools.max_steps):
+            response = await self.llm.complete(messages, tools=llm_tools)
+            if response.reasoning:
+                self._emit("reasoning", text=response.reasoning)
+            tool_calls = response.tool_calls
+            if not tool_calls and llm_tools:
+                tool_calls = salvage_tool_calls(response.text, set(by_munged))
+                if tool_calls:
+                    self._emit("salvage", count=len(tool_calls))
+            if not tool_calls:
+                return task.reply(response.text)
+
+            messages.append(self._assistant_message(response.text, tool_calls))
+            for call in tool_calls:
+                canonical = by_munged.get(call.name, call.name)  # trace speaks canonical
+                self._emit("tool_call", name=canonical, arguments=call.arguments)
+                result = await self._execute(call, by_munged)
+                self._emit("tool_result", name=canonical, content=result)
+                last_attempt = f"{canonical} -> {result[:200]}"
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result}
+                )
+
+        detail = f"; last attempt: {last_attempt}" if last_attempt else ""
+        return task.reply(
+            f"stopped: exceeded tools.max_steps "
+            f"({self.bundle.spec.tools.max_steps}){detail}",
+            state=TaskState.FAILED,
+            reason=ReasonCode.POLICY_VIOLATION,
+        )
+
+    async def _allowed_tools(self) -> list[dict]:
+        """Tier-1 ceiling, enforced at listing: the model never sees a tool it
+        can't call. Empty allowlist = deny everything (fail closed)."""
+        allow = self.bundle.spec.tools.allow
+        if not allow:
+            return []
+        return [
+            spec
+            for spec in await self.tools.tools()
+            if any(fnmatch(spec["name"], pattern) for pattern in allow)
+        ]
+
+    async def _execute(self, call: ToolCall, by_munged: dict[str, str]) -> str:
+        """Tier-1 re-checked at call time (a hallucinated name misses the map),
+        then tier-2 gates, then the provider."""
+        name = by_munged.get(call.name)
+        if name is None:
+            return f"error: unknown or disallowed tool {call.name!r}"
+
+        gate = next(
+            (g for g in self.bundle.spec.approvals.gates if fnmatch(name, g.match)), None
+        )
+        if gate is not None:
+            plan = {"tool": name, "arguments": call.arguments, "require": gate.require}
+            if not await self.approver.approve(name, plan):
+                return f"blocked: {name} requires approval ({gate.require}) and it was denied"
+
+        try:
+            return await self.tools.call(name, call.arguments)
+        except Exception as exc:
+            return f"tool error: {exc}"
+
+    @staticmethod
+    def _to_openai(spec: dict) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": _munge(spec["name"]),
+                "description": spec.get("description", ""),
+                "parameters": spec.get("parameters", {"type": "object", "properties": {}}),
+            },
+        }
+
+    @staticmethod
+    def _assistant_message(text: str, tool_calls: list[ToolCall]) -> dict:
+        return {
+            "role": "assistant",
+            "content": text or None,
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+                }
+                for call in tool_calls
+            ],
+        }
 
     def _messages(self, task: Task, recalled: list[str]) -> list[dict]:
         system = self.bundle.persona
@@ -88,8 +291,21 @@ class Agent:
                 )
         return built
 
+    async def aclose(self) -> None:
+        """Close closable collaborators from the task that used them —
+        MCP stdio sessions object loudly to cross-task teardown."""
+        closer = getattr(self.tools, "aclose", None)
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:  # teardown must never mask the real work
+                pass
+
     async def serve(self) -> None:
         transports = self.transports()
         if not transports:
             raise RuntimeError("no usable transports declared in agent.yaml")
-        await asyncio.gather(*(transport.serve(self) for transport in transports))
+        try:
+            await asyncio.gather(*(transport.serve(self) for transport in transports))
+        finally:
+            await self.aclose()

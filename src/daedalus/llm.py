@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from daedalus.protocols import LLMResponse
+import json
+import re
+
+from daedalus.protocols import LLMResponse, ToolCall
 
 
 class LLMError(RuntimeError):
@@ -11,6 +14,13 @@ class LLMError(RuntimeError):
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+_SPECIAL_TOKEN = re.compile(r"<\|[^|>]{1,32}\|>")
+
+
+def strip_special_tokens(text: str) -> str:
+    """Remove chat-format special tokens (<|im_start|>, <|endoftext|>, ...)
+    that degenerating local models leak into their output."""
+    return _SPECIAL_TOKEN.sub("", text).strip()
 
 
 def split_reasoning(text: str) -> tuple[str, str]:
@@ -32,7 +42,9 @@ class LiteLLMClient:
         self.max_tokens = max_tokens
         self.api_base = api_base
 
-    async def complete(self, messages: list[dict]) -> LLMResponse:
+    async def complete(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> LLMResponse:
         try:
             import litellm
         except ImportError as exc:  # pragma: no cover
@@ -41,6 +53,8 @@ class LiteLLMClient:
         kwargs: dict = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if tools:
+            kwargs["tools"] = tools
         try:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:
@@ -51,11 +65,21 @@ class LiteLLMClient:
         text = message.content or ""
         if not reasoning:
             reasoning, text = split_reasoning(text)
+        text = strip_special_tokens(text)
+
+        tool_calls = []
+        for raw in getattr(message, "tool_calls", None) or []:
+            try:
+                arguments = json.loads(raw.function.arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw.function.arguments}
+            tool_calls.append(ToolCall(id=raw.id, name=raw.function.name, arguments=arguments))
 
         usage = getattr(response, "usage", None)
         return LLMResponse(
             text=text,
             reasoning=reasoning,
+            tool_calls=tool_calls,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
         )
