@@ -70,11 +70,11 @@ class _WarnExtra(BaseModel):
         return self
 
 
-class BudgetSpec(BaseModel):
+class BudgetSpec(_WarnExtra):
     per_task_tokens: int | None = None
 
 
-class ModelSpec(BaseModel):
+class ModelSpec(_WarnExtra):
     id: str
     max_tokens: int = 8192
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
@@ -92,13 +92,15 @@ class TransportSpec(BaseModel):
         return dict(self.__pydantic_extra__ or {})
 
 
-class ToolsSpec(BaseModel):
+class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "limenal"] = "none"
     servers: list[dict] = Field(default_factory=list)
-    allow: list[str] = Field(default_factory=list)
+    builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
+    allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
+    max_steps: int = 10
 
 
-class MemorySpec(BaseModel):
+class MemorySpec(_WarnExtra):
     personal: Literal["none", "techne"] = "none"
     team: Literal["none", "outbox"] = "none"
 
@@ -110,16 +112,16 @@ class CeilingSpec(BaseModel):
     hosts: list[str] | None = None
 
 
-class GateSpec(BaseModel):
+class GateSpec(_WarnExtra):
     match: str
     require: str = "plan_approval"
 
 
-class EscalationSpec(BaseModel):
+class EscalationSpec(_WarnExtra):
     route: str = "cli"
 
 
-class ApprovalsSpec(BaseModel):
+class ApprovalsSpec(_WarnExtra):
     ceiling: CeilingSpec = Field(default_factory=CeilingSpec)
     gates: list[GateSpec] = Field(default_factory=list)
     escalation: EscalationSpec = Field(default_factory=EscalationSpec)
