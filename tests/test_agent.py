@@ -80,6 +80,35 @@ def test_a2a_transport_wires_with_card_and_options(tmp_path):
     assert transports[0].card == {"name": "x"}
 
 
+def test_slack_transport_requires_channel_and_extra(tmp_path):
+    import importlib.util
+
+    import pytest
+
+    from daedalus.bundle import BundleError
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntransports:\n  - kind: slack\n    channel: C0123\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    agent = Agent.load(tmp_path, llm=ScriptedLLM())
+    if importlib.util.find_spec("slack_sdk") is None:
+        with pytest.raises(BundleError, match=r"daedalus\[slack\]"):
+            agent.transports()
+    else:
+        transport = agent.transports()[0]
+        assert transport.channel == "C0123"
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntransports:\n  - kind: slack\n"
+    )
+    agent2 = Agent.load(tmp_path, llm=ScriptedLLM())
+    if importlib.util.find_spec("slack_sdk") is not None:
+        with pytest.raises(BundleError, match="channel"):
+            agent2.transports()
+
+
 def test_unknown_transport_kind_warns_and_is_skipped(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: telepathy\n  - kind: cli\n"
