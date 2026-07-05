@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import warnings
+from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -98,6 +99,7 @@ class Agent:
         tools: ToolProvider | None = None,
         checkpoints: CheckpointStore | None = None,
         approver: Approver | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ):
         self.bundle = bundle
         if llm is None:
@@ -113,6 +115,13 @@ class Agent:
         self.tools = tools if tools is not None else self._tools_from_spec()
         self.checkpoints = checkpoints if checkpoints is not None else NoCheckpoints()
         self.approver = approver if approver is not None else DenyAll()
+        self.on_event = on_event
+
+    def _emit(self, event_type: str, **fields) -> None:
+        """The runtime's trace stream: --verbose renders it in the terminal
+        today; the kaminos trace pane consumes it over SSE later."""
+        if self.on_event is not None:
+            self.on_event({"type": event_type, **fields})
 
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
@@ -148,23 +157,33 @@ class Agent:
         llm_tools = [self._to_openai(spec) for spec in allowed] or None
         by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
 
+        last_attempt = ""
         for _ in range(self.bundle.spec.tools.max_steps):
             response = await self.llm.complete(messages, tools=llm_tools)
+            if response.reasoning:
+                self._emit("reasoning", text=response.reasoning)
             tool_calls = response.tool_calls
             if not tool_calls and llm_tools:
                 tool_calls = salvage_tool_calls(response.text, set(by_munged))
+                if tool_calls:
+                    self._emit("salvage", count=len(tool_calls))
             if not tool_calls:
                 return task.reply(response.text)
 
             messages.append(self._assistant_message(response.text, tool_calls))
             for call in tool_calls:
+                self._emit("tool_call", name=call.name, arguments=call.arguments)
                 result = await self._execute(call, by_munged)
+                self._emit("tool_result", name=call.name, content=result)
+                last_attempt = f"{call.name} -> {result[:200]}"
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
 
+        detail = f"; last attempt: {last_attempt}" if last_attempt else ""
         return task.reply(
-            f"stopped: exceeded tools.max_steps ({self.bundle.spec.tools.max_steps})",
+            f"stopped: exceeded tools.max_steps "
+            f"({self.bundle.spec.tools.max_steps}){detail}",
             state=TaskState.FAILED,
             reason=ReasonCode.POLICY_VIOLATION,
         )

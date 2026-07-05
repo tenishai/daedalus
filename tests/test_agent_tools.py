@@ -153,11 +153,46 @@ async def test_runaway_tool_loop_hits_max_steps_and_fails_with_reason(tmp_path):
         tool_turn(ToolCall(id=str(i), name="files__read", arguments={})) for i in range(99)
     ]
     llm = ScriptedLLM(*forever)
-    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]))
+    tools = FakeTools([READ_SPEC], {"files.read": "the same thing again"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
     task = await agent.handle_task(Task.from_text("loop"))
     assert task.state is TaskState.FAILED
     assert task.reason_code is ReasonCode.POLICY_VIOLATION
     assert len(llm.calls) == 10  # ToolsSpec.max_steps default
+    # finding #9: the failure says what was last tried, not just that it stopped
+    assert "last attempt: files.read -> the same thing again" in task.agent_text()
+
+
+async def test_event_stream_traces_the_whole_tool_turn(tmp_path):
+    """Finding #9: the on_event seam — cli --verbose today, kaminos SSE later."""
+    llm = ScriptedLLM(
+        LLMResponse(
+            text="",
+            reasoning="I should read the file",
+            tool_calls=[ToolCall(id="1", name="files__read", arguments={"path": "/x"})],
+        ),
+        "done",
+    )
+    events: list[dict] = []
+    tools = FakeTools([READ_SPEC], {"files.read": "contents"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("read /x"))
+    kinds = [e["type"] for e in events]
+    assert kinds == ["reasoning", "tool_call", "tool_result"]
+    assert events[1] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}
+    assert events[2]["content"] == "contents"
+
+
+async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "done")
+    events: list[dict] = []
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC])
+    )
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("go"))
+    assert {"type": "salvage", "count": 1} in events
 
 
 QWEN_LEAK = '<tools>\n{"name": "files__read", "arguments": {"path": "/x"}}\n</tools>'
