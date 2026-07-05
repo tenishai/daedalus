@@ -96,6 +96,20 @@ def test_unknown_top_level_field_warns_but_loads(tmp_path):
     assert any("from_the_future" in str(w.message) for w in caught)
 
 
+def test_unknown_nested_field_warns_too(tmp_path):
+    """Finding #11: a trace line pasted into tools: was silently ignored.
+    Nested sections warn on unknown keys like the top level does."""
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  offering: git.git_status\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Bundle.load(tmp_path)
+    assert any("offering" in str(w.message) for w in caught)
+
+
 def test_transport_extras_are_options_not_warnings(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: slack\n    channel: '#ops'\n"
