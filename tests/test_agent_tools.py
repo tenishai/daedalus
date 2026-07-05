@@ -302,6 +302,19 @@ async def test_builtin_files_wires_from_agent_yaml_alone(tmp_path):
     assert "bundle-visible content" in llm.calls[1][-1]["content"]
 
 
+async def test_aclose_reaches_closable_providers(tmp_path):
+    class ClosableTools(FakeTools):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    tools = ClosableTools([READ_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read"], tools=tools)
+    await agent.aclose()
+    assert tools.closed
+
+
 def test_unknown_builtin_group_fails_at_load(tmp_path):
     from daedalus.bundle import BundleError
 

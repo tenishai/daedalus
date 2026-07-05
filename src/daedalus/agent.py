@@ -291,8 +291,21 @@ class Agent:
                 )
         return built
 
+    async def aclose(self) -> None:
+        """Close closable collaborators from the task that used them —
+        MCP stdio sessions object loudly to cross-task teardown."""
+        closer = getattr(self.tools, "aclose", None)
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:  # teardown must never mask the real work
+                pass
+
     async def serve(self) -> None:
         transports = self.transports()
         if not transports:
             raise RuntimeError("no usable transports declared in agent.yaml")
-        await asyncio.gather(*(transport.serve(self) for transport in transports))
+        try:
+            await asyncio.gather(*(transport.serve(self) for transport in transports))
+        finally:
+            await self.aclose()
