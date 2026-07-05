@@ -282,6 +282,39 @@ async def test_salvage_never_fires_when_no_tools_were_offered(tmp_path):
     assert "<tools>" in task.agent_text()  # passed through as plain text
 
 
+async def test_builtin_files_wires_from_agent_yaml_alone(tmp_path):
+    """provider: none + builtin files must yield working read tools (finding #10)."""
+    (tmp_path / "notes.txt").write_text("bundle-visible content")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  provider: none\n"
+        f"  builtin:\n    files:\n      roots: ['{tmp_path}']\n"
+        "  allow: ['files.*']\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    call = ToolCall(id="1", name="files__read", arguments={"path": str(tmp_path / "notes.txt")})
+    llm = ScriptedLLM(tool_turn(call), "read it")
+    agent = Agent(Bundle.load(tmp_path), llm=llm)
+    task = await agent.handle_task(Task.from_text("read notes"))
+    assert task.state is TaskState.COMPLETED
+    assert "bundle-visible content" in llm.calls[1][-1]["content"]
+
+
+def test_unknown_builtin_group_fails_at_load(tmp_path):
+    from daedalus.bundle import BundleError
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  builtin:\n    filez: {roots: ['/tmp']}\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    import pytest
+
+    with pytest.raises(BundleError, match="filez"):
+        Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+
+
 def test_provider_mcp_without_extra_fails_at_load_not_mid_conversation(tmp_path):
     """Dogfood finding #5: a missing extra must be a startup error with the
     install command in it — not an 'error:' line on your first greeting."""
