@@ -64,6 +64,10 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [think] {_short(event['text'])}")
     elif kind == "salvage":
         click.echo(f"  [salvage] recovered {event['count']} text-leaked tool call(s)")
+    elif kind == "recall":
+        click.echo(f"  [memory] recalled {event['count']} item(s)")
+    elif kind == "budget":
+        click.echo(f"  [budget] -{event['spent']} tokens, {event['remaining']} remaining")
 
 
 @main.command()
