@@ -353,6 +353,25 @@ class Agent:
         for spec in self.bundle.spec.transports:
             if spec.kind == "cli":
                 built.append(CliTransport())
+            elif spec.kind == "a2a":
+                try:
+                    import fastapi  # noqa: F401
+                    import uvicorn  # noqa: F401
+                except ImportError as exc:
+                    raise BundleError(
+                        "transport 'a2a' requires the a2a extra — "
+                        "pip install 'daedalus[a2a]'"
+                    ) from exc
+                from daedalus.transports.a2a import A2aTransport
+
+                options = spec.options()
+                built.append(
+                    A2aTransport(
+                        card=self.bundle.card,
+                        host=str(options.get("host", "127.0.0.1")),
+                        port=int(options.get("port", 9200)),
+                    )
+                )
             else:
                 warnings.warn(
                     f"transport {spec.kind!r} is not available in this version; skipping",
