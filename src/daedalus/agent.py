@@ -30,6 +30,37 @@ def _munge(name: str) -> str:
     return name.replace(".", "__")
 
 
+def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
+    """Recover tool calls that local models emit as text instead of structure.
+
+    (Qwen-Coder on vLLM writes {"name": ..., "arguments": ...} inside <tools>
+    tags — mimicking the definition format — so the server parser misses it.)
+    Only a JSON object whose "name" exactly matches a tool offered THIS turn
+    is salvaged; anything else is just prose. Fail-closed by construction.
+    """
+    calls: list[ToolCall] = []
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start == -1:
+            return calls
+        try:
+            obj, consumed = decoder.raw_decode(text[start:])
+        except ValueError:
+            index = start + 1
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("name") in known
+            and isinstance(obj.get("arguments"), dict)
+        ):
+            calls.append(
+                ToolCall(id=f"salvaged-{len(calls)}", name=obj["name"], arguments=obj["arguments"])
+            )
+        index = start + max(consumed, 1)
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -98,11 +129,14 @@ class Agent:
 
         for _ in range(self.bundle.spec.tools.max_steps):
             response = await self.llm.complete(messages, tools=llm_tools)
-            if not response.tool_calls:
+            tool_calls = response.tool_calls
+            if not tool_calls and llm_tools:
+                tool_calls = salvage_tool_calls(response.text, set(by_munged))
+            if not tool_calls:
                 return task.reply(response.text)
 
-            messages.append(self._assistant_message(response))
-            for call in response.tool_calls:
+            messages.append(self._assistant_message(response.text, tool_calls))
+            for call in tool_calls:
                 result = await self._execute(call, by_munged)
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
@@ -158,17 +192,17 @@ class Agent:
         }
 
     @staticmethod
-    def _assistant_message(response) -> dict:
+    def _assistant_message(text: str, tool_calls: list[ToolCall]) -> dict:
         return {
             "role": "assistant",
-            "content": response.text or None,
+            "content": text or None,
             "tool_calls": [
                 {
                     "id": call.id,
                     "type": "function",
                     "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
                 }
-                for call in response.tool_calls
+                for call in tool_calls
             ],
         }
 
