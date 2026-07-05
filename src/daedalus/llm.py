@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from daedalus.protocols import LLMResponse, ToolCall
 
@@ -13,6 +14,13 @@ class LLMError(RuntimeError):
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+_SPECIAL_TOKEN = re.compile(r"<\|[^|>]{1,32}\|>")
+
+
+def strip_special_tokens(text: str) -> str:
+    """Remove chat-format special tokens (<|im_start|>, <|endoftext|>, ...)
+    that degenerating local models leak into their output."""
+    return _SPECIAL_TOKEN.sub("", text).strip()
 
 
 def split_reasoning(text: str) -> tuple[str, str]:
@@ -57,6 +65,7 @@ class LiteLLMClient:
         text = message.content or ""
         if not reasoning:
             reasoning, text = split_reasoning(text)
+        text = strip_special_tokens(text)
 
         tool_calls = []
         for raw in getattr(message, "tool_calls", None) or []:

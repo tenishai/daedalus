@@ -30,35 +30,56 @@ def _munge(name: str) -> str:
     return name.replace(".", "__")
 
 
-def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
-    """Recover tool calls that local models emit as text instead of structure.
+_SALVAGE_CAP = 4
 
-    (Qwen-Coder on vLLM writes {"name": ..., "arguments": ...} inside <tools>
-    tags — mimicking the definition format — so the server parser misses it.)
-    Only a JSON object whose "name" exactly matches a tool offered THIS turn
-    is salvaged; anything else is just prose. Fail-closed by construction.
-    """
-    calls: list[ToolCall] = []
+
+def _json_objects(text: str):
     decoder = json.JSONDecoder()
     index = 0
     while True:
         start = text.find("{", index)
         if start == -1:
-            return calls
+            return
         try:
             obj, consumed = decoder.raw_decode(text[start:])
         except ValueError:
             index = start + 1
             continue
-        if (
-            isinstance(obj, dict)
-            and obj.get("name") in known
-            and isinstance(obj.get("arguments"), dict)
-        ):
-            calls.append(
-                ToolCall(id=f"salvaged-{len(calls)}", name=obj["name"], arguments=obj["arguments"])
-            )
+        if isinstance(obj, dict):
+            yield obj
         index = start + max(consumed, 1)
+
+
+def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
+    """Recover tool calls that local models emit as text instead of structure.
+
+    (Qwen-Coder on vLLM writes {"name": ..., "arguments": ...} inside <tools>
+    tags — mimicking the definition format — so the server parser misses it.)
+
+    Known names get executed. Unknown-but-tool-shaped names (containing '__'
+    or '.') are salvaged too so the loop answers with 'unknown tool' feedback
+    the model can correct from, instead of dumping the blob on the user —
+    execution is still hard-gated on the offered-tool map. Plain prose,
+    malformed JSON, and non-toolish names pass through as text. Duplicates
+    are collapsed (degenerating models repeat themselves) and at most
+    _SALVAGE_CAP calls are taken per reply.
+    """
+    calls: list[ToolCall] = []
+    seen: set[tuple] = set()
+    for obj in _json_objects(text):
+        name, args = obj.get("name"), obj.get("arguments")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            continue
+        if name not in known and "__" not in name and "." not in name:
+            continue
+        key = (name, json.dumps(args, sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append(ToolCall(id=f"salvaged-{len(calls)}", name=name, arguments=args))
+        if len(calls) == _SALVAGE_CAP:
+            return calls
+    return calls
 
 
 class Agent:
