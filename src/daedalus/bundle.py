@@ -102,6 +102,7 @@ class ToolsSpec(_WarnExtra):
 
 class MemorySpec(_WarnExtra):
     personal: Literal["none", "techne"] = "none"
+    home: str | None = None  # techne home dir; default is techne's own (~/.techne)
     team: Literal["none", "outbox"] = "none"
 
 
@@ -137,6 +138,7 @@ class AgentSpec(_WarnExtra):
     transports: list[TransportSpec] = Field(default_factory=lambda: [TransportSpec(kind="cli")])
     tools: ToolsSpec = Field(default_factory=ToolsSpec)
     memory: MemorySpec = Field(default_factory=MemorySpec)
+    checkpoints: Literal["none", "sqlite"] = "none"
     approvals: ApprovalsSpec = Field(default_factory=ApprovalsSpec)
 
 
