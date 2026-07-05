@@ -44,6 +44,44 @@ def test_run_one_shot_prints_reply(tmp_path, monkeypatch):
     assert "scout reporting in" in result.output
 
 
+def test_run_verbose_prints_tool_trace(tmp_path, monkeypatch):
+    from daedalus.protocols import LLMResponse, ToolCall
+    from tests.fakes import FakeTools
+
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    bundle_dir = tmp_path / "scout"
+    agent_yaml = bundle_dir / "agent.yaml"
+    agent_yaml.write_text(
+        agent_yaml.read_text().replace(
+            "tools:\n  provider: none",
+            "tools:\n  provider: none\n  allow: ['files.*']",
+        )
+    )
+    real_load = Agent.load.__func__
+
+    def load_with_fakes(cls, path, **overrides):
+        overrides.setdefault(
+            "llm",
+            ScriptedLLM(
+                LLMResponse(
+                    text="", tool_calls=[ToolCall(id="1", name="files__read", arguments={})]
+                ),
+                "all done",
+            ),
+        )
+        overrides.setdefault(
+            "tools", FakeTools([{"name": "files.read", "description": "", "parameters": {}}])
+        )
+        return real_load(cls, path, **overrides)
+
+    monkeypatch.setattr(Agent, "load", classmethod(load_with_fakes))
+    result = CliRunner().invoke(main, ["run", str(bundle_dir), "-m", "read it", "-v"])
+    assert result.exit_code == 0, result.output
+    assert "[tool] → files.read" in result.output
+    assert "[tool] ←" in result.output
+    assert "all done" in result.output
+
+
 def test_run_on_a_non_bundle_is_a_clean_error(tmp_path):
     result = CliRunner().invoke(main, ["run", str(tmp_path), "-m", "hi"])
     assert result.exit_code != 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import click
 
@@ -45,12 +46,30 @@ def _load(bundle_path: str, **overrides) -> Agent:
         raise click.ClickException(str(exc)) from exc
 
 
+def _short(text: str, limit: int = 200) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _print_event(event: dict) -> None:
+    kind = event["type"]
+    if kind == "tool_call":
+        click.echo(f"  [tool] → {event['name']} {_short(json.dumps(event['arguments']))}")
+    elif kind == "tool_result":
+        click.echo(f"  [tool] ← {_short(event['content'])}")
+    elif kind == "reasoning":
+        click.echo(f"  [think] {_short(event['text'])}")
+    elif kind == "salvage":
+        click.echo(f"  [salvage] recovered {event['count']} text-leaked tool call(s)")
+
+
 @main.command()
 @click.argument("bundle_path")
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
-def run(bundle_path: str, message: str | None) -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Trace tool calls, results, and reasoning.")
+def run(bundle_path: str, message: str | None, verbose: bool) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
-    agent = _load(bundle_path)
+    agent = _load(bundle_path, on_event=_print_event if verbose else None)
     if message is not None:
         try:
             task = asyncio.run(run_once(agent, message))
@@ -70,13 +89,18 @@ def run(bundle_path: str, message: str | None) -> None:
 
 @main.command()
 @click.argument("bundle_path")
-def chat(bundle_path: str) -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Trace tool calls, results, and reasoning.")
+def chat(bundle_path: str, verbose: bool) -> None:
     """Interactive chat with the bundle, regardless of its declared transports.
 
     A human is present, so tier-2 gates prompt here; headless `run` keeps
     the fail-closed DenyAll default.
     """
-    agent = _load(bundle_path, approver=CliApprover())
+    agent = _load(
+        bundle_path,
+        approver=CliApprover(),
+        on_event=_print_event if verbose else None,
+    )
     try:
         asyncio.run(CliTransport().serve(agent))
     except KeyboardInterrupt:
