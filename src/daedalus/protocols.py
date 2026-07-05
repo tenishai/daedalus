@@ -85,9 +85,9 @@ class CheckpointStore(Protocol):
 
 @runtime_checkable
 class Budget(Protocol):
-    def reserve(self, tokens: int) -> None: ...
+    def spend(self, tokens: int) -> None: ...
 
-    def refund(self, tokens: int) -> None: ...
+    def remaining(self) -> int | None: ...  # None = unlimited
 
 
 @runtime_checkable
@@ -123,10 +123,10 @@ class NoCheckpoints:
 
 
 class NoBudget:
-    def reserve(self, tokens: int) -> None:
+    def spend(self, tokens: int) -> None:
         return None
 
-    def refund(self, tokens: int) -> None:
+    def remaining(self) -> int | None:
         return None
 
 
