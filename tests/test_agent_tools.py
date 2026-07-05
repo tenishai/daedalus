@@ -329,6 +329,24 @@ def test_unknown_builtin_group_fails_at_load(tmp_path):
         Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
 
 
+async def test_mcp_worker_boot_failure_surfaces_as_mcp_error():
+    """Finding #13: session lifecycle lives in a worker task. Without the mcp
+    package the worker's boot failure must surface as a clean MCPError."""
+    import importlib.util
+
+    import pytest
+
+    from daedalus.tools.mcp import MCPError, MCPToolProvider
+
+    if importlib.util.find_spec("mcp") is not None:
+        pytest.skip("mcp is installed; boot cannot fail this way")
+    provider = MCPToolProvider([{"name": "git", "command": ["echo", "hi"]}])
+    with pytest.raises(MCPError, match=r"daedalus\[mcp\]"):
+        await provider.tools()
+    await provider.aclose()  # idempotent, no worker left behind
+    await provider.aclose()
+
+
 def test_provider_mcp_without_extra_fails_at_load_not_mid_conversation(tmp_path):
     """Dogfood finding #5: a missing extra must be a startup error with the
     install command in it — not an 'error:' line on your first greeting."""

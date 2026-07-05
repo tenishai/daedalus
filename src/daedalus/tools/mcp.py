@@ -1,11 +1,17 @@
 """Direct-MCP tool provider — stdio servers declared in agent.yaml.
 
 Tool names are canonical `server.tool`. Requires the `mcp` extra:
-pip install daedalus[mcp]. The limenal gateway provider arrives in v0.3.
+pip install 'daedalus[mcp]'. The limenal gateway provider arrives in v0.3.
+
+Session lifecycle is owned by a dedicated worker task: MCP's stdio client
+opens anyio cancel scopes that must enter and exit in the SAME task, and
+REPL cancellation (Ctrl-C) or interpreter shutdown would otherwise tear
+them down cross-task (dogfood finding #13).
 """
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import AsyncExitStack
 
 
@@ -14,7 +20,8 @@ class MCPError(RuntimeError):
 
 
 class MCPToolProvider:
-    """One stdio session per configured server, started lazily on first use.
+    """One stdio session per configured server, all started (and stopped)
+    inside a single worker task on first use.
 
     servers: [{name: files, command: ["npx", "@modelcontextprotocol/..."],
                env: {...}}, ...]  — `name` defaults to server<N>.
@@ -28,32 +35,53 @@ class MCPToolProvider:
                 raise MCPError(f"mcp server {name!r}: 'command' is required")
             self._configs[name] = server
         self._sessions: dict = {}
-        self._stack: AsyncExitStack | None = None
+        self._worker: asyncio.Task | None = None
+        self._ready: asyncio.Event | None = None
+        self._shutdown: asyncio.Event | None = None
+        self._boot_error: BaseException | None = None
 
-    async def _session(self, name: str):
+    async def _run(self) -> None:
+        """The worker: enter every session, hold, exit — all in this task."""
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-        except ImportError as exc:  # pragma: no cover
-            raise MCPError("mcp is not installed — pip install 'daedalus[mcp]'") from exc
 
-        if name in self._sessions:
-            return self._sessions[name]
-        config = self._configs[name]
-        if self._stack is None:
-            self._stack = AsyncExitStack()
-        command, *args = config["command"]
-        params = StdioServerParameters(command=command, args=args, env=config.get("env"))
-        read, write = await self._stack.enter_async_context(stdio_client(params))
-        session = await self._stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        self._sessions[name] = session
-        return session
+            async with AsyncExitStack() as stack:
+                for name, config in self._configs.items():
+                    command, *args = config["command"]
+                    params = StdioServerParameters(
+                        command=command, args=args, env=config.get("env")
+                    )
+                    read, write = await stack.enter_async_context(stdio_client(params))
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    self._sessions[name] = session
+                self._ready.set()
+                await self._shutdown.wait()
+        except BaseException as exc:
+            self._boot_error = exc
+            raise
+        finally:
+            self._sessions.clear()
+            self._ready.set()  # unblock waiters even on failure
+
+    async def _ensure_started(self) -> None:
+        if self._worker is None:
+            self._ready = asyncio.Event()
+            self._shutdown = asyncio.Event()
+            self._worker = asyncio.create_task(self._run(), name="mcp-sessions")
+        await self._ready.wait()
+        if self._boot_error is not None:
+            if isinstance(self._boot_error, ImportError):
+                raise MCPError(
+                    "mcp is not installed — pip install 'daedalus[mcp]'"
+                ) from self._boot_error
+            raise MCPError(f"mcp sessions failed to start: {self._boot_error}")
 
     async def tools(self) -> list[dict]:
+        await self._ensure_started()
         specs: list[dict] = []
-        for name in self._configs:
-            session = await self._session(name)
+        for name, session in self._sessions.items():
             listed = await session.list_tools()
             for tool in listed.tools:
                 specs.append(
@@ -67,10 +95,11 @@ class MCPToolProvider:
         return specs
 
     async def call(self, name: str, payload: dict) -> str:
+        await self._ensure_started()
         server, _, tool = name.partition(".")
-        if server not in self._configs or not tool:
+        if server not in self._sessions or not tool:
             raise MCPError(f"unknown tool {name!r}")
-        session = await self._session(server)
+        session = self._sessions[server]
         result = await session.call_tool(tool, payload)
         parts = [c.text for c in result.content if getattr(c, "text", None)]
         text = "\n".join(parts) if parts else "(no text content)"
@@ -79,7 +108,12 @@ class MCPToolProvider:
         return text
 
     async def aclose(self) -> None:
-        if self._stack is not None:
-            await self._stack.aclose()
-            self._stack = None
-            self._sessions.clear()
+        if self._worker is None:
+            return
+        self._shutdown.set()
+        try:
+            await self._worker
+        except BaseException:
+            pass  # teardown must never mask the real work
+        self._worker = None
+        self._boot_error = None
