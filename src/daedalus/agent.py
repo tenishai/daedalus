@@ -173,6 +173,7 @@ class Agent:
         messages = self._messages(task, recalled)
 
         allowed = await self._allowed_tools()
+        self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         llm_tools = [self._to_openai(spec) for spec in allowed] or None
         by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
 

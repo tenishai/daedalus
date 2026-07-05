@@ -53,7 +53,10 @@ def _short(text: str, limit: int = 200) -> str:
 
 def _print_event(event: dict) -> None:
     kind = event["type"]
-    if kind == "tool_call":
+    if kind == "tools_offered":
+        names = ", ".join(event["names"]) or "none (empty allowlist or no provider)"
+        click.echo(f"  [tools] offering: {names}")
+    elif kind == "tool_call":
         click.echo(f"  [tool] → {event['name']} {_short(json.dumps(event['arguments']))}")
     elif kind == "tool_result":
         click.echo(f"  [tool] ← {_short(event['content'])}")
