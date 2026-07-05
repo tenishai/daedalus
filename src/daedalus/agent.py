@@ -111,9 +111,11 @@ class Agent:
                 api_base=bundle.spec.model.api_base,
             )
         self.llm = llm
-        self.memory = memory if memory is not None else NoMemory()
+        self.memory = memory if memory is not None else self._memory_from_spec()
         self.tools = tools if tools is not None else self._tools_from_spec()
-        self.checkpoints = checkpoints if checkpoints is not None else NoCheckpoints()
+        self.checkpoints = (
+            checkpoints if checkpoints is not None else self._checkpoints_from_spec()
+        )
         self.approver = approver if approver is not None else DenyAll()
         self.on_event = on_event
 
@@ -122,6 +124,40 @@ class Agent:
         today; the kaminos trace pane consumes it over SSE later."""
         if self.on_event is not None:
             self.on_event({"type": event_type, **fields})
+
+    def _memory_from_spec(self) -> MemoryStore:
+        spec = self.bundle.spec.memory
+        if spec.personal == "techne":
+            try:
+                import techne  # noqa: F401  — fail at load time, not mid-conversation
+            except ImportError as exc:
+                raise BundleError(
+                    "memory.personal is 'techne' but techne is not installed — "
+                    "pip install -e path/to/techne (github.com/dimartin/techne)"
+                ) from exc
+            from daedalus.memory.techne import TechneMemoryStore
+
+            db_path = Path(spec.home).expanduser() / "techne.db" if spec.home else None
+            return TechneMemoryStore(db_path=db_path)
+        return NoMemory()
+
+    def _checkpoints_from_spec(self) -> CheckpointStore:
+        if self.bundle.spec.checkpoints == "sqlite":
+            from daedalus.checkpoints import SqliteCheckpoints
+
+            path = Path.home() / ".cache" / "daedalus" / self.bundle.spec.name
+            return SqliteCheckpoints(path / "checkpoints.db")
+        return NoCheckpoints()
+
+    def _budget(self):
+        limit = self.bundle.spec.model.budget.per_task_tokens
+        if limit:
+            from daedalus.budget import TokenBudget
+
+            return TokenBudget(limit)
+        from daedalus.protocols import NoBudget
+
+        return NoBudget()
 
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
@@ -170,16 +206,48 @@ class Agent:
     async def handle_task(self, task: Task) -> Task:
         task.state = TaskState.WORKING
         recalled = await self.memory.recall(task.user_text())
-        messages = self._messages(task, recalled)
+        if recalled:
+            self._emit("recall", count=len(recalled))
+        return await self._loop(task, self._messages(task, recalled))
 
+    async def resume(self, task_id: str) -> Task | None:
+        """Continue a checkpointed task (budget-exhausted or crashed).
+        Returns None if no checkpoint exists. The budget starts fresh."""
+        state = await self.checkpoints.load(task_id)
+        if state is None:
+            return None
+        task = Task.model_validate(state["task"])
+        task.state = TaskState.WORKING
+        return await self._loop(task, state["messages"])
+
+    async def _loop(self, task: Task, messages: list[dict]) -> Task:
         allowed = await self._allowed_tools()
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         llm_tools = [self._to_openai(spec) for spec in allowed] or None
         by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
+        budget = self._budget()
 
         last_attempt = ""
         for _ in range(self.bundle.spec.tools.max_steps):
+            await self.checkpoints.save(
+                task.id, {"task": task.model_dump(), "messages": messages}
+            )
+            if budget.remaining() == 0:
+                # checkpoint intentionally kept: re-fund and resume()
+                return task.reply(
+                    f"stopped: token budget exhausted "
+                    f"({self.bundle.spec.model.budget.per_task_tokens})",
+                    state=TaskState.FAILED,
+                    reason=ReasonCode.BUDGET_EXHAUSTED,
+                )
             response = await self.llm.complete(messages, tools=llm_tools)
+            budget.spend(response.input_tokens + response.output_tokens)
+            if budget.remaining() is not None:
+                self._emit(
+                    "budget",
+                    spent=response.input_tokens + response.output_tokens,
+                    remaining=budget.remaining(),
+                )
             if response.reasoning:
                 self._emit("reasoning", text=response.reasoning)
             tool_calls = response.tool_calls
@@ -188,6 +256,7 @@ class Agent:
                 if tool_calls:
                     self._emit("salvage", count=len(tool_calls))
             if not tool_calls:
+                await self.checkpoints.drop(task.id)
                 return task.reply(response.text)
 
             messages.append(self._assistant_message(response.text, tool_calls))
