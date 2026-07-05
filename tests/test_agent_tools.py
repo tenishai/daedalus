@@ -160,6 +160,50 @@ async def test_runaway_tool_loop_hits_max_steps_and_fails_with_reason(tmp_path):
     assert len(llm.calls) == 10  # ToolsSpec.max_steps default
 
 
+QWEN_LEAK = '<tools>\n{"name": "files__read", "arguments": {"path": "/x"}}\n</tools>'
+
+
+def test_salvage_recovers_qwen_style_text_tool_call():
+    from daedalus.agent import salvage_tool_calls
+
+    calls = salvage_tool_calls(QWEN_LEAK, {"files__read"})
+    assert len(calls) == 1
+    assert calls[0].name == "files__read"
+    assert calls[0].arguments == {"path": "/x"}
+
+
+def test_salvage_ignores_unknown_names_prose_and_malformed_json():
+    from daedalus.agent import salvage_tool_calls
+
+    known = {"files__read"}
+    assert salvage_tool_calls('{"name": "rm__rf", "arguments": {}}', known) == []
+    assert salvage_tool_calls("use {braces} casually {in prose", known) == []
+    assert salvage_tool_calls('{"name": "files__read", "arguments": "not-a-dict"}', known) == []
+    assert salvage_tool_calls('{"name": "files__read"', known) == []  # truncated
+
+
+async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
+    """Dogfood finding #6: Qwen-Coder emits calls as <tools> text; the runtime
+    recognizes (not guesses) them — the name must match an offered tool."""
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "the repo is clean")
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    task = await agent.handle_task(Task.from_text("read /x"))
+    assert task.state is TaskState.COMPLETED
+    assert tools.calls == [("files.read", {"path": "/x"})]
+    assert task.agent_text() == "the repo is clean"
+
+
+async def test_salvage_never_fires_when_no_tools_were_offered(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(tmp_path, allow=[], llm=llm, tools=tools)  # empty ceiling
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.state is TaskState.COMPLETED
+    assert tools.calls == []
+    assert "<tools>" in task.agent_text()  # passed through as plain text
+
+
 def test_provider_mcp_without_extra_fails_at_load_not_mid_conversation(tmp_path):
     """Dogfood finding #5: a missing extra must be a startup error with the
     install command in it — not an 'error:' line on your first greeting."""
