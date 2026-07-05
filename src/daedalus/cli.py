@@ -74,8 +74,15 @@ def run(bundle_path: str, message: str | None, verbose: bool) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
     agent = _load(bundle_path, on_event=_print_event if verbose else None)
     if message is not None:
+
+        async def one_shot():
+            try:
+                return await run_once(agent, message)
+            finally:
+                await agent.aclose()
+
         try:
-            task = asyncio.run(run_once(agent, message))
+            task = asyncio.run(one_shot())
         except LLMError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo(task.agent_text())
@@ -104,7 +111,14 @@ def chat(bundle_path: str, verbose: bool) -> None:
         approver=CliApprover(),
         on_event=_print_event if verbose else None,
     )
+
+    async def chat_session():
+        try:
+            await CliTransport().serve(agent)
+        finally:
+            await agent.aclose()
+
     try:
-        asyncio.run(CliTransport().serve(agent))
+        asyncio.run(chat_session())
     except KeyboardInterrupt:
         pass
