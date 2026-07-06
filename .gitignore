@@ -14,3 +14,6 @@ build/
 
 # local dogfood bundles — never commit these
 /scout/
+
+# session continuity notes — never committed
+CLAUDE.local.md
