@@ -170,6 +170,28 @@ async def test_deny_beats_approve_when_both_present():
     assert await approver.approve("files.write", {}) is False
 
 
+def test_to_mrkdwn_converts_bold_and_headers_but_not_code_fences():
+    from daedalus.transports.slack import to_mrkdwn
+
+    text = "### Review\n**install** is fine.\n```makefile\n** not touched **\n### nor this\n```\n## Done"
+    result = to_mrkdwn(text)
+    assert "*Review*" in result
+    assert "*install* is fine." in result
+    assert "** not touched **" in result  # inside the fence, untouched
+    assert "### nor this" in result
+    assert "*Done*" in result
+
+
+async def test_replies_are_posted_as_mrkdwn():
+    class MarkdownHandler(EchoHandler):
+        async def handle_task(self, task):
+            return task.reply("### Verdict\n**looks good**")
+
+    transport, api, handler = make(handler=MarkdownHandler())
+    await transport.handle_event(event(ts="90.0"), handler)
+    assert api.posts[-1][1] == "*Verdict*\n*looks good*"
+
+
 async def test_dedupe_cache_is_bounded():
     transport, api, handler = make()
     for i in range(600):
