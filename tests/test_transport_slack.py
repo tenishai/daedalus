@@ -164,6 +164,28 @@ async def test_reaction_approver_approves_denies_and_times_out():
     assert await approver.approve("files.write", {}) is False  # silence is denial
 
 
+async def test_approval_prompt_is_threaded_with_the_work():
+    """Finding #15: the plan posted top-level while replies threaded — the
+    conversation read scattered. The transport points the approver at the
+    active thread before dispatch."""
+    api = FakeApi(reactions_script=[["white_check_mark"]])
+
+    class GatedHandler(EchoHandler):
+        def __init__(self, approver):
+            self.approver = approver
+
+        async def handle_task(self, task):
+            assert await self.approver.approve("files.read", {"tool": "files.read"})
+            return task.reply("read it")
+
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    transport, api2, _ = make(api=api)
+    handler = GatedHandler(approver)
+    await transport.handle_event(event("read the file", ts="95.0"), handler)
+    plan_posts = [p for p in api.posts if "approval required" in p[1]]
+    assert plan_posts[0][2] == "95.0"  # threaded under the triggering message
+
+
 async def test_deny_beats_approve_when_both_present():
     api = FakeApi(reactions_script=[["white_check_mark", "x"]])
     approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
