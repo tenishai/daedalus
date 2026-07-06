@@ -88,6 +88,7 @@ class SlackReactionApprover:
         self.channel = channel
         self.timeout = timeout
         self.poll = poll
+        self.thread_ts: str | None = None  # set per-event by the transport
 
     async def approve(self, action: str, plan: dict) -> bool:
         text = (
@@ -95,7 +96,8 @@ class SlackReactionApprover:
             f"```{json.dumps(plan, indent=2, default=str)}```\n"
             "react :white_check_mark: to approve or :x: to deny"
         )
-        ts = await self.api.post(self.channel, text)
+        # in-thread so the plan sits next to the work it gates (finding #15)
+        ts = await self.api.post(self.channel, text, thread_ts=self.thread_ts)
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             names = set(await self.api.reactions(self.channel, ts))
@@ -191,6 +193,10 @@ class SlackTransport:
             self._threads[thread] = task
         task.history.append(Message(role="user", text=text))
         task.state = TaskState.SUBMITTED
+
+        approver = getattr(handler, "approver", None)
+        if isinstance(approver, SlackReactionApprover):
+            approver.thread_ts = thread
 
         await self._api.react(self.channel, ts, "eyes")
         try:
