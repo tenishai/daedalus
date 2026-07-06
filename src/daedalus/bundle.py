@@ -92,9 +92,15 @@ class TransportSpec(BaseModel):
         return dict(self.__pydantic_extra__ or {})
 
 
+class LimenalSpec(_WarnExtra):
+    url: str | None = None  # e.g. http://localhost:9100
+    token_env: str | None = None  # env var holding the bearer token; unset = no auth
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "limenal"] = "none"
     servers: list[dict] = Field(default_factory=list)
+    limenal: LimenalSpec = Field(default_factory=LimenalSpec)
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
