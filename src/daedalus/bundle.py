@@ -78,6 +78,7 @@ class ModelSpec(_WarnExtra):
     id: str
     max_tokens: int = 8192
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
+    api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
 
 

@@ -103,12 +103,17 @@ class Agent:
     ):
         self.bundle = bundle
         if llm is None:
+            import os
+
             from daedalus.llm import LiteLLMClient
 
+            model_spec = bundle.spec.model
+            api_key = os.environ.get(model_spec.api_key_env) if model_spec.api_key_env else None
             llm = LiteLLMClient(
-                bundle.spec.model.id,
-                max_tokens=bundle.spec.model.max_tokens,
-                api_base=bundle.spec.model.api_base,
+                model_spec.id,
+                max_tokens=model_spec.max_tokens,
+                api_base=model_spec.api_base,
+                api_key=api_key,
             )
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
