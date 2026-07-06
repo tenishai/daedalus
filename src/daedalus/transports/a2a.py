@@ -132,6 +132,8 @@ def build_a2a_app(
             result = await method(body.get("params") or {})
         except ParamsError as exc:
             return error(rpc_id, -32602, str(exc))
+        except Exception as exc:  # handler bug or backend down: JSON-RPC, not HTTP 500
+            return error(rpc_id, -32000, f"agent error: {exc}")
         return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
     return app

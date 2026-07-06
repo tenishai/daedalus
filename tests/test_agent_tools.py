@@ -302,6 +302,29 @@ async def test_builtin_files_wires_from_agent_yaml_alone(tmp_path):
     assert "bundle-visible content" in llm.calls[1][-1]["content"]
 
 
+async def test_provider_down_is_a_task_failure_not_an_exception(tmp_path):
+    """Finding #19: limenal down -> unhandled ConnectError -> a2a 500 ->
+    kaminos 500 -> browser JSON.parse error. Layer 1: the agent turns a
+    dead provider into a FAILED task with the reason in the reply."""
+
+    class DeadGateway:
+        async def tools(self):
+            raise ConnectionError("connection refused :9100")
+
+        async def call(self, name, payload):
+            raise AssertionError("never reached")
+
+    events: list[dict] = []
+    agent = make_agent(tmp_path, allow=["files.*"], tools=DeadGateway())
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.state is TaskState.FAILED
+    assert task.reason_code is ReasonCode.ESCALATION
+    assert "tool provider unavailable" in task.agent_text()
+    assert "connection refused :9100" in task.agent_text()
+    assert any(e["type"] == "tool_provider_error" for e in events)
+
+
 async def test_aclose_reaches_closable_providers(tmp_path):
     class ClosableTools(FakeTools):
         closed = False

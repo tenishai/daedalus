@@ -75,6 +75,20 @@ def test_reason_codes_ride_in_metadata():
     assert task["metadata"]["daedalus_reason_code"] == 704
 
 
+def test_handler_exception_is_jsonrpc_error_not_http_500():
+    """Finding #19, layer 2: a crashing handler yields -32000, so callers
+    always get a JSON body they can parse."""
+
+    class Crashing:
+        async def handle_task(self, task):
+            raise RuntimeError("backend on fire")
+
+    client = TestClient(build_a2a_app(Crashing()))
+    body = send_text(client, "hi")
+    assert body["error"]["code"] == -32000
+    assert "backend on fire" in body["error"]["message"]
+
+
 def test_unknown_method_is_32601():
     client = TestClient(build_a2a_app(EchoHandler()))
     body = rpc(client, "tasks/cancel", {})
