@@ -185,7 +185,20 @@ class Agent:
 
             providers.append(MCPToolProvider(spec.servers))
         elif spec.provider == "limenal":
-            warnings.warn("tools.provider=limenal arrives in v0.3; ignored", stacklevel=2)
+            try:
+                import limenal  # noqa: F401  — fail at load time, not mid-conversation
+            except ImportError as exc:
+                raise BundleError(
+                    "tools.provider is 'limenal' but limenal is not installed — "
+                    "pip install -e path/to/limenal (github.com/dimartin/limenal)"
+                ) from exc
+            if not spec.limenal.url:
+                raise BundleError("tools.provider 'limenal' requires tools.limenal.url")
+            from daedalus.tools.limenal import LimenalToolProvider
+
+            providers.append(
+                LimenalToolProvider(spec.limenal.url, token_env=spec.limenal.token_env)
+            )
 
         if not providers:
             return NoTools()
