@@ -173,7 +173,10 @@ async def test_deny_beats_approve_when_both_present():
 def test_to_mrkdwn_converts_bold_and_headers_but_not_code_fences():
     from daedalus.transports.slack import to_mrkdwn
 
-    text = "### Review\n**install** is fine.\n```makefile\n** not touched **\n### nor this\n```\n## Done"
+    text = (
+        "### Review\n**install** is fine.\n"
+        "```makefile\n** not touched **\n### nor this\n```\n## Done"
+    )
     result = to_mrkdwn(text)
     assert "*Review*" in result
     assert "*install* is fine." in result
