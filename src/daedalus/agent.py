@@ -372,6 +372,26 @@ class Agent:
                         port=int(options.get("port", 9200)),
                     )
                 )
+            elif spec.kind == "slack":
+                try:
+                    import slack_sdk  # noqa: F401
+                except ImportError as exc:
+                    raise BundleError(
+                        "transport 'slack' requires the slack extra — "
+                        "pip install 'daedalus[slack]'"
+                    ) from exc
+                from daedalus.transports.slack import SlackTransport
+
+                options = spec.options()
+                channel = options.get("channel")
+                if not channel:
+                    raise BundleError("slack transport requires a 'channel' (channel ID)")
+                built.append(
+                    SlackTransport(
+                        str(channel),
+                        escalation_route=self.bundle.spec.approvals.escalation.route,
+                    )
+                )
             else:
                 warnings.warn(
                     f"transport {spec.kind!r} is not available in this version; skipping",

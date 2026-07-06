@@ -1,0 +1,37 @@
+# Slack app manifest for a daedalus bundle with the slack transport.
+# Create at api.slack.com/apps -> Create New App -> From a manifest.
+# After creating: generate an App-Level Token (connections:write) for
+# SLACK_APP_TOKEN, install to the workspace for SLACK_BOT_TOKEN, invite
+# the bot to your channel, and put the channel ID in agent.yaml.
+# Private channels: channels:history -> groups:history,
+# message.channels -> message.groups.
+
+display_information:
+  name: Scout
+  description: A daedalus agent bundle, reachable in Slack.
+  background_color: "#3d2f5b"
+
+features:
+  bot_user:
+    display_name: scout
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - chat:write
+      - reactions:read
+      - reactions:write
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
