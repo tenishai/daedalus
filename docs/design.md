@@ -215,6 +215,16 @@ FastAPI stays at the edge: nothing below a transport imports it.
    700/704 and the configured route carries it to a human; the task parks in
    `input-required` until answered.
 
+**Approver routing is process-wide, by design.** The approver is an agent
+collaborator, not a transport property: when a Slack transport is serving,
+it upgrades a still-default (DenyAll) approver to reaction approvals — so a
+gated call arriving via a2a or cli also posts its plan to Slack.
+*Approvals flow to where the humans are.* An explicitly wired approver is
+always respected; headless agents with no human-bearing transport keep
+DenyAll and fail closed. (Decided 2026-07-06 after the kaminos canvas
+surfaced the interplay; documented rather than "fixed" — it is the correct
+behavior, arrived at by accident.)
+
 Secrets hygiene primitives (mask, placeholder-refusal) ship in core and are
 applied to anything approval-bound or logged.
 
