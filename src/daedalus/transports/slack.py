@@ -28,6 +28,19 @@ from daedalus.task import Message, ReasonCode, Task, TaskState
 
 _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
 _SEEN_CAP = 500
+_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+
+
+def to_mrkdwn(text: str) -> str:
+    """Light markdown -> Slack mrkdwn: **bold** -> *bold*, headers -> bold
+    lines. Fenced code blocks pass through untouched (finding #14: models
+    speak markdown; Slack renders mrkdwn and shows the raw sigils)."""
+    parts = text.split("```")
+    for index in range(0, len(parts), 2):  # even indexes are outside fences
+        chunk = _BOLD.sub(r"*\1*", parts[index])
+        parts[index] = _HEADER.sub(r"*\1*", chunk)
+    return "```".join(parts)
 
 
 class SlackApi:
@@ -190,7 +203,7 @@ class SlackTransport:
             reply = f"error: {exc}"
         await self._api.unreact(self.channel, ts, "eyes")
         await self._api.react(self.channel, ts, "white_check_mark" if ok else "x")
-        await self._api.post(self.channel, reply, thread_ts=thread)
+        await self._api.post(self.channel, to_mrkdwn(reply), thread_ts=thread)
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, thread)
