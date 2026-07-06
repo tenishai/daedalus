@@ -12,6 +12,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 REASON_KEY = "daedalus_reason_code"
+# cabal reads metadata["cabal_reason_code"] (core/a2a/codes.py) — same 700-code
+# taxonomy, shared lineage (CHP → cabal → daedalus). We write both keys so a
+# cabal dispatching to a daedalus agent sees the reason without translation.
+CABAL_REASON_KEY = "cabal_reason_code"
 
 
 class TaskState(StrEnum):
@@ -75,9 +79,10 @@ class Task(BaseModel):
         self.state = state
         if reason is not None:
             self.metadata[REASON_KEY] = int(reason)
+            self.metadata[CABAL_REASON_KEY] = int(reason)
         return self
 
     @property
     def reason_code(self) -> ReasonCode | None:
-        raw = self.metadata.get(REASON_KEY)
+        raw = self.metadata.get(REASON_KEY, self.metadata.get(CABAL_REASON_KEY))
         return ReasonCode(raw) if raw is not None else None
