@@ -22,6 +22,10 @@ class LimenalToolProvider:
             from limenal.client import AsyncMCPClient
 
             token = os.environ.get(self.token_env, "") if self.token_env else ""
+            # An empty bearer renders "Authorization: Bearer " (trailing
+            # space) which httpx rejects as an illegal header (finding #16).
+            # AUTH_DISABLED servers ignore the value, so send a placeholder.
+            token = token or "no-auth"
             self._client = AsyncMCPClient(self.url, token_provider=lambda: token)
         return self._client
 

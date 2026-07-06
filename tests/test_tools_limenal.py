@@ -63,6 +63,23 @@ async def test_aclose_closes_owned_client():
     assert client.closed
 
 
+@pytest.mark.skipif(not LIMENAL_INSTALLED, reason="limenal not installed")
+async def test_no_auth_mode_sends_placeholder_not_empty_bearer(monkeypatch):
+    """Finding #16: empty token -> 'Bearer ' (trailing space) -> httpx
+    'Illegal header value' on real transports. Placeholder when unset."""
+    provider = LimenalToolProvider("http://x")
+    client = provider._ensure()
+    assert client._token() == "no-auth"
+
+    monkeypatch.setenv("LIMENAL_TOKEN", "real-token")
+    provider2 = LimenalToolProvider("http://x", token_env="LIMENAL_TOKEN")
+    assert provider2._ensure()._token() == "real-token"
+
+    monkeypatch.setenv("LIMENAL_TOKEN", "")
+    provider3 = LimenalToolProvider("http://x", token_env="LIMENAL_TOKEN")
+    assert provider3._ensure()._token() == "no-auth"
+
+
 def test_provider_limenal_without_install_fails_at_load(tmp_path):
     if LIMENAL_INSTALLED:
         pytest.skip("limenal is installed; load cannot fail")
