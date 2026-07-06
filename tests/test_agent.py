@@ -49,6 +49,33 @@ async def test_no_memory_default_adds_nothing():
     assert "Recalled context" not in llm.calls[0][0]["content"]
 
 
+def test_local_api_base_gets_placebo_key_without_env(tmp_path, monkeypatch):
+    """Finding #21: a kaminos-spawned agent lacks the operator's shell env;
+    a bundle pointing at a local server must be self-contained — litellm
+    demands a key that vLLM ignores."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: openai/local\n  api_base: http://10.0.0.15:8001/v1\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    agent = Agent.load(tmp_path)
+    assert agent.llm.api_key == "no-auth"
+
+
+def test_api_key_env_reads_real_key_and_no_base_means_no_placebo(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_KEY", "sk-real")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: openai/hosted\n  api_key_env: MY_KEY\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    assert Agent.load(tmp_path).llm.api_key == "sk-real"
+
+    (tmp_path / "agent.yaml").write_text("name: x\nmodel:\n  id: anthropic/claude-sonnet-4-5\n")
+    assert Agent.load(tmp_path).llm.api_key is None  # provider env defaults apply
+
+
 def test_model_api_base_flows_into_default_llm(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: openai/some-local-model\n  api_base: http://10.0.0.15:8000/v1\n"
