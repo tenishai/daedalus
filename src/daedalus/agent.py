@@ -240,7 +240,16 @@ class Agent:
         return await self._loop(task, state["messages"])
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
-        allowed = await self._allowed_tools()
+        try:
+            allowed = await self._allowed_tools()
+        except Exception as exc:
+            # A down gateway is a task outcome, not a transport 500.
+            self._emit("tool_provider_error", error=str(exc))
+            return task.reply(
+                f"tool provider unavailable: {exc}",
+                state=TaskState.FAILED,
+                reason=ReasonCode.ESCALATION,
+            )
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         llm_tools = [self._to_openai(spec) for spec in allowed] or None
         by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
