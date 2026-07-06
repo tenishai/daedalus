@@ -54,6 +54,21 @@ async def test_empty_roots_rejected():
         FilesToolProvider([])
 
 
+async def test_collision_warns_once_not_every_turn(root):
+    import warnings
+
+    files_a = FilesToolProvider([str(root)])
+    files_b = FilesToolProvider([str(root)])
+    multi = MultiToolProvider([files_a, files_b])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await multi.tools()
+        await multi.tools()
+        await multi.tools()
+    dupes = [w for w in caught if "duplicate tool name" in str(w.message)]
+    assert len(dupes) == 2  # files.read + files.list, once each — not once per turn
+
+
 async def test_multi_provider_routes_by_listing(root):
     files = FilesToolProvider([str(root)])
     fake = FakeTools([{"name": "git.git_status", "description": "", "parameters": {}}])
