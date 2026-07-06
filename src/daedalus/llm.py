@@ -37,10 +37,23 @@ def split_reasoning(text: str) -> tuple[str, str]:
 
 
 class LiteLLMClient:
-    def __init__(self, model: str, *, max_tokens: int = 8192, api_base: str | None = None):
+    def __init__(
+        self,
+        model: str,
+        *,
+        max_tokens: int = 8192,
+        api_base: str | None = None,
+        api_key: str | None = None,
+    ):
         self.model = model
         self.max_tokens = max_tokens
         self.api_base = api_base
+        # Local OpenAI-compatible servers ignore the key but litellm demands
+        # one (finding #21: spawned agents lack the operator's shell env) —
+        # a bundle with api_base must be self-contained.
+        if api_key is None and api_base:
+            api_key = "no-auth"
+        self.api_key = api_key
 
     async def complete(
         self, messages: list[dict], tools: list[dict] | None = None
@@ -53,6 +66,8 @@ class LiteLLMClient:
         kwargs: dict = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
         if tools:
             kwargs["tools"] = tools
         try:

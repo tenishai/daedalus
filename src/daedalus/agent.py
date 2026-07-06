@@ -103,12 +103,17 @@ class Agent:
     ):
         self.bundle = bundle
         if llm is None:
+            import os
+
             from daedalus.llm import LiteLLMClient
 
+            model_spec = bundle.spec.model
+            api_key = os.environ.get(model_spec.api_key_env) if model_spec.api_key_env else None
             llm = LiteLLMClient(
-                bundle.spec.model.id,
-                max_tokens=bundle.spec.model.max_tokens,
-                api_base=bundle.spec.model.api_base,
+                model_spec.id,
+                max_tokens=model_spec.max_tokens,
+                api_base=model_spec.api_base,
+                api_key=api_key,
             )
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
@@ -240,7 +245,16 @@ class Agent:
         return await self._loop(task, state["messages"])
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
-        allowed = await self._allowed_tools()
+        try:
+            allowed = await self._allowed_tools()
+        except Exception as exc:
+            # A down gateway is a task outcome, not a transport 500.
+            self._emit("tool_provider_error", error=str(exc))
+            return task.reply(
+                f"tool provider unavailable: {exc}",
+                state=TaskState.FAILED,
+                reason=ReasonCode.ESCALATION,
+            )
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         llm_tools = [self._to_openai(spec) for spec in allowed] or None
         by_munged = {_munge(spec["name"]): spec["name"] for spec in allowed}
