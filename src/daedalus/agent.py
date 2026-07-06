@@ -118,12 +118,18 @@ class Agent:
         )
         self.approver = approver if approver is not None else DenyAll()
         self.on_event = on_event
+        from daedalus.events import EventBus
+
+        self.events = EventBus()
 
     def _emit(self, event_type: str, **fields) -> None:
-        """The runtime's trace stream: --verbose renders it in the terminal
-        today; the kaminos trace pane consumes it over SSE later."""
+        """The runtime's trace stream: --verbose renders it in the terminal;
+        the kaminos trace pane consumes the same events over SSE (/events
+        on the a2a transport)."""
+        event = {"type": event_type, **fields}
+        self.events.publish(event)
         if self.on_event is not None:
-            self.on_event({"type": event_type, **fields})
+            self.on_event(event)
 
     def _memory_from_spec(self) -> MemoryStore:
         spec = self.bundle.spec.memory
@@ -383,6 +389,7 @@ class Agent:
                         card=self.bundle.card,
                         host=str(options.get("host", "127.0.0.1")),
                         port=int(options.get("port", 9200)),
+                        events=self.events,
                     )
                 )
             elif spec.kind == "slack":

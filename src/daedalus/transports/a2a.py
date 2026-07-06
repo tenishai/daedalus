@@ -10,9 +10,12 @@ the cabal integration round. Requires the a2a extra: pip install
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import FastAPI, Request  # module imported only when the extra is present
+from fastapi.responses import JSONResponse, StreamingResponse
 
+from daedalus.events import EventBus
 from daedalus.protocols import Handler
 from daedalus.task import Message, Task, TaskState
 
@@ -44,7 +47,22 @@ def text_of(message: dict) -> str:
     return joined
 
 
-def build_a2a_app(handler: Handler, card: dict | None = None) -> FastAPI:
+async def sse_stream(events: EventBus):
+    """Replay recent events, then stream live — each as an SSE data frame."""
+    replay, queue = events.subscribe()
+    try:
+        for event in replay:
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+        while True:
+            event = await queue.get()
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+    finally:
+        events.unsubscribe(queue)
+
+
+def build_a2a_app(
+    handler: Handler, card: dict | None = None, events: EventBus | None = None
+) -> FastAPI:
     """Separable from serving so tests drive it with a TestClient."""
     app = FastAPI()
     tasks: dict[str, Task] = {}
@@ -60,6 +78,14 @@ def build_a2a_app(handler: Handler, card: dict | None = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
+
+    @app.get("/events")
+    async def event_stream():
+        """The runtime trace over SSE — the kaminos trace pane's feed.
+        Opens with a replay of recent events, then streams live."""
+        if events is None:
+            return JSONResponse({"error": "no event stream wired"}, status_code=404)
+        return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
     async def message_send(params: dict) -> dict:
         message = params.get("message")
@@ -112,15 +138,22 @@ def build_a2a_app(handler: Handler, card: dict | None = None) -> FastAPI:
 
 
 class A2aTransport:
-    def __init__(self, card: dict | None = None, host: str = "127.0.0.1", port: int = 9200):
+    def __init__(
+        self,
+        card: dict | None = None,
+        host: str = "127.0.0.1",
+        port: int = 9200,
+        events: EventBus | None = None,
+    ):
         self.card = card
         self.host = host
         self.port = port
+        self.events = events
 
     async def serve(self, handler: Handler) -> None:
         import uvicorn
 
-        app = build_a2a_app(handler, card=self.card)
+        app = build_a2a_app(handler, card=self.card, events=self.events)
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
         print(f"(a2a listening on {self.host}:{self.port})")
         await uvicorn.Server(config).serve()
