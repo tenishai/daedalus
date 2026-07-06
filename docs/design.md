@@ -279,3 +279,27 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
   without dispatch doesn't need signatures; adopt cabal's JWS approach then.
 - **kaminos test mode: spawn-and-attach.** The GUI spawns `daedalus run` and
   attaches to its SSE stream — what you test is exactly what ships.
+
+## 8. The cabal wire contract — discovered 2026-07-06 (v0.5 scoping)
+
+Read from cabal @ `c8614d9`; what §7 deferred to "the cabal integration
+round" resolved differently than assumed:
+
+- **Cabal dispatches to peers via `POST <endpoint>/a2a/tasks` with a bare
+  A2A Task envelope** (`broker/router.py _dispatch_remote`) — not JSON-RPC
+  `message/send`, which is inbound-only on cabal's side. The a2a transport
+  therefore serves both surfaces: JSON-RPC for spec callers, `/a2a/tasks`
+  for a dispatching cabal. Metadata (`cabal_trace_id`, ...) rides through
+  verbatim and returns in the response envelope.
+- **Card signing is NOT on cabal's dispatch trust path.** Graduation
+  (`POST /admin/persona/{name}/graduate`) accepts an empty card, and the
+  router never verifies cards when dispatching. Trust is the **caller's
+  bearer JWT**: RS256, `iss=cabal-core`, `aud=` the peer's federation
+  audience, verified against cabal's JWKS. The a2a transport's opt-in
+  `auth` block (jwks_url / issuer / audience) implements the peer's half.
+  JWS card signing stays deferred until something actually verifies it.
+- **Reason codes are dual-keyed.** Cabal reads
+  `metadata["cabal_reason_code"]` (`core/a2a/codes.py`) — same 700/701/702/
+  704 taxonomy, 703 absent in both (shared CHP lineage). `Task.reply`
+  writes `daedalus_reason_code` and `cabal_reason_code`; the reader prefers
+  ours and falls back to cabal's.

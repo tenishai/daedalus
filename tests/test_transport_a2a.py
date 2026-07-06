@@ -112,3 +112,101 @@ def test_task_to_a2a_shape():
     a2a = task_to_a2a(task)
     assert a2a["contextId"] == "ctx-9"
     assert [m["role"] for m in a2a["history"]] == ["user", "agent"]
+
+
+# ---- the peer surface: cabal's federated dispatch (POST /a2a/tasks) --------
+
+
+def cabal_task(text="hello", task_id="task-1", **extra):
+    """The wire shape cabal's _dispatch_remote sends: a bare Task envelope,
+    model_dump(by_alias=True, exclude_none=True)."""
+    return {
+        "id": task_id,
+        "contextId": "ctx-1",
+        "status": {"state": "submitted"},
+        "history": [{"role": "user", "parts": [{"kind": "text", "text": text}]}],
+        "artifacts": [],
+        "metadata": {"cabal_trace_id": "trace-9", "cabal_span_id": "span-3"},
+        **extra,
+    }
+
+
+def test_peer_dispatch_returns_completed_task():
+    client = TestClient(build_a2a_app(EchoHandler(), card=CARD))
+    response = client.post("/a2a/tasks", json=cabal_task("hello"))
+    assert response.status_code == 200
+    task = response.json()
+    assert task["id"] == "task-1"
+    assert task["contextId"] == "ctx-1"
+    assert task["status"]["state"] == "completed"
+    assert task["history"][-1]["role"] == "agent"
+    assert task["history"][-1]["parts"][0]["text"] == "echo: hello"
+
+
+def test_peer_dispatch_echoes_cabal_metadata_back():
+    """Cabal's routing context (trace/span ids) must survive the round trip."""
+    client = TestClient(build_a2a_app(EchoHandler()))
+    task = client.post("/a2a/tasks", json=cabal_task()).json()
+    assert task["metadata"]["cabal_trace_id"] == "trace-9"
+    assert task["metadata"]["cabal_span_id"] == "span-3"
+
+
+def test_peer_dispatch_reason_codes_use_cabal_key():
+    client = TestClient(build_a2a_app(EscalatingHandler()))
+    task = client.post("/a2a/tasks", json=cabal_task("deploy prod")).json()
+    assert task["metadata"]["cabal_reason_code"] == 704
+    assert task["metadata"]["daedalus_reason_code"] == 704
+
+
+def test_peer_dispatch_tolerates_data_parts_and_extra_fields():
+    """Cabal's models are extra='allow'; ours must not choke on the extras."""
+    payload = cabal_task(unknown_future_field={"x": 1})
+    payload["history"].insert(
+        0, {"role": "agent", "parts": [{"kind": "data", "data": {"k": "v"}}]}
+    )
+    client = TestClient(build_a2a_app(EchoHandler()))
+    response = client.post("/a2a/tasks", json=payload)
+    assert response.status_code == 200
+
+
+def test_peer_dispatch_bad_bodies_are_readable_422s():
+    """Cabal wraps >=400 response text in DispatchError — make it legible."""
+    client = TestClient(build_a2a_app(EchoHandler()))
+    no_id = cabal_task()
+    del no_id["id"]
+    response = client.post("/a2a/tasks", json=no_id)
+    assert response.status_code == 422
+    assert "task.id is required" in response.json()["error"]
+
+    no_text = cabal_task()
+    no_text["history"] = [{"role": "user", "parts": [{"kind": "data", "data": {}}]}]
+    response = client.post("/a2a/tasks", json=no_text)
+    assert response.status_code == 422
+    assert "no user text" in response.json()["error"]
+
+    not_a_task = client.post("/a2a/tasks", json={"kind": "message", "id": "x"})
+    assert not_a_task.status_code == 422
+
+    response = client.post(
+        "/a2a/tasks", content=b"not json", headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 400
+
+
+def test_peer_dispatch_handler_crash_is_readable_500():
+    class Crashing:
+        async def handle_task(self, task):
+            raise RuntimeError("backend on fire")
+
+    client = TestClient(build_a2a_app(Crashing()))
+    response = client.post("/a2a/tasks", json=cabal_task())
+    assert response.status_code == 500
+    assert "backend on fire" in response.json()["error"]
+
+
+def test_peer_task_visible_to_jsonrpc_tasks_get():
+    """One task store across both dispatch surfaces."""
+    client = TestClient(build_a2a_app(EchoHandler()))
+    client.post("/a2a/tasks", json=cabal_task(task_id="task-77"))
+    fetched = rpc(client, "tasks/get", {"id": "task-77"})["result"]
+    assert fetched["status"]["state"] == "completed"
