@@ -303,3 +303,10 @@ round" resolved differently than assumed:
   704 taxonomy, 703 absent in both (shared CHP lineage). `Task.reply`
   writes `daedalus_reason_code` and `cabal_reason_code`; the reader prefers
   ours and falls back to cabal's.
+- **The bundle shape is published.** `docs/bundle.schema.json` is the
+  canonical agent.yaml contract for non-Python consumers (cabal's bundle
+  reader, editors), emitted from `AgentSpec` via `daedalus schema` and
+  drift-pinned by tests — the runtime controls the shape. kaminos keeps
+  validating through `AgentSpec` directly; per-transport extras (port,
+  channel, auth) stay open, and unknown top-level fields load with a
+  warning, never silently.
