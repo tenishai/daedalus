@@ -1,4 +1,4 @@
-from daedalus.task import REASON_KEY, Message, ReasonCode, Task, TaskState
+from daedalus.task import CABAL_REASON_KEY, REASON_KEY, Message, ReasonCode, Task, TaskState
 
 
 def test_from_text_builds_submitted_task_with_one_user_message():
@@ -28,6 +28,22 @@ def test_reply_with_reason_code_round_trips():
     # survives serialization — codes ride in metadata, not the envelope
     rehydrated = Task.model_validate(task.model_dump())
     assert rehydrated.reason_code is ReasonCode.ESCALATION
+
+
+def test_reason_codes_are_dual_keyed_for_cabal():
+    """Cabal reads cabal_reason_code (core/a2a/codes.py); we write both keys
+    so a dispatching cabal sees the reason without translation."""
+    task = Task.from_text("spend everything")
+    task.reply("budget gone", state=TaskState.FAILED, reason=ReasonCode.BUDGET_EXHAUSTED)
+    assert task.metadata[REASON_KEY] == 702
+    assert task.metadata[CABAL_REASON_KEY] == 702
+
+
+def test_reason_code_reads_cabal_key_when_ours_is_absent():
+    """A task annotated by a cabal (not by us) still reads correctly."""
+    task = Task.from_text("hi")
+    task.metadata[CABAL_REASON_KEY] = 701
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
 
 
 def test_user_text_returns_latest_user_message():
