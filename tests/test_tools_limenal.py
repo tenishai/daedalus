@@ -47,6 +47,20 @@ async def test_tools_map_to_canonical_specs():
     assert specs[1]["parameters"] == {"type": "object", "properties": {}}  # None -> default
 
 
+async def test_down_gateway_error_names_limenal_and_its_url():
+    """Finding #23: 'connection failed' without a WHERE sends the operator
+    hunting. The error must say which gateway, at what address, and hint
+    at the fix."""
+
+    class DownClient:
+        async def list_tools(self):
+            raise ConnectionError("All connection attempts failed")
+
+    provider = LimenalToolProvider("http://127.0.0.1:9100", client=DownClient())
+    with pytest.raises(RuntimeError, match=r"limenal at http://127.0.0.1:9100.*is it running"):
+        await provider.tools()
+
+
 async def test_call_returns_text_and_error_outcomes_raise():
     client = FakeLimenalClient()
     provider = LimenalToolProvider("http://x", client=client)

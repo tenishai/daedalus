@@ -31,13 +31,23 @@ class LimenalToolProvider:
 
     async def tools(self) -> list[dict]:
         client = self._ensure()
+        try:
+            listed = await client.list_tools()
+        except Exception as exc:
+            # Name the gateway and its address — "connection failed" without
+            # a WHERE sends the operator hunting (finding #23: the person who
+            # always forgets to start limenal deserves an error that says so).
+            raise RuntimeError(
+                f"limenal at {self.url} is unreachable ({exc}) — is it running? "
+                f"e.g. LIMENAL_AUTH_DISABLED=1 limenal serve --port <port>"
+            ) from exc
         return [
             {
                 "name": tool.name,
                 "description": tool.description or "",
                 "parameters": tool.input_schema or {"type": "object", "properties": {}},
             }
-            for tool in await client.list_tools()
+            for tool in listed
         ]
 
     async def call(self, name: str, payload: dict) -> str:

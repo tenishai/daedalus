@@ -379,6 +379,35 @@ class Agent:
             messages.append({"role": role, "content": message.text})
         return messages
 
+    @staticmethod
+    def _a2a_verifier(auth: dict | None):
+        """The a2a transport's optional `auth` block -> JwtVerifier, or None.
+
+        Incomplete config fails at load time, like every other extras seam."""
+        if auth is None:
+            return None
+        if not isinstance(auth, dict):
+            raise BundleError("a2a transport 'auth' must be a mapping")
+        missing = [key for key in ("jwks_url", "issuer", "audience") if not auth.get(key)]
+        if missing:
+            raise BundleError(
+                f"a2a transport auth requires {', '.join(missing)} "
+                "(jwks_url, issuer, audience)"
+            )
+        try:
+            import joserfc  # noqa: F401  — fail at load time, not on first request
+        except ImportError as exc:
+            raise BundleError(
+                "a2a transport auth requires joserfc — pip install 'daedalus[a2a]'"
+            ) from exc
+        from daedalus.transports.a2a_auth import JwtVerifier
+
+        return JwtVerifier(
+            jwks_url=str(auth["jwks_url"]),
+            issuer=str(auth["issuer"]),
+            audience=str(auth["audience"]),
+        )
+
     def transports(self) -> list[Transport]:
         from daedalus.transports.cli import CliTransport
 
@@ -404,6 +433,7 @@ class Agent:
                         host=str(options.get("host", "127.0.0.1")),
                         port=int(options.get("port", 9200)),
                         events=self.events,
+                        verifier=self._a2a_verifier(options.get("auth")),
                     )
                 )
             elif spec.kind == "slack":
