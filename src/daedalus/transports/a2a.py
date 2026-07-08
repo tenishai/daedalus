@@ -29,11 +29,22 @@ class ParamsError(ValueError):
 
 
 def task_to_a2a(task: Task) -> dict:
+    status: dict = {"state": task.state.value}
+    reply = task.agent_text()
+    if reply:
+        # Cabal's convention carries the current message in status.message —
+        # cbl renders replies from there (finding #22). History keeps the
+        # full transcript for spec callers; both stay populated.
+        status["message"] = {
+            "kind": "message",
+            "role": "agent",
+            "parts": [{"kind": "text", "text": reply}],
+        }
     return {
         "kind": "task",
         "id": task.id,
         "contextId": task.context_id or task.id,
-        "status": {"state": task.state.value},
+        "status": status,
         "history": [
             {"kind": "message", "role": m.role, "parts": [{"kind": "text", "text": m.text}]}
             for m in task.history
@@ -71,6 +82,17 @@ def task_from_a2a(payload: dict) -> Task:
             history.append(Message(role=message["role"], text=text_of(message)))
         except ParamsError:
             continue  # data-only message: nothing for a text loop to carry
+    # Cabal carries the CURRENT message in status.message with an empty
+    # history (finding #22) — ingest it as the latest turn. Skipped if a
+    # history-carrying caller already ends with the identical message.
+    status_message = (payload.get("status") or {}).get("message")
+    if isinstance(status_message, dict) and status_message.get("role") in ("user", "agent"):
+        try:
+            latest = Message(role=status_message["role"], text=text_of(status_message))
+        except ParamsError:
+            latest = None
+        if latest is not None and (not history or history[-1] != latest):
+            history.append(latest)
     task = Task(
         id=task_id,
         context_id=payload.get("contextId"),

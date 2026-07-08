@@ -118,13 +118,16 @@ def test_task_to_a2a_shape():
 
 
 def cabal_task(text="hello", task_id="task-1", **extra):
-    """The wire shape cabal's _dispatch_remote sends: a bare Task envelope,
-    model_dump(by_alias=True, exclude_none=True)."""
+    """The wire shape cabal's _dispatch_remote actually sends (finding #22):
+    the current message rides in status.message, history is EMPTY."""
     return {
         "id": task_id,
         "contextId": "ctx-1",
-        "status": {"state": "submitted"},
-        "history": [{"role": "user", "parts": [{"kind": "text", "text": text}]}],
+        "status": {
+            "state": "submitted",
+            "message": {"role": "user", "parts": [{"kind": "text", "text": text}]},
+        },
+        "history": [],
         "artifacts": [],
         "metadata": {"cabal_trace_id": "trace-9", "cabal_span_id": "span-3"},
         **extra,
@@ -141,6 +144,29 @@ def test_peer_dispatch_returns_completed_task():
     assert task["status"]["state"] == "completed"
     assert task["history"][-1]["role"] == "agent"
     assert task["history"][-1]["parts"][0]["text"] == "echo: hello"
+    # cbl renders the reply from status.message (finding #22)
+    assert task["status"]["message"]["parts"][0]["text"] == "echo: hello"
+
+
+def test_peer_dispatch_accepts_history_carried_messages():
+    """Spec callers may send the transcript in history with no status.message."""
+    payload = cabal_task()
+    payload["status"] = {"state": "submitted"}
+    payload["history"] = [{"role": "user", "parts": [{"kind": "text", "text": "via history"}]}]
+    client = TestClient(build_a2a_app(EchoHandler()))
+    task = client.post("/a2a/tasks", json=payload).json()
+    assert task["status"]["message"]["parts"][0]["text"] == "echo: via history"
+
+
+def test_peer_dispatch_does_not_double_ingest_duplicated_message():
+    """A caller that puts the same message in BOTH history and status.message
+    gets one turn, not two."""
+    payload = cabal_task("once")
+    payload["history"] = [{"role": "user", "parts": [{"kind": "text", "text": "once"}]}]
+    client = TestClient(build_a2a_app(EchoHandler()))
+    task = client.post("/a2a/tasks", json=payload).json()
+    user_turns = [m for m in task["history"] if m["role"] == "user"]
+    assert len(user_turns) == 1
 
 
 def test_peer_dispatch_echoes_cabal_metadata_back():
@@ -179,6 +205,7 @@ def test_peer_dispatch_bad_bodies_are_readable_422s():
     assert "task.id is required" in response.json()["error"]
 
     no_text = cabal_task()
+    no_text["status"] = {"state": "submitted"}  # no status.message either
     no_text["history"] = [{"role": "user", "parts": [{"kind": "data", "data": {}}]}]
     response = client.post("/a2a/tasks", json=no_text)
     assert response.status_code == 422
