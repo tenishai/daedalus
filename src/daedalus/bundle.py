@@ -149,6 +149,30 @@ class AgentSpec(_WarnExtra):
     approvals: ApprovalsSpec = Field(default_factory=ApprovalsSpec)
 
 
+def bundle_schema() -> dict:
+    """The canonical agent.yaml shape as JSON Schema — the published contract
+    for consumers that can't import Python (cabal's bundle reader, editors).
+
+    The runtime is the source of truth: this is emitted from AgentSpec, and
+    a test pins docs/bundle.schema.json to this output so the committed
+    artifact cannot drift. Regenerate with `daedalus schema`.
+    """
+    import daedalus  # function-local: daedalus/__init__ imports this module
+
+    return {
+        **AgentSpec.model_json_schema(),
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/tenishai/daedalus/blob/main/docs/bundle.schema.json",
+        "title": "daedalus agent bundle (agent.yaml)",
+        "version": daedalus.__version__,
+        "description": (
+            "Wiring for a daedalus agent bundle — a directory that IS an "
+            "agent (agent.yaml + persona.md + agent-card.json). Unknown "
+            "fields load with a warning, never silently."
+        ),
+    }
+
+
 @dataclass
 class Bundle:
     path: Path
