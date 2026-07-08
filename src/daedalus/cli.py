@@ -27,6 +27,22 @@ def version() -> None:
 
 
 @main.command()
+@click.option("--out", default=None, help="Write to a file instead of stdout.")
+def schema(out: str | None) -> None:
+    """Print the canonical agent.yaml JSON Schema (the published bundle shape)."""
+    from pathlib import Path
+
+    from daedalus.bundle import bundle_schema
+
+    text = json.dumps(bundle_schema(), indent=2) + "\n"
+    if out:
+        Path(out).write_text(text)
+        click.echo(f"wrote {out}")
+    else:
+        click.echo(text, nl=False)
+
+
+@main.command()
 @click.argument("name")
 @click.option("--dir", "parent", default=".", help="Parent directory for the new bundle.")
 def create(name: str, parent: str) -> None:
