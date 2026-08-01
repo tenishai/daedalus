@@ -7,7 +7,7 @@ test:
 	pytest -q
 
 lint:
-	ruff check src tests
+	ruff check src tests docker
 
 check: lint test
 
@@ -17,7 +17,7 @@ TAG ?= $(shell git rev-parse --short HEAD)
 AR_IMAGE ?=  # e.g. <location>-docker.pkg.dev/<project>/<repo>/daedalus-runtime
 
 image:
-	docker build -f docker/Dockerfile --build-context techne=../techne -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
+	docker build --platform linux/amd64 -f docker/Dockerfile --build-context techne=../techne -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
 
 image-smoke: image
 	docker run --rm --entrypoint daedalus $(IMAGE):$(TAG) version

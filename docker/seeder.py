@@ -98,12 +98,16 @@ def sync(
         conn, state = _load_state(state_db)
     except sqlite3.DatabaseError:
         log.warning("state db %s is corrupt — quarantining and rebuilding", state_db)
-        os.replace(state_db, str(state_db) + ".corrupt")
         if purge_fn is not None:
             # Rebuilding from empty state would re-seed everything as new
             # entries, duplicating whatever was already stored under the
             # lost state — purge the prior seed-sourced entries first.
+            # Run before the quarantine rename: purge is idempotent, so if
+            # it raises mid-way, recovery is retryable on the next run
+            # (the corrupt state db is still in place to retry against)
+            # instead of leaving duplicated entries with no way back in.
             purge_fn(techne_db)
+        os.replace(state_db, str(state_db) + ".corrupt")
         conn, state = _load_state(state_db)
 
     try:
@@ -127,6 +131,13 @@ def sync(
                 for entry_id in prior["entry_ids"]:
                     delete_fn(techne_db, entry_id)
 
+            # TODO(P1): a SIGKILL landing between a store_fn() call and the
+            # state-row commit below orphans that seed entry — no exception
+            # is raised, so the except-block cleanup never runs, and no
+            # state row is written to remember it either. Before PVC-backed
+            # memory lands, make file seeding convergent from techne ground
+            # truth instead: on startup, purge `seed:<filename>`-sourced
+            # entries for any filename that has no corresponding state row.
             ids: list[int] = []
             try:
                 for section in parse_knowledge_file(path):
@@ -184,8 +195,11 @@ def main(argv: list[str]) -> int:
         # No source filter on list_entries — enumerate everything (a large
         # limit stands in for "unbounded"; seeded corpora are small local
         # knowledge files) and drop only the seed-sourced entries.
-        for entry in knowledge.list_entries(db_path, limit=10_000_000):
-            if entry["source"].startswith("seed:"):
+        # include_superseded=True so superseded rows (excluded by default)
+        # are purged too — otherwise stale seed-sourced rows would survive
+        # a rebuild instead of being cleared with everything else.
+        for entry in knowledge.list_entries(db_path, limit=10_000_000, include_superseded=True):
+            if (entry.get("source") or "").startswith("seed:"):
                 knowledge.delete(db_path, entry["id"])
 
     result = sync(
