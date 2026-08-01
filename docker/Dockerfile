@@ -20,14 +20,16 @@ FROM python:3.12-slim AS build
 
 COPY --from=techne / /src/techne
 COPY . /src/daedalus
-RUN pip wheel --wheel-dir /wheels /src/techne "/src/daedalus[a2a]"
+# google-cloud-aiplatform: litellm's vertex_ai/* routes import the vertexai
+# SDK at call time — the platform's default model provider, so baked in here.
+RUN pip wheel --wheel-dir /wheels /src/techne "/src/daedalus[a2a]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --create-home agent
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a]" techne && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a]" techne google-cloud-aiplatform && rm -rf /wheels
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
