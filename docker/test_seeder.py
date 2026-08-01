@@ -5,6 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 from seeder import TYPE_MAP, parse_knowledge_file, sync, type_for
 
 
@@ -119,3 +120,83 @@ def test_state_survives_in_sqlite(tmp_path):
     conn.close()
     assert [r[0] for r in rows] == ["facts.md", "gotchas.md"]
     assert all(isinstance(json.loads(r[1]), list) for r in rows)
+
+
+class RaisingStore(FakeStore):
+    """Like FakeStore, but raises on its Nth store() call (1-indexed)."""
+
+    def __init__(self, fail_on_call: int):
+        super().__init__()
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def store(self, db_path, content, type, tags, source):
+        self.calls += 1
+        if self.calls == self.fail_on_call:
+            raise RuntimeError("boom")
+        return super().store(db_path, content, type, tags, source)
+
+
+def test_partial_store_failure_orphans_nothing_and_keeps_prior_file_state(tmp_path):
+    # facts.md sorts before gotchas.md, so processing order is:
+    #   facts.md/C (call 1, succeeds) -> gotchas.md/A (call 2, succeeds)
+    #   -> gotchas.md/B (call 3, raises)
+    kdir = _bundle(tmp_path)
+    fake = RaisingStore(fail_on_call=3)
+    state = tmp_path / "seed_state.db"
+
+    with pytest.raises(RuntimeError):
+        sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # gotchas.md's already-stored entry (call 2) was cleaned up, not orphaned.
+    assert all(s != "seed:gotchas.md" for (_, _, s) in fake.rows.values())
+    # facts.md, processed earlier in the same run, was stored successfully.
+    assert any(s == "seed:facts.md" for (_, _, s) in fake.rows.values())
+
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT filename FROM seed_state").fetchall()
+    conn.close()
+    # Only facts.md's state row was committed; gotchas.md never got one, so
+    # a later run can seed it fresh instead of treating it as done.
+    assert [r[0] for r in rows] == ["facts.md"]
+
+
+def test_corrupt_state_db_is_quarantined_purged_and_reseeded(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    state.write_bytes(b"not a sqlite database, just garbage bytes to trigger corruption")
+
+    purge_calls = []
+    result = sync(
+        kdir,
+        tmp_path / "techne.db",
+        state,
+        fake.store,
+        fake.delete,
+        purge_fn=lambda db_path: purge_calls.append(db_path),
+    )
+
+    assert Path(str(state) + ".corrupt").exists()
+    assert len(purge_calls) == 1
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT filename FROM seed_state ORDER BY filename").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["facts.md", "gotchas.md"]
+
+
+def test_purge_fn_not_called_when_state_db_is_healthy(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    purge_calls = []
+
+    sync(
+        kdir,
+        tmp_path / "techne.db",
+        state,
+        fake.store,
+        fake.delete,
+        purge_fn=lambda db_path: purge_calls.append(db_path),
+    )
+
+    assert purge_calls == []

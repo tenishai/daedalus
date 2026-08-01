@@ -49,26 +49,64 @@ def parse_knowledge_file(path: Path) -> list[str]:
 
 log = logging.getLogger("seeder")
 
+_SEED_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS seed_state (
+       filename TEXT PRIMARY KEY,
+       sha256 TEXT NOT NULL,
+       entry_ids TEXT NOT NULL
+   )"""
+
 
 def _state_conn(state_db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(state_db)
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS seed_state (
-               filename TEXT PRIMARY KEY,
-               sha256 TEXT NOT NULL,
-               entry_ids TEXT NOT NULL
-           )"""
-    )
+    try:
+        conn.execute(_SEED_STATE_SCHEMA)
+    except sqlite3.DatabaseError:
+        # Corrupt file (e.g. an unclean kill of a persistent volume left a
+        # malformed sqlite image) — close and let the caller quarantine it.
+        conn.close()
+        raise
     return conn
 
 
-def sync(knowledge_dir: Path, techne_db: Path, state_db: Path, store_fn, delete_fn) -> dict:
+def _load_state(state_db: Path) -> tuple[sqlite3.Connection, dict]:
+    """Open the state db and read its rows.
+
+    Raises sqlite3.DatabaseError if the on-disk file is corrupt; the caller
+    is responsible for quarantining and rebuilding in that case.
+    """
     conn = _state_conn(state_db)
     try:
         state = {
             row[0]: {"sha256": row[1], "entry_ids": json.loads(row[2])}
             for row in conn.execute("SELECT filename, sha256, entry_ids FROM seed_state")
         }
+    except sqlite3.DatabaseError:
+        conn.close()
+        raise
+    return conn, state
+
+
+def sync(
+    knowledge_dir: Path,
+    techne_db: Path,
+    state_db: Path,
+    store_fn,
+    delete_fn,
+    purge_fn=None,
+) -> dict:
+    try:
+        conn, state = _load_state(state_db)
+    except sqlite3.DatabaseError:
+        log.warning("state db %s is corrupt — quarantining and rebuilding", state_db)
+        os.replace(state_db, str(state_db) + ".corrupt")
+        if purge_fn is not None:
+            # Rebuilding from empty state would re-seed everything as new
+            # entries, duplicating whatever was already stored under the
+            # lost state — purge the prior seed-sourced entries first.
+            purge_fn(techne_db)
+        conn, state = _load_state(state_db)
+
+    try:
         current = {p.name: p for p in sorted(knowledge_dir.glob("*.md"))}
         seeded = removed = unchanged = 0
 
@@ -76,6 +114,7 @@ def sync(knowledge_dir: Path, techne_db: Path, state_db: Path, store_fn, delete_
             for entry_id in state[filename]["entry_ids"]:
                 delete_fn(techne_db, entry_id)
             conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
+            conn.commit()
             removed += 1
 
         for filename, path in current.items():
@@ -87,16 +126,32 @@ def sync(knowledge_dir: Path, techne_db: Path, state_db: Path, store_fn, delete_
             if prior:
                 for entry_id in prior["entry_ids"]:
                     delete_fn(techne_db, entry_id)
-            ids = [
-                store_fn(techne_db, section, type_for(filename), "seed", f"seed:{filename}")
-                for section in parse_knowledge_file(path)
-            ]
+
+            ids: list[int] = []
+            try:
+                for section in parse_knowledge_file(path):
+                    ids.append(
+                        store_fn(techne_db, section, type_for(filename), "seed", f"seed:{filename}")
+                    )
+            except Exception:
+                # Best-effort cleanup so a mid-file store failure never
+                # orphans entries the state db has no record of.
+                for entry_id in ids:
+                    try:
+                        delete_fn(techne_db, entry_id)
+                    except Exception:
+                        log.warning(
+                            "cleanup failed for orphaned entry %s from %s", entry_id, filename
+                        )
+                raise
+
             conn.execute(
                 "INSERT OR REPLACE INTO seed_state (filename, sha256, entry_ids) VALUES (?, ?, ?)",
                 (filename, digest, json.dumps(ids)),
             )
+            conn.commit()
             seeded += len(ids)
-        conn.commit()
+
         return {"seeded": seeded, "removed": removed, "unchanged": unchanged}
     finally:
         conn.close()
@@ -125,7 +180,22 @@ def main(argv: list[str]) -> int:
             db_path, content, type=type, tags=tags, confidence="high", source=source
         )
 
-    result = sync(knowledge_dir, techne_db, home / "seed_state.db", store_fn, knowledge.delete)
+    def purge_fn(db_path):
+        # No source filter on list_entries — enumerate everything (a large
+        # limit stands in for "unbounded"; seeded corpora are small local
+        # knowledge files) and drop only the seed-sourced entries.
+        for entry in knowledge.list_entries(db_path, limit=10_000_000):
+            if entry["source"].startswith("seed:"):
+                knowledge.delete(db_path, entry["id"])
+
+    result = sync(
+        knowledge_dir,
+        techne_db,
+        home / "seed_state.db",
+        store_fn,
+        knowledge.delete,
+        purge_fn=purge_fn,
+    )
     log.info("seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s", result)
     return 0
 
