@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 TYPE_MAP = {
@@ -93,6 +94,7 @@ def sync(
     store_fn,
     delete_fn,
     purge_fn=None,
+    list_ids_fn: Callable[[Path, str], list[int]] | None = None,
 ) -> dict:
     try:
         conn, state = _load_state(state_db)
@@ -130,14 +132,19 @@ def sync(
             if prior:
                 for entry_id in prior["entry_ids"]:
                     delete_fn(techne_db, entry_id)
+            elif list_ids_fn is not None:
+                # Ground-truth convergence: no state row for this filename
+                # means either it's genuinely new, or a SIGKILL previously
+                # landed between a store_fn() call and the state-row commit
+                # below — no exception was raised, so the except-block
+                # cleanup never ran, and no state row was written to
+                # remember the entries either. Either way techne itself is
+                # the ground truth, so drop anything already sourced from
+                # this exact file before storing fresh entries — a restart
+                # can then never leave duplicates behind.
+                for entry_id in list_ids_fn(techne_db, f"seed:{filename}"):
+                    delete_fn(techne_db, entry_id)
 
-            # TODO(P1): a SIGKILL landing between a store_fn() call and the
-            # state-row commit below orphans that seed entry — no exception
-            # is raised, so the except-block cleanup never runs, and no
-            # state row is written to remember it either. Before PVC-backed
-            # memory lands, make file seeding convergent from techne ground
-            # truth instead: on startup, purge `seed:<filename>`-sourced
-            # entries for any filename that has no corresponding state row.
             ids: list[int] = []
             try:
                 for section in parse_knowledge_file(path):
@@ -191,16 +198,32 @@ def main(argv: list[str]) -> int:
             db_path, content, type=type, tags=tags, confidence="high", source=source
         )
 
-    def purge_fn(db_path):
+    def _seed_sourced_entries(db_path):
         # No source filter on list_entries — enumerate everything (a large
         # limit stands in for "unbounded"; seeded corpora are small local
-        # knowledge files) and drop only the seed-sourced entries.
+        # knowledge files) and narrow to seed-sourced rows here.
         # include_superseded=True so superseded rows (excluded by default)
-        # are purged too — otherwise stale seed-sourced rows would survive
-        # a rebuild instead of being cleared with everything else.
-        for entry in knowledge.list_entries(db_path, limit=10_000_000, include_superseded=True):
-            if (entry.get("source") or "").startswith("seed:"):
-                knowledge.delete(db_path, entry["id"])
+        # are included too — otherwise stale seed-sourced rows would
+        # survive a purge or a ground-truth convergence sweep instead of
+        # being cleared with everything else.
+        return [
+            entry
+            for entry in knowledge.list_entries(db_path, limit=10_000_000, include_superseded=True)
+            if (entry.get("source") or "").startswith("seed:")
+        ]
+
+    def _ids_by_source(db_path, source):
+        # Reuses the purge helper's enumeration above, narrowed to an exact
+        # source match — wired in as sync()'s list_ids_fn so the
+        # ground-truth convergence path can find entries a SIGKILL left
+        # behind between a store_fn() call and the state-row commit.
+        return [
+            entry["id"] for entry in _seed_sourced_entries(db_path) if entry.get("source") == source
+        ]
+
+    def purge_fn(db_path):
+        for entry in _seed_sourced_entries(db_path):
+            knowledge.delete(db_path, entry["id"])
 
     result = sync(
         knowledge_dir,
@@ -209,6 +232,7 @@ def main(argv: list[str]) -> int:
         store_fn,
         knowledge.delete,
         purge_fn=purge_fn,
+        list_ids_fn=_ids_by_source,
     )
     log.info("seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s", result)
     return 0
