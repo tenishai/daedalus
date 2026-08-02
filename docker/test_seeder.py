@@ -253,3 +253,69 @@ def test_without_list_ids_fn_behavior_is_unchanged(tmp_path):
     gotchas_rows = [r for r in fake.rows.values() if r[2] == "seed:gotchas.md"]
     assert len(gotchas_rows) == 4
     assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+
+
+def test_corrupt_state_with_purge_and_list_ids_fn_converges(tmp_path):
+    """Corrupt state + both purge_fn and list_ids_fn: quarantine, purge, converge, no duplicates."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+
+    # Write garbage to corrupt the state db.
+    state.write_bytes(b"garbage bytes for corruption test")
+
+    # Pre-seed stale entries (simulating entries from a run killed before state commit).
+    _seed_directly(fake, "gotchas.md", ["## A\nalpha\n", "## B\nbeta\n"], "evaluation")
+    _seed_directly(fake, "facts.md", ["## C\ngamma\n"], "fact")
+
+    # Track purge_fn calls.
+    purge_calls = []
+
+    # Track list_ids_fn calls and what it found.
+    list_ids_calls = []
+
+    # purge_fn that actually deletes seed-sourced entries from FakeStore.
+    def purge_fn(db_path):
+        purge_calls.append(db_path)
+        for i in list(fake.rows.keys()):
+            _, _, source = fake.rows[i]
+            if source.startswith("seed:"):
+                fake.delete(db_path, i)
+
+    # list_ids_fn that returns ids by exact source match.
+    def list_ids_fn(db_path, source):
+        ids = [i for i, (_, _, s) in fake.rows.items() if s == source]
+        list_ids_calls.append((source, ids))
+        return ids
+
+    result = sync(
+        kdir,
+        tmp_path / "techne.db",
+        state,
+        fake.store,
+        fake.delete,
+        purge_fn=purge_fn,
+        list_ids_fn=list_ids_fn,
+    )
+
+    # Assertion 1: quarantine file exists.
+    assert Path(str(state) + ".corrupt").exists()
+
+    # Assertion 2: purge called exactly once.
+    assert len(purge_calls) == 1
+
+    # Assertion 3: reseed stored each section exactly once (no duplicates)
+    # and result counts are correct.
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+
+    # Count entries per source to verify no duplicates.
+    sources_count = {}
+    for _, _, source in fake.rows.values():
+        sources_count[source] = sources_count.get(source, 0) + 1
+    assert sources_count.get("seed:gotchas.md", 0) == 2
+    assert sources_count.get("seed:facts.md", 0) == 1
+
+    # Assertion 4: list_ids_fn (when consulted post-purge) found nothing.
+    # After purge_fn runs, all seed-sourced entries are gone,
+    # so list_ids_fn should return empty ids for every source it checks.
+    assert len(list_ids_calls) == 2  # Called once per file during convergence.
+    assert all(ids == [] for _, ids in list_ids_calls)
