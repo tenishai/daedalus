@@ -200,3 +200,56 @@ def test_purge_fn_not_called_when_state_db_is_healthy(tmp_path):
     )
 
     assert purge_calls == []
+
+
+def _seed_directly(fake: FakeStore, filename: str, sections: list[str], type_: str) -> list[int]:
+    """Simulate the on-disk artifact of a SIGKILL landing between the last
+    store_fn() call for a file and the seed_state commit: the entries exist
+    in the store, but no seed_state row was ever written for the file."""
+    return [fake.store(None, section, type_, "seed", f"seed:{filename}") for section in sections]
+
+
+def test_sigkill_aftermath_converges_via_list_ids_fn(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+
+    # gotchas.md's entries already landed in the store from a run that died
+    # before the state-row commit, so there is no seed_state row for it.
+    stale_ids = _seed_directly(fake, "gotchas.md", ["## A\nalpha\n", "## B\nbeta\n"], "evaluation")
+    assert set(fake.rows) == set(stale_ids)
+
+    def list_ids_fn(db_path, source):
+        return [i for i, (_, _, s) in fake.rows.items() if s == source]
+
+    result = sync(
+        kdir,
+        tmp_path / "techne.db",
+        state,
+        fake.store,
+        fake.delete,
+        list_ids_fn=list_ids_fn,
+    )
+
+    # The state-less stale entries were purged before reseeding — no
+    # duplicates survive the restart.
+    assert not (set(stale_ids) & set(fake.rows))
+    gotchas_rows = [r for r in fake.rows.values() if r[2] == "seed:gotchas.md"]
+    assert len(gotchas_rows) == 2
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+
+
+def test_without_list_ids_fn_behavior_is_unchanged(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+
+    stale_ids = _seed_directly(fake, "gotchas.md", ["## A\nalpha\n", "## B\nbeta\n"], "evaluation")
+
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # No list_ids_fn means no ground-truth convergence sweep: the stale,
+    # state-less entries from the "lost" run are left untouched and sync
+    # stores fresh ones alongside them — the pre-existing behavior.
+    assert set(stale_ids) <= set(fake.rows)
+    gotchas_rows = [r for r in fake.rows.values() if r[2] == "seed:gotchas.md"]
+    assert len(gotchas_rows) == 4
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
