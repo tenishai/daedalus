@@ -3,8 +3,12 @@
 # After creating: generate an App-Level Token (connections:write) for
 # SLACK_APP_TOKEN, install to the workspace for SLACK_BOT_TOKEN, invite
 # the bot to your channel, and put the channel ID in agent.yaml.
-# Private channels: channels:history -> groups:history,
-# message.channels -> message.groups.
+# Public AND private channel grants are both included below (channels:
+# history + groups:history, message.channels + message.groups) rather than
+# one swapped in for the other: a bundle can't know ahead of time which
+# type of channel it'll be invited to, and modern Slack has no separate
+# legacy "G"-prefixed private-channel id space to special-case for — both
+# public and private channels use C-prefixed ids today.
 
 display_information:
   name: Scout
@@ -21,6 +25,7 @@ oauth_config:
     bot:
       - app_mentions:read
       - channels:history
+      - groups:history
       - chat:write
       - reactions:read
       - reactions:write
@@ -30,6 +35,7 @@ settings:
     bot_events:
       - app_mention
       - message.channels
+      - message.groups
   interactivity:
     is_enabled: false
   org_deploy_enabled: false
