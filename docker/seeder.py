@@ -181,9 +181,13 @@ def main(argv: list[str]) -> int:
         log.error("usage: seeder.py <bundle_dir>")
         return 2
     knowledge_dir = Path(argv[1]) / "knowledge"
-    if not knowledge_dir.is_dir():
-        log.info("no knowledge/ in bundle — nothing to seed")
-        return 0
+    # knowledge_dir may legitimately not exist: git drops empty directories,
+    # so deleting the last knowledge file from a bundle removes knowledge/
+    # from the built image entirely, not merely empties it. sync() already
+    # treats a missing knowledge_dir as zero current files (Path.glob on a
+    # nonexistent dir yields nothing, same as an empty one), so it must
+    # still run here — otherwise state-tracked removals never purge and
+    # the deleted file's seeded rows persist in techne forever.
     home = Path(os.environ.get("TECHNE_HOME", "/techne"))
     home.mkdir(parents=True, exist_ok=True)
     techne_db = home / "techne.db"
@@ -234,7 +238,12 @@ def main(argv: list[str]) -> int:
         purge_fn=purge_fn,
         list_ids_fn=_ids_by_source,
     )
-    log.info("seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s", result)
+    if not knowledge_dir.is_dir() and result == {"seeded": 0, "removed": 0, "unchanged": 0}:
+        # Truly never-seeded bundle: no knowledge/ now, and no prior state to
+        # purge either — a clean no-op, so keep the quieter fast-path log.
+        log.info("no knowledge/ in bundle — nothing to seed")
+    else:
+        log.info("seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s", result)
     return 0
 
 
