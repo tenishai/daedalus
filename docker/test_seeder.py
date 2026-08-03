@@ -2,11 +2,15 @@
 write path is injected, so these run in daedalus's dev venv without techne."""
 
 import json
+import logging
+import shutil
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 import pytest
-from seeder import TYPE_MAP, parse_knowledge_file, sync, type_for
+from seeder import TYPE_MAP, main, parse_knowledge_file, sync, type_for
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -319,3 +323,127 @@ def test_corrupt_state_with_purge_and_list_ids_fn_converges(tmp_path):
     # so list_ids_fn should return empty ids for every source it checks.
     assert len(list_ids_calls) == 2  # Called once per file during convergence.
     assert all(ids == [] for _, ids in list_ids_calls)
+
+
+# --- main()'s last-file bug: git drops empty dirs, so deleting the LAST
+# knowledge file removes knowledge/ from the built image entirely (not
+# merely empties it). main() must still converge in that case instead of
+# early-returning before sync() ever runs. sync() itself already tolerates
+# a missing knowledge_dir (Path.glob on a nonexistent dir yields nothing,
+# same as an empty one) — these tests exercise main()'s control flow, so
+# they fake techne.core.{knowledge,database} the way FakeStore fakes the
+# store/delete path for sync() above, and inject them via sys.modules since
+# main()'s `from techne.core import knowledge` import is function-local.
+
+
+class FakeKnowledgeModule:
+    """Fakes techne.core.knowledge's API surface (store/delete/list_entries)
+    for testing main() end-to-end without techne installed."""
+
+    def __init__(self):
+        self.next_id = 1
+        self.entries = {}  # id -> dict(content, type, tags, confidence, source)
+
+    def store(self, db_path, content, type, tags, confidence, source):
+        i = self.next_id
+        self.next_id += 1
+        self.entries[i] = {
+            "id": i,
+            "content": content,
+            "type": type,
+            "tags": tags,
+            "confidence": confidence,
+            "source": source,
+        }
+        return i
+
+    def delete(self, db_path, entry_id):
+        return self.entries.pop(entry_id, None) is not None
+
+    def list_entries(self, db_path, limit=1000, include_superseded=False):
+        return list(self.entries.values())
+
+
+def _install_fake_techne(monkeypatch) -> FakeKnowledgeModule:
+    fake_knowledge = FakeKnowledgeModule()
+
+    knowledge_mod = types.ModuleType("techne.core.knowledge")
+    knowledge_mod.store = fake_knowledge.store
+    knowledge_mod.delete = fake_knowledge.delete
+    knowledge_mod.list_entries = fake_knowledge.list_entries
+
+    class _Conn:
+        def close(self):
+            pass
+
+    database_mod = types.ModuleType("techne.core.database")
+    database_mod.init_db = lambda db_path: _Conn()
+
+    core_mod = types.ModuleType("techne.core")
+    core_mod.knowledge = knowledge_mod
+    core_mod.database = database_mod
+    techne_mod = types.ModuleType("techne")
+    techne_mod.core = core_mod
+
+    monkeypatch.setitem(sys.modules, "techne", techne_mod)
+    monkeypatch.setitem(sys.modules, "techne.core", core_mod)
+    monkeypatch.setitem(sys.modules, "techne.core.knowledge", knowledge_mod)
+    monkeypatch.setitem(sys.modules, "techne.core.database", database_mod)
+    return fake_knowledge
+
+
+def _bundle_root(tmp_path: Path) -> Path:
+    root = tmp_path / "bundle"
+    kdir = root / "knowledge"
+    kdir.mkdir(parents=True)
+    (kdir / "gotchas.md").write_text("## A\nalpha\n\n## B\nbeta\n")
+    (kdir / "facts.md").write_text("## C\ngamma\n")
+    return root
+
+
+def test_main_purges_state_when_last_knowledge_file_removal_drops_the_dir(
+    tmp_path, monkeypatch, caplog
+):
+    fake = _install_fake_techne(monkeypatch)
+    techne_home = tmp_path / "techne_home"
+    monkeypatch.setenv("TECHNE_HOME", str(techne_home))
+    root = _bundle_root(tmp_path)
+
+    assert main(["seeder.py", str(root)]) == 0
+    assert len(fake.entries) == 3  # gotchas.md's 2 sections + facts.md's 1
+
+    # Deleting the last file(s) drops knowledge/ from the image entirely —
+    # git does not track empty directories.
+    shutil.rmtree(root / "knowledge")
+
+    caplog.set_level(logging.INFO, logger="seeder")
+    assert main(["seeder.py", str(root)]) == 0
+
+    assert fake.entries == {}  # both files' entries dropped via delete_fn
+    conn = sqlite3.connect(techne_home / "seed_state.db")
+    rows = conn.execute("SELECT filename FROM seed_state").fetchall()
+    conn.close()
+    assert rows == []  # their state rows are gone too
+    assert "seeded=0 removed=2 unchanged=0" in caplog.text
+
+
+def test_main_never_seeded_bundle_with_no_knowledge_dir_is_a_clean_noop(
+    tmp_path, monkeypatch, caplog
+):
+    fake = _install_fake_techne(monkeypatch)
+    techne_home = tmp_path / "techne_home"
+    monkeypatch.setenv("TECHNE_HOME", str(techne_home))
+    root = tmp_path / "bundle"
+    root.mkdir()  # no knowledge/ subdir at all — this bundle never had one
+
+    caplog.set_level(logging.INFO, logger="seeder")
+    assert main(["seeder.py", str(root)]) == 0
+
+    assert fake.entries == {}
+    state_db = techne_home / "seed_state.db"
+    if state_db.exists():
+        conn = sqlite3.connect(state_db)
+        rows = conn.execute("SELECT filename FROM seed_state").fetchall()
+        conn.close()
+        assert rows == []
+    assert "nothing to seed" in caplog.text
