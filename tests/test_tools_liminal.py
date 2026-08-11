@@ -110,6 +110,51 @@ def test_provider_liminal_without_install_fails_at_load(tmp_path):
         Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
 
 
+# ---- the `spec.liminal.*` wiring itself -----------------------------------
+# These two exist because the wiring below `import liminal` in
+# Agent._tools_from_spec ran in NEITHER configuration: without liminal the
+# import guard raises first, and with liminal the test above skips itself. A
+# missed rename on `spec.liminal.url` / `spec.liminal.token_env` would have
+# shipped an AttributeError behind a fully green suite. Found by Prudence
+# reviewing the limenal->liminal rename.
+
+
+@pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not installed")
+def test_provider_liminal_without_url_is_a_clean_bundle_error(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle, BundleError
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  provider: liminal\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    with pytest.raises(BundleError, match="requires tools.liminal.url"):
+        Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+
+
+@pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not installed")
+def test_spec_url_and_token_env_reach_the_provider(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from daedalus.tools.liminal import LiminalToolProvider
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  provider: liminal\n"
+        "  liminal:\n    url: http://gateway.test\n    token_env: LIMINAL_TOKEN\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+
+    assert isinstance(agent.tools, LiminalToolProvider)
+    assert agent.tools.url == "http://gateway.test"
+    assert agent.tools.token_env == "LIMINAL_TOKEN"
+
+
 @pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not installed")
 async def test_family_reunion_daedalus_agent_uses_liminal_gateway(tmp_path, monkeypatch):
     """The full loop, in-process: a daedalus Agent's tool calls flow through
