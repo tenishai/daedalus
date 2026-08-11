@@ -2,7 +2,7 @@
 
 Every cross-cutting concern is a Protocol with a no-op default injected at
 wiring time — never None-checked in the hot path. Real backends arrive via
-extras and entry points (techne, limenal, slack).
+extras and entry points (techne, liminal, slack).
 """
 
 from __future__ import annotations
