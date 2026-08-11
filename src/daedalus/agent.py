@@ -195,20 +195,20 @@ class Agent:
             from daedalus.tools.mcp import MCPToolProvider
 
             providers.append(MCPToolProvider(spec.servers))
-        elif spec.provider == "limenal":
+        elif spec.provider == "liminal":
             try:
-                import limenal  # noqa: F401  — fail at load time, not mid-conversation
+                import liminal  # noqa: F401  — fail at load time, not mid-conversation
             except ImportError as exc:
                 raise BundleError(
-                    "tools.provider is 'limenal' but limenal is not installed — "
-                    "pip install -e path/to/limenal (github.com/dimartin/limenal)"
+                    "tools.provider is 'liminal' but liminal is not installed — "
+                    "pip install -e path/to/liminal (github.com/tenishai/liminal)"
                 ) from exc
-            if not spec.limenal.url:
-                raise BundleError("tools.provider 'limenal' requires tools.limenal.url")
-            from daedalus.tools.limenal import LimenalToolProvider
+            if not spec.liminal.url:
+                raise BundleError("tools.provider 'liminal' requires tools.liminal.url")
+            from daedalus.tools.liminal import LiminalToolProvider
 
             providers.append(
-                LimenalToolProvider(spec.limenal.url, token_env=spec.limenal.token_env)
+                LiminalToolProvider(spec.liminal.url, token_env=spec.liminal.token_env)
             )
 
         if not providers:

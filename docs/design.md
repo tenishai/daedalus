@@ -14,7 +14,7 @@ the way NeXTSTEP Interface Builder edited nibs: live objects, no codegen.
 Daedalus is a clean-room design. It is informed by lessons from an internal
 proprietary SDK (client_agent: Slack transport ergonomics, human-in-the-loop
 approval bridging, "agent in 50 lines" DX) and by the open tenish repos
-(techne, limenal, cabal, ladon, gojira, agents), but **no code is carried over
+(techne, liminal, cabal, ladon, gojira, agents), but **no code is carried over
 from proprietary sources**. Where a tenish repo already solves a problem,
 daedalus integrates rather than reimplements.
 
@@ -23,7 +23,7 @@ daedalus integrates rather than reimplements.
 | Concern | Owner | Daedalus's role |
 |---|---|---|
 | Memory (episodic + knowledge) | techne | `MemoryStore` Protocol; techne is the default impl via extra |
-| Tool gateway, credential scoping | limenal | `ToolProvider` Protocol; limenal via extra, direct MCP otherwise |
+| Tool gateway, credential scoping | liminal | `ToolProvider` Protocol; liminal via extra, direct MCP otherwise |
 | Multi-agent orchestration, A2A broker | cabal | daedalus agents are cabal-compatible handlers; A2A transport speaks to it |
 | Secrets platform | ladon | daedalus reads env/file; ladon patterns for hygiene |
 | Deploy | gojira | a daedalus bundle is a deployable app |
@@ -74,7 +74,7 @@ transports:
   - kind: cli                           # always available for `daedalus chat`
 
 tools:
-  provider: mcp                         # mcp | limenal | none
+  provider: mcp                         # mcp | liminal | none
   servers:                              # provider=mcp: direct MCP servers
     - command: ["npx", "@modelcontextprotocol/server-github"]
   allow:                                # namespaced allowlist (ceiling)
@@ -171,7 +171,7 @@ class Transport(Protocol):           # start/stop; delivers Tasks to the handler
 
 Default implementations ship in-tree (in-memory/no-op/SQLite). Real backends
 arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
-`daedalus.transports`): `daedalus[techne]`, `daedalus[limenal]`,
+`daedalus.transports`): `daedalus[techne]`, `daedalus[liminal]`,
 `daedalus[slack]`. Third parties add backends without touching core.
 
 ### 2.3 LLM invocation
@@ -263,7 +263,7 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 | 1 (v0.1) | bundle spec + loader, core runtime, LiteLLM loop, cli transport, `daedalus create/run/chat`, fakes + goldens |
 | 2a (v0.2) | tool loop, direct MCP `ToolProvider`, approvals tiers 1–2 |
 | 2b (v0.2) | techne extra, checkpoints + budget |
-| 3 (v0.3) | a2a transport + card serving, slack transport + tier-3 escalation, limenal extra |
+| 3 (v0.3) | a2a transport + card serving, slack transport + tier-3 escalation, liminal extra |
 | 4 (v0.4) | kaminos: bundle editor (palette/canvas/inspector) + test mode over SSE |
 | 5 (v0.5) | kaminos live wiring against a running cabal |
 

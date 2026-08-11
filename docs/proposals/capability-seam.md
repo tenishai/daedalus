@@ -12,7 +12,7 @@ Correcting some drift between fleet-side sketches and the shipped
 runtime (daedalus v0.4.0.dev0, 155 tests):
 
 - **Hybrid is not a proposal — it's how scout runs.** `tools.builtin`
-  composes with `provider: mcp|limenal` through `MultiToolProvider`;
+  composes with `provider: mcp|liminal` through `MultiToolProvider`;
   one merged tool list reaches the model.
 - **`tools.builtin` is a configured dict, not a name list** —
   `files: {roots: [...]}` — and `files` is today's only group.
@@ -41,7 +41,7 @@ runtime (daedalus v0.4.0.dev0, 155 tests):
 
 The fleet pattern converging out of Iris/Cinder: domain agents with
 local builtin tools (kubectl, gcloud — fast, scoped, no hop) plus shared
-fleet capabilities through limenal (`sherlock.holmes_ask`,
+fleet capabilities through liminal (`sherlock.holmes_ask`,
 `prudence.review_pr`, `archivist.search`, `thoth.search_docs`). Two
 frictions:
 
@@ -104,14 +104,14 @@ implementation. The provider contract is the existing `ToolProvider`
 protocol (tools()/call()); config dict passes to the constructor,
 invalid config fails at load, not mid-conversation.
 
-### C. Card-driven auto-gating (daedalus + limenal, coordinated)
+### C. Card-driven auto-gating (daedalus + liminal, coordinated)
 
-Limenal capability cards already declare what each handler covers, and
-limenal now derives per-tool scopes from cards (#41/#43). Add one field
+Liminal capability cards already declare what each handler covers, and
+liminal now derives per-tool scopes from cards (#41/#43). Add one field
 to the card contract: **`mutating: true|false`** (Rich's call on the
 exact name/shape). Then:
 
-- daedalus's limenal provider reads card metadata; any tool marked
+- daedalus's liminal provider reads card metadata; any tool marked
   mutating is **auto-gated** (`plan_approval`) unless the bundle
   already has a more specific gate for it.
 - Safety defaults travel WITH the capability, set by its author —
@@ -135,9 +135,9 @@ gates (status quo). Proposal: strict mode as an opt-in
 `tools.gate_unknown: true`, default off for now, revisit after fleet
 experience.)
 
-### D. Fleet read-policy lives in the gateway (limenal)
+### D. Fleet read-policy lives in the gateway (liminal)
 
-"Every domain agent gets fleet reads" is a *policy*, and limenal just
+"Every domain agent gets fleet reads" is a *policy*, and liminal just
 grew the policy layer for it: per-tool scope enforcement with scopes
 derived from handler cards. The fleet deployment grants agent tokens
 the read scopes; mutations require explicitly granted scopes. The
@@ -147,7 +147,7 @@ sufficient to stop a surprise.
 
 ### E. The kaminos capability palette (kaminos, next arc after v0.5)
 
-Limenal's card set IS the palette. Kaminos queries the gateway, shows
+Liminal's card set IS the palette. Kaminos queries the gateway, shows
 every capability with its card (description, credentials, mutating
 flag), overlays the current bundle's effective ceiling
 (allow ∩ ¬deny), and lets the operator toggle — writing `allow`/`deny`
@@ -173,9 +173,9 @@ inspect what you got.
 |---|---|---|
 | 1 | `tools.deny` semantics as specified (A) | Shaz |
 | 2 | Entry-point name `daedalus.tool_groups` + provider contract (B) | Shaz |
-| 3 | Card `mutating` field name/shape in limenal (C) | Rich |
+| 3 | Card `mutating` field name/shape in liminal (C) | Rich |
 | 4 | Auto-gate default for metadata-less tools (C, open q) | Shaz + fleet experience |
-| 5 | Fleet read-scope grant convention in limenal deploys (D) | Rich + fleet Ember |
+| 5 | Fleet read-scope grant convention in liminal deploys (D) | Rich + fleet Ember |
 | 6 | Palette as the kaminos arc after v0.5 (E) | Shaz |
 
 A + B are small, self-contained daedalus PRs and unblock Iris-as-bundle

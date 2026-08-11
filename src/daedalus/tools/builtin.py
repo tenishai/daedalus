@@ -1,7 +1,7 @@
 """Built-in read-only files tools — rooted, fail-closed, no dependencies.
 
 The out-of-box answer to "read a file" without node or third-party servers.
-Write access never lives here; that's gateway (limenal) territory.
+Write access never lives here; that's gateway (liminal) territory.
 """
 
 from __future__ import annotations

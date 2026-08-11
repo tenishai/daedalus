@@ -303,7 +303,7 @@ async def test_builtin_files_wires_from_agent_yaml_alone(tmp_path):
 
 
 async def test_provider_down_is_a_task_failure_not_an_exception(tmp_path):
-    """Finding #19: limenal down -> unhandled ConnectError -> a2a 500 ->
+    """Finding #19: liminal down -> unhandled ConnectError -> a2a 500 ->
     kaminos 500 -> browser JSON.parse error. Layer 1: the agent turns a
     dead provider into a FAILED task with the reason in the reply."""
 
