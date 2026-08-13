@@ -259,6 +259,7 @@ def ingest_intake(
                 (digest, path.name, json.dumps(ids)),
             )
             conn.commit()
+            ledgered.add(digest)
             ingested += len(ids)
 
         return {"ingested": ingested, "skipped": skipped}

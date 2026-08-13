@@ -38,6 +38,21 @@ def test_parse_ignores_preamble_and_blank_sections(tmp_path):
     assert parse_knowledge_file(p) == ["## Kept\nYes."]
 
 
+def test_parse_no_headings_returns_whole_text_stripped(tmp_path):
+    """Heading-less input (e.g., intake notes) returns whole text as one section."""
+    p = _write(tmp_path, "note.txt", "Just a flat prose note, no ## sections at all.\n")
+    assert parse_knowledge_file(p) == ["Just a flat prose note, no ## sections at all."]
+
+
+def test_parse_empty_or_whitespace_file_returns_empty_list(tmp_path):
+    """Empty or whitespace-only file returns empty list."""
+    p = _write(tmp_path, "empty.md", "")
+    assert parse_knowledge_file(p) == []
+
+    p = _write(tmp_path, "whitespace.md", "   \n\n  \t  \n")
+    assert parse_knowledge_file(p) == []
+
+
 def test_type_for_maps_filename_stems():
     assert type_for("gotchas.md") == "evaluation"
     assert type_for("operational-playbooks.md") == "procedure"
@@ -487,6 +502,68 @@ def test_intake_txt_files_ingest_whole_or_sectioned(tmp_path):
         "## Beta\nsecond",
         "Just a flat note, no headings at all.",
     ]
+
+
+def test_intake_partial_store_failure_orphans_nothing_and_keeps_prior_state(tmp_path):
+    """Mid-file store failure leaves no orphaned rows and no intake_state row; rerun ingests cleanly."""
+    idir = tmp_path / "intake"
+    idir.mkdir()
+    # plain.txt (call 1, succeeds) -> sectioned.txt/Alpha (call 2, succeeds)
+    # -> sectioned.txt/Beta (call 3, raises)
+    (idir / "plain.txt").write_text("Just a note.\n")
+    (idir / "sectioned.txt").write_text("## Alpha\nfirst\n\n## Beta\nsecond\n")
+    fake = RaisingStore(fail_on_call=3)
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+
+    with pytest.raises(RuntimeError):
+        ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+
+    # sectioned.txt's already-stored entry (call 2) was cleaned up, not orphaned.
+    assert all(s != "intake:sectioned.txt" or not s.startswith("intake:sectioned.txt")
+               for (_, _, s) in fake.rows.values()
+               if "sectioned" in s)
+    # plain.txt, processed earlier in the same run, was stored successfully.
+    assert any("plain.txt" in s for (_, _, s) in fake.rows.values())
+
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT sha256, filename FROM intake_state").fetchall()
+    conn.close()
+    # Only plain.txt's state row was committed; sectioned.txt never got one, so
+    # a later run can ingest it fresh instead of treating it as done.
+    assert len(rows) == 1
+    assert rows[0][1] == "plain.txt"
+
+    # Rerun: sectioned.txt should now ingest cleanly
+    fake2 = FakeStore()
+    result = ingest_intake(idir, techne_db, state, fake2.store, fake2.delete)
+    assert result == {"ingested": 2, "skipped": 1}  # plain.txt skipped (already ledgered), sectioned ingests
+
+
+def test_intake_same_bytes_different_files_ingests_once_skips_second(tmp_path):
+    """Two files with identical content: first ingests, second skipped; first ledger row intact."""
+    idir = tmp_path / "intake"
+    idir.mkdir()
+    identical_text = "## Alpha\nfirst\n\n## Beta\nsecond\n"
+    (idir / "file1.md").write_text(identical_text)
+    (idir / "file2.md").write_text(identical_text)
+    fake = FakeStore()
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+
+    result = ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+
+    # One ingestion (2 sections), one skip
+    assert result == {"ingested": 2, "skipped": 1}
+    assert len(fake.rows) == 2  # Only file1's entries; file2 was skipped
+
+    # Verify ledger: file1 should have a row with the shared digest
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT sha256, filename, entry_ids FROM intake_state ORDER BY filename").fetchall()
+    conn.close()
+    assert len(rows) == 1  # Only one ledger row (for file1)
+    assert rows[0][1] == "file1.md"
+    assert sorted(json.loads(rows[0][2])) == sorted(fake.rows)  # All entries belong to file1
 
 
 # --- main()'s last-file bug: git drops empty dirs, so deleting the LAST
