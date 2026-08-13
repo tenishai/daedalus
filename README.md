@@ -7,7 +7,7 @@ approval model, and Protocol seams for memory, tools, and checkpoints.
 
 Part of the tenish family:
 
-- [techne](https://github.com/dimartin/techne) — memory
+- [techne](https://github.com/tenishai/techne) — memory
 - [liminal](https://github.com/tenishai/liminal) — tool gateway
 - cabal — orchestration
 - ladon — secrets
