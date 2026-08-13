@@ -1,6 +1,7 @@
 """Tests for the runtime image's knowledge seeder. Stdlib-only — the techne
 write path is injected, so these run in daedalus's dev venv without techne."""
 
+import hashlib
 import json
 import logging
 import shutil
@@ -10,7 +11,7 @@ import types
 from pathlib import Path
 
 import pytest
-from seeder import TYPE_MAP, main, parse_knowledge_file, sync, type_for
+from seeder import TYPE_MAP, ingest_intake, main, parse_knowledge_file, sync, type_for
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -52,14 +53,18 @@ class FakeStore:
     def __init__(self):
         self.next_id = 1
         self.rows = {}  # id -> (content, type, source)
+        self.tags_by_id = {}  # id -> tags (kept separately so existing 3-tuple
+        # unpacking of .rows.values() across the file stays untouched)
 
     def store(self, db_path, content, type, tags, source):
         i = self.next_id
         self.next_id += 1
         self.rows[i] = (content, type, source)
+        self.tags_by_id[i] = tags
         return i
 
     def delete(self, db_path, entry_id):
+        self.tags_by_id.pop(entry_id, None)
         return self.rows.pop(entry_id, None) is not None
 
 
@@ -206,11 +211,21 @@ def test_purge_fn_not_called_when_state_db_is_healthy(tmp_path):
     assert purge_calls == []
 
 
-def _seed_directly(fake: FakeStore, filename: str, sections: list[str], type_: str) -> list[int]:
+def _seed_directly(
+    fake: FakeStore,
+    filename: str,
+    sections: list[str],
+    type_: str,
+    tags: str = "seed",
+    source: str | None = None,
+) -> list[int]:
     """Simulate the on-disk artifact of a SIGKILL landing between the last
-    store_fn() call for a file and the seed_state commit: the entries exist
-    in the store, but no seed_state row was ever written for the file."""
-    return [fake.store(None, section, type_, "seed", f"seed:{filename}") for section in sections]
+    store_fn() call for a file and the seed_state (or intake_state) commit:
+    the entries exist in the store, but no ledger row was ever written for
+    the file. Defaults reproduce the original seed-only helper; intake tests
+    pass tags="intake" and the sha-scoped source explicitly."""
+    source = source or f"seed:{filename}"
+    return [fake.store(None, section, type_, tags, source) for section in sections]
 
 
 def test_sigkill_aftermath_converges_via_list_ids_fn(tmp_path):
@@ -323,6 +338,155 @@ def test_corrupt_state_with_purge_and_list_ids_fn_converges(tmp_path):
     # so list_ids_fn should return empty ids for every source it checks.
     assert len(list_ids_calls) == 2  # Called once per file during convergence.
     assert all(ids == [] for _, ids in list_ids_calls)
+
+
+# --- intake: one-shot ingestion. Opposite lifecycle from knowledge sync --
+# ledgered by content-sha (not filename), never removed on convergence, and
+# the sha-scoped techne source (`intake:<filename>#<sha12>`) is what makes a
+# crash-window rerun distinguishable from legitimate filename reuse.
+
+
+def _intake_dir(tmp_path: Path, name: str = "notes.md", text: str | None = None) -> Path:
+    idir = tmp_path / "intake"
+    idir.mkdir(exist_ok=True)
+    if text is None:
+        text = "## One\nfirst\n\n## Two\nsecond\n"
+    (idir / name).write_text(text)
+    return idir
+
+
+def test_intake_first_run_ingests_and_ledgers(tmp_path):
+    idir, fake = _intake_dir(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    digest = hashlib.sha256((idir / "notes.md").read_bytes()).hexdigest()
+
+    result = ingest_intake(idir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"ingested": 2, "skipped": 0}
+    expected_source = f"intake:notes.md#{digest[:12]}"
+    assert len(fake.rows) == 2
+    assert all(source == expected_source for (_, _, source) in fake.rows.values())
+    assert all(tags == "intake" for tags in fake.tags_by_id.values())
+
+    conn = sqlite3.connect(state)
+    row = conn.execute("SELECT sha256, filename, entry_ids FROM intake_state").fetchone()
+    conn.close()
+    assert row[0] == digest
+    assert row[1] == "notes.md"
+    assert sorted(json.loads(row[2])) == sorted(fake.rows)
+
+
+def test_intake_same_sha_skipped_across_runs(tmp_path):
+    idir, fake = _intake_dir(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+
+    first = ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+    before = dict(fake.rows)
+    second = ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+
+    assert first == {"ingested": 2, "skipped": 0}
+    assert second == {"ingested": 0, "skipped": 1}
+    assert fake.rows == before  # nothing re-stored on the unchanged rerun
+
+
+def test_intake_filename_reuse_new_content_appends(tmp_path):
+    idir, fake = _intake_dir(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+
+    ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+    first_ids = set(fake.rows)
+
+    (idir / "notes.md").write_text("## Three\nthird\n")
+    result = ingest_intake(idir, techne_db, state, fake.store, fake.delete)
+
+    assert result == {"ingested": 1, "skipped": 0}
+    # Both ingestions' rows survive: filename reuse with new content appends,
+    # it never replaces or removes the earlier ingestion's entries.
+    assert first_ids <= set(fake.rows)
+    assert len(fake.rows) == 3
+
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT filename FROM intake_state ORDER BY sha256").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["notes.md", "notes.md"]  # two ledger rows, one per sha
+
+
+def test_intake_file_deletion_removes_nothing(tmp_path):
+    idir, fake = _intake_dir(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+    delete_calls = []
+
+    def spy_delete(db_path, entry_id):
+        delete_calls.append(entry_id)
+        return fake.delete(db_path, entry_id)
+
+    ingest_intake(idir, techne_db, state, fake.store, spy_delete)
+    rows_before = dict(fake.rows)
+
+    (idir / "notes.md").unlink()
+    result = ingest_intake(idir, techne_db, state, fake.store, spy_delete)
+
+    assert result == {"ingested": 0, "skipped": 0}
+    assert delete_calls == []  # delete_fn is never invoked by a one-shot pass
+    assert fake.rows == rows_before  # memories outlive the file
+
+    conn = sqlite3.connect(state)
+    row = conn.execute("SELECT filename FROM intake_state").fetchone()
+    conn.close()
+    assert row is not None  # ledger entry is untouched
+
+
+def test_intake_crash_window_converges_without_duplicates(tmp_path):
+    idir, fake = _intake_dir(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    techne_db = tmp_path / "techne.db"
+    digest = hashlib.sha256((idir / "notes.md").read_bytes()).hexdigest()
+    source = f"intake:notes.md#{digest[:12]}"
+
+    # A prior boot's store_fn() calls landed, then it died before the
+    # intake_state row committed -- no ledger row exists for this sha.
+    stale_ids = _seed_directly(
+        fake, "notes.md", ["## One\nfirst", "## Two\nsecond"], "fact", tags="intake", source=source
+    )
+
+    def list_ids_fn(db_path, src):
+        return [i for i, (_, _, s) in fake.rows.items() if s == src]
+
+    result = ingest_intake(
+        idir, techne_db, state, fake.store, fake.delete, list_ids_fn=list_ids_fn
+    )
+
+    assert result == {"ingested": 2, "skipped": 0}
+    assert not (set(stale_ids) & set(fake.rows))  # orphans purged, not duplicated
+    assert len(fake.rows) == 2  # one ingestion's worth, total
+
+    conn = sqlite3.connect(state)
+    row = conn.execute("SELECT sha256, entry_ids FROM intake_state").fetchone()
+    conn.close()
+    assert row[0] == digest
+    assert sorted(json.loads(row[1])) == sorted(fake.rows)
+
+
+def test_intake_txt_files_ingest_whole_or_sectioned(tmp_path):
+    idir = tmp_path / "intake"
+    idir.mkdir()
+    (idir / "plain.txt").write_text("Just a flat note, no headings at all.\n")
+    (idir / "sectioned.txt").write_text("## Alpha\nfirst\n\n## Beta\nsecond\n")
+    fake = FakeStore()
+    state = tmp_path / "seed_state.db"
+
+    result = ingest_intake(idir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"ingested": 3, "skipped": 0}  # 1 whole-file + 2 sectioned
+    contents = sorted(c for (c, _, _) in fake.rows.values())
+    assert contents == [
+        "## Alpha\nfirst",
+        "## Beta\nsecond",
+        "Just a flat note, no headings at all.",
+    ]
 
 
 # --- main()'s last-file bug: git drops empty dirs, so deleting the LAST
@@ -447,3 +611,56 @@ def test_main_never_seeded_bundle_with_no_knowledge_dir_is_a_clean_noop(
         conn.close()
         assert rows == []
     assert "nothing to seed" in caplog.text
+
+
+def test_main_logs_intake_counts_only_when_dir_exists(tmp_path, monkeypatch, caplog):
+    _install_fake_techne(monkeypatch)
+    techne_home = tmp_path / "techne_home"
+    monkeypatch.setenv("TECHNE_HOME", str(techne_home))
+    root = _bundle_root(tmp_path)
+
+    caplog.set_level(logging.INFO, logger="seeder")
+    assert main(["seeder.py", str(root)]) == 0
+    assert "intake:" not in caplog.text  # no intake/ dir in this bundle yet
+
+    caplog.clear()
+    idir = root / "intake"
+    idir.mkdir()
+    (idir / "notes.md").write_text("## One\nfirst\n\n## Two\nsecond\n")
+
+    assert main(["seeder.py", str(root)]) == 0
+    assert "intake: ingested=2 skipped=0" in caplog.text
+
+
+def test_knowledge_convergence_ignores_intake_dir(tmp_path, monkeypatch, caplog):
+    """Regression: files under intake/ never appear in seed_state or in
+    knowledge's seeded/removed/unchanged counts — the two content classes
+    have opposite lifecycles and must never blur."""
+    fake = _install_fake_techne(monkeypatch)
+    techne_home = tmp_path / "techne_home"
+    monkeypatch.setenv("TECHNE_HOME", str(techne_home))
+    root = _bundle_root(tmp_path)  # knowledge/gotchas.md (2) + facts.md (1)
+    idir = root / "intake"
+    idir.mkdir()
+    (idir / "notes.md").write_text("## One\nfirst\n\n## Two\nsecond\n\n## Three\nthird\n")
+
+    caplog.set_level(logging.INFO, logger="seeder")
+    assert main(["seeder.py", str(root)]) == 0
+
+    # Knowledge convergence's counts are unaffected by the 3 intake entries.
+    assert "seeded=3 removed=0 unchanged=0" in caplog.text
+    assert "intake: ingested=3 skipped=0" in caplog.text
+
+    conn = sqlite3.connect(techne_home / "seed_state.db")
+    seed_filenames = [r[0] for r in conn.execute("SELECT filename FROM seed_state")]
+    intake_filenames = [r[0] for r in conn.execute("SELECT filename FROM intake_state")]
+    conn.close()
+    assert sorted(seed_filenames) == ["facts.md", "gotchas.md"]
+    assert intake_filenames == ["notes.md"]
+
+    seed_sources = [e["source"] for e in fake.entries.values() if e["source"].startswith("seed:")]
+    intake_sources = [
+        e["source"] for e in fake.entries.values() if e["source"].startswith("intake:")
+    ]
+    assert len(seed_sources) == 3
+    assert len(intake_sources) == 3
