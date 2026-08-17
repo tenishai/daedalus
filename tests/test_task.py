@@ -51,3 +51,23 @@ def test_user_text_returns_latest_user_message():
     task.reply("ack")
     task.history.append(Message(role="user", text="second"))
     assert task.user_text() == "second"
+
+
+def test_set_agent_text_replaces_in_place_without_touching_state_or_metadata():
+    task = Task.from_text("hi")
+    task.reply("draft reply", state=TaskState.WORKING)
+    task.set_agent_text("transformed reply")
+    assert task.agent_text() == "transformed reply"
+    assert len(task.history) == 2  # no new turn appended
+    assert task.state is TaskState.WORKING  # reply()'s state untouched
+    assert task.reason_code is None
+
+
+def test_set_agent_text_replaces_the_most_recent_agent_message_only():
+    task = Task.from_text("first")
+    task.reply("first reply")
+    task.history.append(Message(role="user", text="second"))
+    task.reply("second reply")
+    task.set_agent_text("transformed second reply")
+    agent_messages = [m.text for m in task.history if m.role == "agent"]
+    assert agent_messages == ["first reply", "transformed second reply"]

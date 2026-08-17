@@ -69,6 +69,18 @@ class Task(BaseModel):
                 return message.text
         return ""
 
+    def set_agent_text(self, text: str) -> None:
+        """Overwrite the most recent agent message's text in place.
+
+        Unlike reply(), this does not append a new turn or touch state /
+        metadata -- it is the post_draft transform's mutator: the draft
+        already in history becomes the lawful text, not an additional turn.
+        """
+        for message in reversed(self.history):
+            if message.role == "agent":
+                message.text = text
+                return
+
     def reply(
         self,
         text: str,
