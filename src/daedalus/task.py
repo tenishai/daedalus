@@ -81,6 +81,22 @@ class Task(BaseModel):
                 message.text = text
                 return
 
+    def discard_last_agent_message(self) -> None:
+        """Remove the most recent agent message from history, in place.
+
+        The post_draft transform's other mutator: when a hook blocks the
+        draft, the draft must not merely lose the "current reply" spot --
+        it must vanish from history entirely. task_to_a2a serializes the
+        full history verbatim (a blocked draft would leak to a2a callers),
+        and transports that persist the Task across turns (Slack threads,
+        a2a taskId continuation) feed history back into the model's context
+        on the next call. "Discarded, never partially sent."
+        """
+        for index in range(len(self.history) - 1, -1, -1):
+            if self.history[index].role == "agent":
+                del self.history[index]
+                return
+
     def reply(
         self,
         text: str,

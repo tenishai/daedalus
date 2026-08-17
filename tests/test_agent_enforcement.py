@@ -12,7 +12,7 @@ import pytest
 
 from daedalus.agent import Agent
 from daedalus.bundle import Bundle
-from daedalus.task import ReasonCode, Task, TaskState
+from daedalus.task import Message, ReasonCode, Task, TaskState
 from tests.fakes import CannedMemory, ScriptedLLM
 
 
@@ -110,6 +110,32 @@ async def test_post_blocked_produces_exact_reply_and_discards_draft(tmp_path):
         "A rule stopped this reply: blocked by z_reject.py: leaks a secret."
     )
     assert "the secret is 42" not in task.agent_text()
+    # Reviewed CRITICAL finding: the blocked draft must vanish from history
+    # entirely -- task_to_a2a serializes the FULL history verbatim (it would
+    # leak to a2a callers), and transports that persist the Task across turns
+    # (Slack threads, a2a taskId continuation) feed history back into the
+    # model's context on the next turn. "Discarded, never partially sent."
+    assert all("the secret is 42" not in message.text for message in task.history)
+    assert [m.role for m in task.history] == ["user", "agent"]
+
+
+def test_discard_last_agent_message_removes_it_from_history():
+    """Unit test for the history-hygiene helper agent.py leans on above --
+    Task owns its history invariants, agent.py doesn't reach in directly."""
+    task = Task.from_text("hi")
+    task.reply("draft that must not survive")
+    task.discard_last_agent_message()
+    assert task.history == [Message(role="user", text="hi")]
+    assert task.agent_text() == ""
+
+
+def test_discard_last_agent_message_removes_the_most_recent_agent_message_only():
+    task = Task.from_text("first")
+    task.reply("first reply")
+    task.history.append(Message(role="user", text="second"))
+    task.reply("draft to discard")
+    task.discard_last_agent_message()
+    assert [m.text for m in task.history] == ["first", "first reply", "second"]
 
 
 # ---- locked: zero llm calls --------------------------------------------------
