@@ -63,13 +63,13 @@ async def test_post_draft_chains_in_filename_order(tmp_path):
         tmp_path,
         "b_suffix.py",
         "def post_draft(draft):\n"
-        "    return draft + '!'\n",
+        "    return draft + 'z'\n",
     )
     law = Enforcement.load(d)
 
     result = await law.run_post_draft("hello")
     assert result.blocked is False
-    assert result.text == "HELLO!"  # a_upper runs first, then b_suffix appends
+    assert result.text == "HELLOz"  # a_upper runs first, then b_suffix appends
 
 
 async def test_hook_exception_blocks_with_filename_detail(tmp_path):
