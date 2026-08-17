@@ -237,3 +237,26 @@ def test_peer_task_visible_to_jsonrpc_tasks_get():
     client.post("/a2a/tasks", json=cabal_task(task_id="task-77"))
     fetched = rpc(client, "tasks/get", {"id": "task-77"})["result"]
     assert fetched["status"]["state"] == "completed"
+
+
+def test_peer_dispatch_tool_blocked_is_a_failed_task_not_a_500():
+    """Enforcement blocking a task is a task outcome, not a transport error --
+    the handler returns a failed Task rather than raising."""
+
+    class ToolBlockedHandler:
+        async def handle_task(self, task: Task) -> Task:
+            return task.reply(
+                "A rule stopped this task: blocked by z.py: nope.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+
+    client = TestClient(build_a2a_app(ToolBlockedHandler(), card=CARD))
+    response = client.post("/a2a/tasks", json=cabal_task("deploy"))
+    assert response.status_code == 200
+    task = response.json()
+    assert task["status"]["state"] == "failed"
+    assert task["metadata"]["daedalus_reason_code"] == 703
+    assert task["status"]["message"]["parts"][0]["text"] == (
+        "A rule stopped this task: blocked by z.py: nope."
+    )
