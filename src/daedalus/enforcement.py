@@ -4,7 +4,8 @@ Loads bundle/tools/*.py (kobo's staged Tooling door) and runs their
 pre_task/post_draft hooks around the agent loop. Distinct from
 daedalus.tools (LLM function-calling providers). Fail-closed everywhere:
 an exception, a timeout, or a load failure never lets an unlawful reply
-through."""
+through. When locked, blocking every task is the Agent layer's responsibility;
+this module only reports its locked state."""
 
 import asyncio
 import importlib.util
