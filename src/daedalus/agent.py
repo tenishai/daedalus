@@ -252,7 +252,13 @@ class Agent:
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text())
             if post.blocked:
-                return task.reply(
+                # The unlawful draft is discarded, never partially sent: it
+                # must not linger in history where task_to_a2a would
+                # serialize it to a2a callers, or a persisted Task (Slack
+                # threads, a2a taskId continuation) would feed it back into
+                # the model's context on the next turn.
+                result.discard_last_agent_message()
+                return result.reply(
                     f"A rule stopped this reply: {post.detail}.",
                     state=TaskState.FAILED,
                     reason=ReasonCode.TOOL_BLOCKED,
