@@ -98,10 +98,17 @@ class LiminalSpec(_WarnExtra):
     token_env: str | None = None  # env var holding the bearer token; unset = no auth
 
 
+class ColleaguesSpec(_WarnExtra):
+    url: str | None = None  # switchboard directory base URL
+    token_env: str | None = None  # env var holding the bearer token; unset/empty = degraded
+    self: str | None = None  # this agent's own name, excluded from directory listings
+
+
 class ToolsSpec(_WarnExtra):
-    provider: Literal["none", "mcp", "liminal"] = "none"
+    provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
     liminal: LiminalSpec = Field(default_factory=LiminalSpec)
+    colleagues: ColleaguesSpec = Field(default_factory=ColleaguesSpec)
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
