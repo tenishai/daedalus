@@ -210,6 +210,18 @@
           ],
           "title": "Team",
           "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
         }
       },
       "title": "MemorySpec",

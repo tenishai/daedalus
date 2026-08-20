@@ -526,11 +526,43 @@ class Agent:
             except Exception:  # teardown must never mask the real work
                 pass
 
+    def _start_revision_pass(self) -> asyncio.Task | None:
+        """Schedule the post-boot belief-revision pass once, in the background.
+
+        Absent memory.revision (the default) this returns immediately without
+        even importing daedalus.memory.revision -- a bundle that hasn't opted
+        in gets byte-identical behavior to a runtime that never heard of it.
+        An unknown policy value was already normalized to None (and warned
+        about) by MemorySpec itself, so the only value reaching here is a
+        known one ("operator" today).
+        """
+        policy = self.bundle.spec.memory.revision
+        if policy is None:
+            return None
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            warnings.warn(
+                "memory.revision is set but memory.personal is not 'techne' "
+                "(no techne db to revise); disabling",
+                stacklevel=2,
+            )
+            return None
+
+        from daedalus.memory.revision import run_revision_pass
+
+        async def _pass() -> None:
+            await run_revision_pass(db_path, self.llm, policy=policy, emit=self._emit)
+
+        return asyncio.create_task(_pass())
+
     async def serve(self) -> None:
         transports = self.transports()
         if not transports:
             raise RuntimeError("no usable transports declared in agent.yaml")
+        revision_task = self._start_revision_pass()
         try:
             await asyncio.gather(*(transport.serve(self) for transport in transports))
         finally:
+            if revision_task is not None:
+                revision_task.cancel()
             await self.aclose()

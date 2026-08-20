@@ -116,10 +116,35 @@ class ToolsSpec(_WarnExtra):
     max_steps: int = 10
 
 
+#: Revision policies this runtime knows how to run. "operator" promotes only
+#: candidates whose surviving fact was taught by the operator (source
+#: starting with intake:chat-); everything else stays pending for a human.
+_KNOWN_REVISION_POLICIES = ("operator",)
+
+
 class MemorySpec(_WarnExtra):
     personal: Literal["none", "techne"] = "none"
     home: str | None = None  # techne home dir; default is techne's own (~/.techne)
     team: Literal["none", "outbox"] = "none"
+    # Post-boot belief revision (daedalus.memory.revision): a background pass
+    # that lets the agent's own model judge techne's staged contradiction
+    # candidates. None (absent, the default) never constructs the pass at all
+    # -- a bundle that hasn't opted in gets byte-identical runtime behavior to
+    # a version of daedalus that has never heard of revision. "operator" is
+    # the only implemented policy; any other value is not a crash -- it warns
+    # and disables, same as an unknown top-level field.
+    revision: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_revision(self):
+        if self.revision is not None and self.revision not in _KNOWN_REVISION_POLICIES:
+            warnings.warn(
+                f"memory.revision {self.revision!r} is not a known policy "
+                f"(known: {', '.join(_KNOWN_REVISION_POLICIES)}); disabling",
+                stacklevel=2,
+            )
+            self.revision = None
+        return self
 
 
 class CeilingSpec(BaseModel):
