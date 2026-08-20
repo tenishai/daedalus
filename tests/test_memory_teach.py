@@ -10,7 +10,6 @@ from daedalus.memory.teach import (
     FILENAME_KEY,
     SYSTEM_TASK_KEY,
     TEACH_MARKER,
-    TeachResult,
     apply_teach,
     is_teach_task,
     teach_authorized,
@@ -48,7 +47,9 @@ def _rows(db, source):
     ]
 
 
-def _teach_task(text="The dog is named Tsuru.", *, sub="service:room", filename="chat-20260820-dog.md"):
+def _teach_task(
+    text="The dog is named Tsuru.", *, sub="service:room", filename="chat-20260820-dog.md"
+):
     task = Task.from_text(text)
     task.metadata[SYSTEM_TASK_KEY] = TEACH_MARKER
     task.metadata[FILENAME_KEY] = filename
