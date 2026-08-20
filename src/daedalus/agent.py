@@ -529,6 +529,42 @@ class Agent:
             except Exception:  # teardown must never mask the real work
                 pass
 
+    def _colleagues_for_revision(self):
+        """The colleagues client the revision pass's colleague branch
+        corroborates through (directory fetch + ask-colleague), by the same
+        client/config the tool provider itself uses.
+
+        Prefers REUSING the agent's own wired ColleaguesToolProvider --
+        whether tools.provider is 'colleagues' directly, or composed behind
+        MultiToolProvider alongside other providers -- since that is the
+        exact client (and, when configured, the exact bearer token) the
+        model's own colleagues.ask_colleague tool calls go through. Falls
+        back to constructing a fresh one from the same bundle spec
+        (tools.colleagues) when no such provider is reachable, e.g. the
+        bundle's tools.provider is 'mcp' or 'liminal' but a colleague-sourced
+        fact is still staged from an earlier configuration. Returns None
+        when even that is impossible (no tools.colleagues.url configured
+        anywhere) -- the colleague branch then isolates that as a
+        per-candidate corroboration failure, same as any other.
+        """
+        from daedalus.tools.colleagues import ColleaguesToolProvider
+
+        if isinstance(self.tools, ColleaguesToolProvider):
+            return self.tools
+        for provider in getattr(self.tools, "providers", []):
+            if isinstance(provider, ColleaguesToolProvider):
+                return provider
+
+        spec = self.bundle.spec.tools.colleagues
+        if not spec.url:
+            return None
+        return ColleaguesToolProvider(
+            spec.url,
+            token_env=spec.token_env,
+            self_name=spec.self,
+            db_path=getattr(self.memory, "db_path", None),
+        )
+
     def _start_revision_pass(self) -> asyncio.Task | None:
         """Schedule the post-boot belief-revision pass once, in the background.
 
@@ -553,8 +589,12 @@ class Agent:
 
         from daedalus.memory.revision import run_revision_pass
 
+        colleagues = self._colleagues_for_revision()
+
         async def _pass() -> None:
-            await run_revision_pass(db_path, self.llm, policy=policy, emit=self._emit)
+            await run_revision_pass(
+                db_path, self.llm, policy=policy, emit=self._emit, colleagues=colleagues
+            )
 
         return asyncio.create_task(_pass())
 
