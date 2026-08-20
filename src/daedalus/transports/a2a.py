@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from daedalus.events import EventBus
 from daedalus.protocols import Handler
-from daedalus.task import Message, Task, TaskState
+from daedalus.task import VERIFIED_SUB_KEY, Message, Task, TaskState
 
 
 class ParamsError(ValueError):
@@ -108,6 +108,17 @@ def task_from_a2a(payload: dict) -> Task:
     return task
 
 
+def stamp_verified_sub(task: Task, claims: dict | None) -> None:
+    """The transport owns metadata[VERIFIED_SUB_KEY]: wire-supplied values
+    are discarded unconditionally, and the key exists only when a verifier
+    accepted the caller's token and its claims carried a sub. Handlers
+    (the teach lane) trust it on that basis."""
+    task.metadata.pop(VERIFIED_SUB_KEY, None)
+    sub = (claims or {}).get("sub")
+    if isinstance(sub, str) and sub:
+        task.metadata[VERIFIED_SUB_KEY] = sub
+
+
 async def sse_stream(events: EventBus):
     """Replay recent events, then stream live — each as an SSE data frame."""
     replay, queue = events.subscribe()
@@ -140,21 +151,25 @@ def build_a2a_app(
     def error(rpc_id, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
 
-    async def unauthorized(request: Request) -> JSONResponse | None:
-        """401 response when auth is configured and the token fails, else None."""
+    async def authorize(request: Request) -> tuple[JSONResponse | None, dict | None]:
+        """(401, None) when auth is configured and the token fails;
+        (None, claims) when it verifies; (None, None) with no verifier."""
         if verifier is None:
-            return None
+            return None, None
         from daedalus.transports.a2a_auth import AuthError
 
         try:
-            await verifier.verify_header(request.headers.get("authorization"))
+            claims = await verifier.verify_header(request.headers.get("authorization"))
         except AuthError as exc:
-            return JSONResponse(
-                {"error": f"unauthorized: {exc}"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
+            return (
+                JSONResponse(
+                    {"error": f"unauthorized: {exc}"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                ),
+                None,
             )
-        return None
+        return None, claims
 
     @app.get("/.well-known/agent-card.json")
     async def agent_card() -> dict:
@@ -172,7 +187,7 @@ def build_a2a_app(
             return JSONResponse({"error": "no event stream wired"}, status_code=404)
         return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
-    async def message_send(params: dict) -> dict:
+    async def message_send(params: dict, claims: dict | None) -> dict:
         message = params.get("message")
         if not isinstance(message, dict):
             raise ParamsError("params.message is required")
@@ -185,15 +200,17 @@ def build_a2a_app(
                     raise ParamsError(f"unknown taskId {task_id!r}")
                 task.history.append(Message(role="user", text=text))
                 task.state = TaskState.SUBMITTED
+                stamp_verified_sub(task, claims)
             else:
                 task = Task.from_text(text, context_id=message.get("contextId"))
+                stamp_verified_sub(task, claims)
                 tasks[task.id] = task
         task = await handler.handle_task(task)
         async with lock:
             tasks[task.id] = task
         return task_to_a2a(task)
 
-    async def tasks_get(params: dict) -> dict:
+    async def tasks_get(params: dict, claims: dict | None) -> dict:
         task_id = params.get("id")
         async with lock:
             task = tasks.get(task_id)
@@ -210,7 +227,7 @@ def build_a2a_app(
         Error bodies are readable JSON — cabal wraps any >=400 response text
         in a DispatchError, so what we return here is what its operator sees.
         """
-        denied = await unauthorized(request)
+        denied, claims = await authorize(request)
         if denied is not None:
             return denied
         try:
@@ -221,6 +238,7 @@ def build_a2a_app(
             task = task_from_a2a(body)
         except ParamsError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
+        stamp_verified_sub(task, claims)
         async with lock:
             tasks[task.id] = task
         try:
@@ -233,7 +251,7 @@ def build_a2a_app(
 
     @app.post("/")
     async def rpc(request: Request):
-        denied = await unauthorized(request)
+        denied, claims = await authorize(request)
         if denied is not None:
             return denied
         try:
@@ -245,7 +263,7 @@ def build_a2a_app(
         if method is None:
             return error(rpc_id, -32601, f"method not found: {body.get('method')!r}")
         try:
-            result = await method(body.get("params") or {})
+            result = await method(body.get("params") or {}, claims)
         except ParamsError as exc:
             return error(rpc_id, -32602, str(exc))
         except Exception as exc:  # handler bug or backend down: JSON-RPC, not HTTP 500

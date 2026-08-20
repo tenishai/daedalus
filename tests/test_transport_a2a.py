@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from daedalus.agent import Agent  # noqa: E402
 from daedalus.bundle import Bundle  # noqa: E402
-from daedalus.task import ReasonCode, Task, TaskState  # noqa: E402
+from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app, task_to_a2a  # noqa: E402
 from tests.fakes import ScriptedLLM  # noqa: E402
 
@@ -194,6 +194,30 @@ def test_peer_dispatch_echoes_cabal_metadata_back():
     task = client.post("/a2a/tasks", json=cabal_task()).json()
     assert task["metadata"]["cabal_trace_id"] == "trace-9"
     assert task["metadata"]["cabal_span_id"] == "span-3"
+
+
+class RecordingHandler:
+    """Records the Task it receives so a test can inspect the metadata the
+    transport stamped before handing off to the handler."""
+
+    def __init__(self):
+        self.received: Task | None = None
+
+    async def handle_task(self, task: Task) -> Task:
+        self.received = task
+        return task.reply(f"echo: {task.user_text()}")
+
+
+def test_peer_dispatch_discards_wire_supplied_sub_when_unverified():
+    """No verifier configured -- a caller cannot forge the trust marker by
+    just putting it in the wire body (Task 2)."""
+    handler = RecordingHandler()
+    client = TestClient(build_a2a_app(handler))
+    payload = cabal_task()
+    payload["metadata"][VERIFIED_SUB_KEY] = "service:forged"
+    response = client.post("/a2a/tasks", json=payload)
+    assert response.status_code == 200
+    assert VERIFIED_SUB_KEY not in handler.received.metadata
 
 
 def test_peer_dispatch_reason_codes_use_cabal_key():
