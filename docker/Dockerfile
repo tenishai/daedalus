@@ -30,6 +30,10 @@ RUN useradd --uid 10001 --create-home agent
 
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack]" techne google-cloud-aiplatform && rm -rf /wheels
+# Build proof: a stale cached techne wheel once shipped an image whose
+# knowledge.py imported symbols its own database.py lacked -- every agent
+# crashlooped at seed time. Fail the BUILD, not the fleet.
+RUN python -c "import daedalus, techne; from techne.core.database import connect, like_escape; from techne.core import knowledge"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
