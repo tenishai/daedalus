@@ -903,6 +903,169 @@ async def test_revision_done_payload_includes_the_new_counters(monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
+# fetch_agents() token-gating (fix round): a colleagues provider with no
+# token configured used to fire the directory GET anyway, sending
+# "Authorization: Bearer None". fetch_agents() now raises
+# ColleaguesNotConfigured before ever touching the network; the colleague
+# branch does not catch it specially, so it propagates to the same
+# per-candidate isolation every other corroboration failure here uses,
+# landing in report.errors -- the sentinel-vs-error choice made explicit.
+# ---------------------------------------------------------------------------
+
+
+async def test_colleagues_without_a_token_during_corroboration_lands_in_errors(tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    class _NeverCalledClient:
+        async def get(self, url, headers=None):
+            raise AssertionError("fetch_agents must token-gate before any network call")
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            raise AssertionError("should never ask when no token is configured")
+
+    provider = ColleaguesToolProvider(
+        "http://switchboard.test",
+        token_env=None,  # no token configured at all
+        self_name="me",
+        client=_NeverCalledClient(),
+    )
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=provider
+    )
+
+    assert report.errors == 1
+    assert report.quorum_promoted == 0
+    assert report.uncorroborable == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Ask-HTTP-failure path: _ask_colleague swallows a transport error into reply
+# text ("Could not reach <target>: ..."), which the judge then classifies.
+# REAL provider-over-fake-HTTP idiom (client.post raises) so the swallow
+# actually happens, end to end -- not simulated by scripting the text.
+# ---------------------------------------------------------------------------
+
+
+async def test_ask_transport_failure_is_swallowed_and_lands_uncorroborated_not_errors(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(
+        monkeypatch, agents, raises={"rin": RuntimeError("switchboard timeout")}
+    )
+
+    # The judge only ever sees the swallowed "Could not reach rin: ..." reply
+    # text, never rin's actual words -- it reasonably calls that unclear.
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict, "unclear"), policy="operator", colleagues=provider
+    )
+
+    assert client.post_calls  # the ask was actually attempted
+    assert report.uncorroborated == 1
+    assert report.quorum_promoted == 0
+    assert report.disputed == 0
+    assert report.errors == 0  # NOT the error path -- _ask_colleague swallowed it
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# colleagues=None for a colleague-sourced candidate: the controller-
+# adjudicated behavior is report.errors, never a raised exception.
+# ---------------------------------------------------------------------------
+
+
+async def test_colleagues_none_for_colleague_sourced_candidate_lands_in_errors(tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=None
+    )
+
+    assert report.errors == 1
+    assert report.quorum_promoted == 0
+    assert report.uncorroborable == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Pending candidates are genuinely re-examined across passes: techne's own
+# anti-re-proposal guard (conflict_check_emit's _already_proposed) never
+# re-emits a check_hash once ANY candidate row exists for it, so a colleague-
+# sourced candidate left pending is not naturally revisited by the batch
+# loop alone. Pass 1: a lone asserter, no same-team others -- uncorroborable,
+# pending. Pass 2: a NEW same-team colleague now in the directory -- asked,
+# agrees, PROMOTES with quorum:2-<team>.
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_colleague_candidate_is_re_examined_and_can_promote_on_a_later_pass(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    # Pass 1: only the asserter is in the directory. Nobody else to ask.
+    lone_agents = [{"name": "ana", "team": "billing"}]
+    provider1, client1 = _colleagues_provider(monkeypatch, lone_agents)
+
+    first = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=provider1
+    )
+
+    assert first.uncorroborable == 1
+    assert first.quorum_promoted == 0
+    assert client1.post_calls == []  # nobody to ask yet
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+    # Pass 2: the directory grew a same-team colleague. techne never
+    # re-emits this already-proposed check_hash (nothing freshly staged),
+    # but the standing pending candidate is re-routed through corroboration
+    # with today's directory.
+    grown_agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider2, client2 = _colleagues_provider(
+        monkeypatch, grown_agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+
+    second = await run_revision_pass(
+        db_path, ScriptedLLM("agree"), policy="operator", colleagues=provider2
+    )
+
+    assert second.staged == 0  # not freshly staged this pass
+    assert second.quorum_promoted == 1
+    assert client2.post_calls  # rin was actually asked this time
+    assert _knowledge_row(db_path, older_id)["superseded_by"] == newer_id
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "promoted"
+    assert candidate["decided_by"] == "quorum:2-billing"
+
+
+# ---------------------------------------------------------------------------
 # Agent wiring: _colleagues_for_revision -- reuse the wired provider, else
 # construct one from the same bundle spec, else None.
 # ---------------------------------------------------------------------------

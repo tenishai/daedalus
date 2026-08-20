@@ -30,6 +30,16 @@ another operator-taught correction may retire it (spec A's dual-operator
 case is unaffected -- that is still operator vs operator, not the operator
 outvoted by colleagues).
 
+"Pending" here is genuinely provisional, not a dead end: techne's own
+anti-re-proposal guard never re-emits an already-proposed check_hash, so a
+colleague-sourced candidate left pending would otherwise sit forever even
+after the switchboard directory grows a corroborating colleague. Every
+call to run_revision_pass therefore also re-routes every OTHER standing
+pending 'retire' candidate (not just what this call's own conflict check
+just staged) through the same routing, using today's directory and
+today's judge -- a candidate that could not corroborate on an earlier
+pass can still graduate on a later one.
+
 Every failure mode (a down model, a locked db, a malformed verdict, an
 unreachable colleague directory) is caught and counted here;
 run_revision_pass never raises. It is meant to run as a detached background
@@ -83,11 +93,18 @@ class ColleaguesLike(Protocol):
     """The slice of ColleaguesToolProvider the colleague branch reuses:
     the same directory fetch and the same tool-call ask path the provider
     itself offers the model, so corroboration goes over the identical
-    client/config (see daedalus.tools.colleagues.ColleaguesToolProvider)."""
+    client/config (see daedalus.tools.colleagues.ColleaguesToolProvider).
+
+    fetch_agents() is public and token-gated: it raises
+    ColleaguesNotConfigured (daedalus.tools.colleagues) rather than firing
+    the directory GET with no token. This branch does not catch that
+    exception itself -- like every other corroboration failure here, it
+    propagates to the caller's per-candidate isolation and counts as an
+    error (see _run_colleague_branch's docstring)."""
 
     self_name: str | None
 
-    async def _fetch_agents(self) -> tuple[list[dict] | None, str | None]: ...
+    async def fetch_agents(self) -> tuple[list[dict] | None, str | None]: ...
 
     async def call(self, name: str, payload: dict) -> str: ...
 
@@ -243,7 +260,7 @@ async def _run_colleague_branch(
     if colleagues is None:
         raise RuntimeError("no colleagues provider is reachable to corroborate against")
 
-    agents, error = await colleagues._fetch_agents()
+    agents, error = await colleagues.fetch_agents()
     if error is not None:
         raise RuntimeError(error)
 
@@ -299,6 +316,104 @@ async def _run_colleague_branch(
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
 
 
+async def _route_pending_retire_candidate(
+    db_path: Path,
+    model: ModelCall,
+    colleagues: ColleaguesLike | None,
+    emit: Callable[..., None],
+    report: RevisionReport,
+    *,
+    candidate_id: int,
+    survivor_id: int | None,
+    survivor_source: str | None,
+    survivor_content: str | None,
+    retiree_source: str | None,
+) -> None:
+    """Route one pending 'retire' candidate to its outcome: the operator
+    shield, spec-A promotion (survivor is operator-taught), the colleague
+    quorum branch (survivor is colleague-sourced), or a plain skip.
+
+    Shared by two callers in run_revision_pass: the freshly-staged path
+    (candidates this pass's conflict_check_emit/ingest just staged) and the
+    standing-pending rescan (candidates an EARLIER pass left pending,
+    re-routed here in case the switchboard directory has since grown a
+    corroborating colleague). Both callers isolate exceptions per candidate
+    and count them as errors; this function itself does not catch, mirroring
+    _run_colleague_branch (which it may call), so the caller's isolation
+    boundary does the catching.
+    """
+    from techne.core.reflect import promote_candidate
+
+    retiree_taught = bool(retiree_source) and retiree_source.startswith(_TAUGHT_SOURCE_PREFIX)
+    survivor_taught = bool(survivor_source) and survivor_source.startswith(_TAUGHT_SOURCE_PREFIX)
+
+    # SHIELD, checked first: an operator-taught retiree can only be retired
+    # by another operator-taught fact (spec A, unchanged below). Anyone
+    # else -- a colleague, or any other source -- is shielded from retiring
+    # it in this branch, no matter how well corroborated.
+    if retiree_taught and not survivor_taught:
+        report.shielded += 1
+        return
+
+    if survivor_taught:
+        # Spec A, unchanged: the operator's own correction promotes on the
+        # model's verdict alone.
+        promote_candidate(
+            db_path,
+            candidate_id,
+            decided_by=_DECIDED_BY,
+            decision_reason=_DECISION_REASON,
+        )
+        report.promoted += 1
+        _safe_emit(
+            emit,
+            "revision_promoted",
+            candidate_id=candidate_id,
+            survivor_id=survivor_id,
+            source=survivor_source,
+        )
+        return
+
+    if survivor_source and survivor_source.startswith(_COLLEAGUE_SOURCE_PREFIX):
+        asserter, team = _parse_colleague_source(survivor_source)
+        if not team:
+            report.uncorroborable += 1
+            return
+        await _run_colleague_branch(
+            db_path,
+            model,
+            colleagues,
+            emit,
+            report,
+            candidate_id=candidate_id,
+            fact=survivor_content or "",
+            asserter=asserter,
+            team=team,
+        )
+        return
+
+    report.skipped += 1
+
+
+def _standing_pending_retire_candidates(conn, exclude_ids: set[int]) -> list[dict]:
+    """Every OTHER pending 'retire' candidate in the db -- not scoped to any
+    one check_hash, unlike _staged_pending_retire. techne's own anti-re-
+    proposal guard (conflict_check_emit's _already_proposed) never re-emits
+    a check_hash once ANY candidate row exists for it, pending or not, so a
+    colleague-sourced candidate left pending by an earlier pass (uncorrob-
+    orable, disputed, or short of quorum) would otherwise never surface in
+    a later pass's `batch` at all. This is the query that lets run_revision_
+    pass re-examine those standing candidates anyway, using today's
+    directory and today's judge. exclude_ids removes candidates this SAME
+    pass already routed via the freshly-staged path, so none is routed
+    twice in one call."""
+    rows = conn.execute(
+        """SELECT id, target_ids FROM knowledge_candidates
+             WHERE origin = 'conflict' AND status = 'pending' AND action = 'retire'"""
+    ).fetchall()
+    return [dict(r) for r in rows if r["id"] not in exclude_ids]
+
+
 async def run_revision_pass(
     db_path: str | Path,
     model: ModelCall,
@@ -343,7 +458,6 @@ async def run_revision_pass(
         from techne.config import Config
         from techne.core.conflict import conflict_check_emit, conflict_check_ingest
         from techne.core.database import connect
-        from techne.core.reflect import promote_candidate
 
         config = Config(db_path=Path(db_path))
 
@@ -353,6 +467,11 @@ async def run_revision_pass(
             log.exception("revision: conflict_check_emit failed")
             report.errors += 1
             return report
+
+        # Candidate ids routed this pass via the freshly-staged path below --
+        # excluded from the standing-pending rescan afterward so none is
+        # routed twice in the same call.
+        handled_ids: set[int] = set()
 
         for item in batch:
             check_hash = item["check_hash"]
@@ -404,66 +523,20 @@ async def run_revision_pass(
 
                 for decision in decisions:
                     candidate_id = decision["candidate_id"]
+                    handled_ids.add(candidate_id)
                     try:
-                        survivor_id = decision["survivor_id"]
-                        survivor_source = decision["survivor_source"]
-                        retiree_source = decision["retiree_source"]
-                        retiree_taught = bool(retiree_source) and retiree_source.startswith(
-                            _TAUGHT_SOURCE_PREFIX
+                        await _route_pending_retire_candidate(
+                            Path(db_path),
+                            model,
+                            colleagues,
+                            emit,
+                            report,
+                            candidate_id=candidate_id,
+                            survivor_id=decision["survivor_id"],
+                            survivor_source=decision["survivor_source"],
+                            survivor_content=decision["survivor_content"],
+                            retiree_source=decision["retiree_source"],
                         )
-                        survivor_taught = bool(survivor_source) and survivor_source.startswith(
-                            _TAUGHT_SOURCE_PREFIX
-                        )
-
-                        # SHIELD, checked first: an operator-taught retiree can
-                        # only be retired by another operator-taught fact (spec
-                        # A, unchanged below). Anyone else -- a colleague, or
-                        # any other source -- is shielded from retiring it in
-                        # this branch, no matter how well corroborated.
-                        if retiree_taught and not survivor_taught:
-                            report.shielded += 1
-                            continue
-
-                        if survivor_taught:
-                            # Spec A, unchanged: the operator's own correction
-                            # promotes on the model's verdict alone.
-                            promote_candidate(
-                                Path(db_path),
-                                candidate_id,
-                                decided_by=_DECIDED_BY,
-                                decision_reason=_DECISION_REASON,
-                            )
-                            report.promoted += 1
-                            _safe_emit(
-                                emit,
-                                "revision_promoted",
-                                candidate_id=candidate_id,
-                                survivor_id=survivor_id,
-                                source=survivor_source,
-                            )
-                            continue
-
-                        if survivor_source and survivor_source.startswith(
-                            _COLLEAGUE_SOURCE_PREFIX
-                        ):
-                            asserter, team = _parse_colleague_source(survivor_source)
-                            if not team:
-                                report.uncorroborable += 1
-                                continue
-                            await _run_colleague_branch(
-                                Path(db_path),
-                                model,
-                                colleagues,
-                                emit,
-                                report,
-                                candidate_id=candidate_id,
-                                fact=decision["survivor_content"] or "",
-                                asserter=asserter,
-                                team=team,
-                            )
-                            continue
-
-                        report.skipped += 1
                     except Exception:
                         log.exception(
                             "revision: candidate decision failed (candidate_id=%s)", candidate_id
@@ -471,6 +544,56 @@ async def run_revision_pass(
                         report.errors += 1
             except Exception:
                 log.exception("revision: check failed (check_hash=%s)", check_hash)
+                report.errors += 1
+
+        # Re-examine every standing pending 'retire' candidate NOT already
+        # handled above (see _standing_pending_retire_candidates): a
+        # colleague-sourced candidate an earlier pass left pending
+        # (uncorroborable, disputed, or short of quorum) is retried here
+        # against today's directory, so it can still graduate once the
+        # switchboard grows a same-team colleague able to corroborate it.
+        # Not counted in report.staged -- these were staged in an earlier
+        # pass, not this one.
+        conn = connect(Path(db_path))
+        try:
+            standing_rows = _standing_pending_retire_candidates(conn, handled_ids)
+            standing = []
+            for row in standing_rows:
+                ids = _target_id_pair(row["target_ids"])
+                retiree_id, survivor_id = ids if ids is not None else (None, None)
+                survivor_source, survivor_content = _knowledge_fields(conn, survivor_id)
+                retiree_source, _retiree_content = _knowledge_fields(conn, retiree_id)
+                standing.append(
+                    {
+                        "candidate_id": row["id"],
+                        "survivor_id": survivor_id,
+                        "survivor_source": survivor_source,
+                        "survivor_content": survivor_content,
+                        "retiree_source": retiree_source,
+                    }
+                )
+        finally:
+            conn.close()
+
+        for decision in standing:
+            candidate_id = decision["candidate_id"]
+            try:
+                await _route_pending_retire_candidate(
+                    Path(db_path),
+                    model,
+                    colleagues,
+                    emit,
+                    report,
+                    candidate_id=candidate_id,
+                    survivor_id=decision["survivor_id"],
+                    survivor_source=decision["survivor_source"],
+                    survivor_content=decision["survivor_content"],
+                    retiree_source=decision["retiree_source"],
+                )
+            except Exception:
+                log.exception(
+                    "revision: standing candidate re-check failed (candidate_id=%s)", candidate_id
+                )
                 report.errors += 1
     except Exception:
         log.exception("revision: pass failed")
