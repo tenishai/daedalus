@@ -139,6 +139,52 @@ async def test_tools_lists_all_three_tool_specs():
     ]
 
 
+# --- fetch_agents: public, token-gated --------------------------------------
+#
+# fetch_agents() used to be the private _fetch_agents(), fired the directory
+# GET unconditionally (unlike its siblings _list_colleagues/_remember, which
+# check the token first), and was reached across the module boundary by
+# revision.py's ColleaguesLike Protocol -- a private-method leak. It is now
+# public, and gates on the token itself before ever touching the network.
+
+
+async def test_fetch_agents_is_public_and_returns_the_directory(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    provider = make_provider(client)
+    agents, error = await provider.fetch_agents()
+    assert error is None
+    assert agents == DIRECTORY["agents"]
+    url, headers = client.get_calls[0]
+    assert url == "http://switchboard.test/directory"
+    assert headers["Authorization"] == "Bearer secret"
+
+
+async def test_fetch_agents_raises_typed_error_without_a_token_env_and_never_touches_network():
+    from daedalus.tools.colleagues import ColleaguesNotConfigured
+
+    class _NeverCalledClient:
+        async def get(self, url, headers=None):
+            raise AssertionError("fetch_agents must token-gate before any network call")
+
+    provider = ColleaguesToolProvider(
+        "http://switchboard.test", token_env=None, self_name="me", client=_NeverCalledClient()
+    )
+    with pytest.raises(ColleaguesNotConfigured):
+        await provider.fetch_agents()
+
+
+async def test_fetch_agents_raises_typed_error_when_token_env_value_is_empty(monkeypatch):
+    from daedalus.tools.colleagues import ColleaguesNotConfigured
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "")
+    client = FakeHTTPClient()
+    provider = make_provider(client)
+    with pytest.raises(ColleaguesNotConfigured):
+        await provider.fetch_agents()
+    assert client.get_calls == []
+
+
 # --- list_colleagues happy path + self-exclusion ----------------------------
 
 

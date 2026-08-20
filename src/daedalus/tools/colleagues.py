@@ -29,6 +29,21 @@ def _text_parts_of(message: dict) -> str:
     return "\n".join(t for t in texts if t)
 
 
+class ColleaguesNotConfigured(Exception):
+    """Raised by fetch_agents() when no token is configured.
+
+    fetch_agents() is public: daedalus.memory.revision's colleague-quorum
+    branch calls it directly (over the ColleaguesLike Protocol) to reuse
+    this provider's exact directory fetch. This provider's own tool-facing
+    callers (_list_colleagues, _remember) already check the token first and
+    return their own polite not-configured text before ever calling
+    fetch_agents(), so they never see this exception; a caller that skips
+    that pre-check (or calls fetch_agents() directly, as revision.py does)
+    gets a typed error instead of a request sent with "Authorization: Bearer
+    None".
+    """
+
+
 def _format_colleague(agent: dict) -> str:
     name = agent.get("name", "unknown")
     team = agent.get("team") or "unspecified"
@@ -133,12 +148,24 @@ class ColleaguesToolProvider:
             return await self._remember(payload.get("fact", ""), payload.get("learned_from", ""))
         raise LookupError(f"unknown tool {name!r}")
 
-    async def _fetch_agents(self) -> tuple[list[dict] | None, str | None]:
+    async def fetch_agents(self) -> tuple[list[dict] | None, str | None]:
         """GET the switchboard directory. (agents, None) on success, or
         (None, plain-text error) on any failure -- the one request shape
-        both list_colleagues and remember validate names against."""
+        both list_colleagues and remember validate names against.
+
+        Public and token-gated: raises ColleaguesNotConfigured before ever
+        touching the network if no token is configured, the same gate every
+        other network-touching call on this provider applies. Public
+        because daedalus.memory.revision's colleague-quorum branch reuses
+        this exact fetch (see the ColleaguesLike Protocol there) to
+        corroborate colleague-sourced candidates over the same client and
+        config the model's own colleagues.* tools use.
+        """
+        token = self._token()
+        if token is None:
+            raise ColleaguesNotConfigured("the colleague pass is not configured")
         client = self._ensure_client()
-        headers = {"Authorization": f"Bearer {self._token()}"}
+        headers = {"Authorization": f"Bearer {token}"}
         try:
             response = await client.get(f"{self.url}/directory", headers=headers)
         except Exception as exc:
@@ -156,7 +183,7 @@ class ColleaguesToolProvider:
         token = self._token()
         if token is None:
             return _NOT_CONFIGURED
-        agents, error = await self._fetch_agents()
+        agents, error = await self.fetch_agents()
         if error is not None:
             return error
         lines = [
@@ -230,7 +257,7 @@ class ColleaguesToolProvider:
             return "I cannot credit myself with teaching me something. Ask a colleague instead."
         if self.db_path is None:
             return _NO_MEMORY
-        agents, error = await self._fetch_agents()
+        agents, error = await self.fetch_agents()
         if error is not None:
             return error
         match = next(
