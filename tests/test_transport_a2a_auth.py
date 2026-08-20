@@ -215,12 +215,21 @@ def test_agent_wiring_validates_auth_config():
 class FakeVerifier:
     """Duck-typed verifier: always passes, returning whatever claims it was
     built with. The stamping tests don't need real crypto -- that's covered
-    above -- only control over what verify_header hands back."""
+    above -- only control over what verify_header hands back.
 
-    def __init__(self, claims: dict):
+    Supports returning different claims on successive calls via claims_sequence.
+    """
+
+    def __init__(self, claims: dict | None = None, claims_sequence: list[dict] | None = None):
         self.claims = claims
+        self.claims_sequence = claims_sequence or []
+        self.call_count = 0
 
     async def verify_header(self, authorization: str | None) -> dict:
+        if self.claims_sequence:
+            result = self.claims_sequence[self.call_count % len(self.claims_sequence)]
+            self.call_count += 1
+            return result
         return self.claims
 
 
@@ -261,11 +270,20 @@ def test_peer_dispatch_overwrites_wire_supplied_sub_when_verified():
 
 
 def test_rpc_message_send_stamps_verified_sub():
+    """The continuation-turn (taskId) stamp MUST refresh, not persist from turn one.
+    This test proves the stamp is stamped per-request by using different verifier
+    claims on the second (taskId) request and asserting the metadata was updated."""
     handler = RecordingHandler()
-    client = TestClient(
-        build_a2a_app(handler, verifier=FakeVerifier({"sub": "service:room"}))
+    # Use claims_sequence to return different sub on the second call
+    verifier = FakeVerifier(
+        claims_sequence=[
+            {"sub": "service:room"},    # First request (fresh task)
+            {"sub": "service:other"},   # Second request (continuation)
+        ]
     )
+    client = TestClient(build_a2a_app(handler, verifier=verifier))
 
+    # First request: create a new task
     fresh = client.post(
         "/",
         json={
@@ -279,6 +297,7 @@ def test_rpc_message_send_stamps_verified_sub():
     assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
     task_id = fresh["result"]["id"]
 
+    # Second request: continuation turn with different claims
     client.post(
         "/",
         json={
@@ -295,7 +314,8 @@ def test_rpc_message_send_stamps_verified_sub():
         },
         headers=auth_header("unused"),
     )
-    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
+    # PROVE the stamp was refreshed: it should be the NEW sub, not the old one
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:other"
 
 
 def test_verifier_claims_without_sub_leave_key_absent():
