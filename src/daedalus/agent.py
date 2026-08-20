@@ -222,6 +222,9 @@ class Agent:
                     spec.colleagues.url,
                     token_env=spec.colleagues.token_env,
                     self_name=spec.colleagues.self,
+                    # colleagues.remember writes here; None (no techne memory
+                    # configured) is a polite degrade, not a wiring error.
+                    db_path=getattr(self.memory, "db_path", None),
                 )
             )
 
