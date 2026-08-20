@@ -7,20 +7,25 @@ itself, only for the model (ScriptedLLM, already used across the suite).
 
 from __future__ import annotations
 
-import asyncio
-import io
-import json
-import sqlite3
-import sys
-import warnings
-from pathlib import Path
-from unittest.mock import patch
+import pytest
 
-from daedalus.agent import Agent
-from daedalus.bundle import MemorySpec
-from daedalus.memory.revision import RevisionReport, run_revision_pass
-from daedalus.memory.techne import TechneMemoryStore
-from tests.fakes import ScriptedLLM
+# techne is not on PyPI; local runs use the sibling checkout (PYTHONPATH=src:../techne).
+techne = pytest.importorskip("techne")
+
+import asyncio  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import sqlite3  # noqa: E402
+import sys  # noqa: E402
+import warnings  # noqa: E402
+from pathlib import Path  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+from daedalus.agent import Agent  # noqa: E402
+from daedalus.bundle import MemorySpec  # noqa: E402
+from daedalus.memory.revision import RevisionReport, run_revision_pass  # noqa: E402
+from daedalus.memory.techne import TechneMemoryStore  # noqa: E402
+from tests.fakes import ScriptedLLM  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Seeding helpers -- a real temp techne db, built through techne's own
