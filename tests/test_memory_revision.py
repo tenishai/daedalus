@@ -25,6 +25,8 @@ from daedalus.agent import Agent  # noqa: E402
 from daedalus.bundle import MemorySpec  # noqa: E402
 from daedalus.memory.revision import RevisionReport, run_revision_pass  # noqa: E402
 from daedalus.memory.techne import TechneMemoryStore  # noqa: E402
+from daedalus.protocols import LLMResponse  # noqa: E402
+from daedalus.tools.colleagues import ColleaguesToolProvider  # noqa: E402
 from tests.fakes import ScriptedLLM  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -419,3 +421,559 @@ async def test_dual_operator_taught_both_facts_supersede_scenario(tmp_path):
     target_ids = json.loads(candidate["target_ids"])
     assert target_ids == [older_id, newer_id]  # survivor is the one techne's logic chose
     assert candidate["status"] == "promoted"
+
+
+# ---------------------------------------------------------------------------
+# The colleague branch -- quorum corroboration, and the operator shield.
+#
+# A fake colleagues client, wired into a REAL ColleaguesToolProvider (same
+# idiom as tests/test_tools_colleagues.py's FakeHTTPClient): the directory
+# GET and ask-colleague POST the pass corroborates through are exactly the
+# ones the model's own colleagues.* tools would use.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCorroborationResponse:
+    def __init__(self, payload: dict):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeColleagueClient:
+    """Serves a fixed directory over GET; POST replies are scripted per
+    colleague name (a list popped in call order), or raise an injected
+    exception -- a genuine network failure, not the provider's own
+    soft-degrade text -- when that name is in `raises`."""
+
+    def __init__(self, agents, replies=None, raises=None):
+        self.agents = agents
+        self.replies = {name: list(texts) for name, texts in (replies or {}).items()}
+        self.raises = dict(raises or {})
+        self.get_calls: list[tuple[str, dict]] = []
+        self.post_calls: list[tuple[str, dict, dict]] = []
+
+    async def get(self, url, headers=None):
+        self.get_calls.append((url, headers or {}))
+        return _FakeCorroborationResponse({"agents": self.agents})
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        self.post_calls.append((url, json or {}, headers or {}))
+        target = json["target"]
+        if target in self.raises:
+            raise self.raises[target]
+        text = self.replies[target].pop(0)
+        return _FakeCorroborationResponse(
+            {"status": {"message": {"parts": [{"text": text}]}}}
+        )
+
+
+def _colleagues_provider(
+    monkeypatch, agents, *, replies=None, raises=None, self_name="me"
+) -> tuple[ColleaguesToolProvider, _FakeColleagueClient]:
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = _FakeColleagueClient(agents, replies=replies, raises=raises)
+    provider = ColleaguesToolProvider(
+        "http://switchboard.test",
+        token_env="COLLEAGUE_TOKEN",
+        self_name=self_name,
+        client=client,
+    )
+    return provider, client
+
+
+async def test_colleague_survivor_with_quorum_promotes_with_exact_decided_by(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [
+        {"name": "me", "team": "billing"},
+        {"name": "ana", "team": "billing"},
+        {"name": "rin", "team": "billing"},
+    ]
+    provider, client = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict, "agree"), policy="operator", colleagues=provider
+    )
+
+    assert report.quorum_promoted == 1
+    assert report.promoted == 0  # colleague branch, not spec A
+    assert _knowledge_row(db_path, older_id)["superseded_by"] == newer_id
+    [candidate] = [c for c in _candidate_rows(db_path) if c["action"] == "retire"]
+    assert candidate["status"] == "promoted"
+    assert candidate["decided_by"] == "quorum:2-billing"
+    assert candidate["decision_reason"] == "corroborated by same-team specialists"
+    assert client.post_calls  # someone was actually asked
+
+
+async def test_single_same_team_reply_that_does_not_agree_stays_pending(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["not sure, could be either building"]}
+    )
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict, "unclear"), policy="operator", colleagues=provider
+    )
+
+    assert report.uncorroborated == 1
+    assert report.quorum_promoted == 0
+    assert report.disputed == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+    assert candidate["decided_by"] is None
+
+
+async def test_any_disagree_vetoes_promotion_even_with_quorum_worth_of_agrees(
+    monkeypatch, tmp_path
+):
+    """Two agrees plus one disagree is >= QUORUM by count, but any disagree
+    vetoes promotion this pass -- that is the brief's rule, pinned here."""
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [
+        {"name": "ana", "team": "billing"},
+        {"name": "rin", "team": "billing"},
+        {"name": "zeb", "team": "billing"},
+        {"name": "tom", "team": "billing"},
+    ]
+    provider, client = _colleagues_provider(
+        monkeypatch,
+        agents,
+        replies={
+            "rin": ["yes, that's right"],
+            "zeb": ["yes, agreed"],
+            "tom": ["no, that's wrong, it moved back to Building A"],
+        },
+    )
+
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree", "agree", "disagree"),
+        policy="operator",
+        colleagues=provider,
+    )
+
+    assert report.disputed == 1
+    assert report.quorum_promoted == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+
+async def test_no_same_team_colleagues_stays_pending_as_uncorroborable(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "someone-else", "team": "ops"}]
+    provider, client = _colleagues_provider(monkeypatch, agents)
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=provider
+    )
+
+    assert report.uncorroborable == 1
+    assert client.post_calls == []  # nobody was asked
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+
+
+async def test_colleague_source_without_team_stays_pending_as_uncorroborable(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    provider, client = _colleagues_provider(monkeypatch, agents=[])
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=provider
+    )
+
+    assert report.uncorroborable == 1
+    assert client.get_calls == []  # no team to corroborate against; directory never fetched
+    assert client.post_calls == []
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+
+
+async def test_shield_blocks_colleague_survivor_from_retiring_an_operator_taught_fact(
+    monkeypatch, tmp_path
+):
+    """The shield precedes everything: an operator-taught retiree cannot be
+    retired by a colleague-sourced survivor, even if quorum would otherwise
+    succeed. No corroboration is even attempted."""
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path,
+        older_source="intake:chat-shielded",
+        newer_source="colleague:ana#team=billing",
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [
+        {"name": "ana", "team": "billing"},
+        {"name": "rin", "team": "billing"},
+        {"name": "zeb", "team": "billing"},
+    ]
+    # Both would agree if asked -- quorum would otherwise succeed handily.
+    provider, client = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["agreed"], "zeb": ["agreed"]}
+    )
+
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree", "agree"),
+        policy="operator",
+        colleagues=provider,
+    )
+
+    assert report.shielded == 1
+    assert report.quorum_promoted == 0
+    assert report.promoted == 0
+    assert client.get_calls == []  # shield short-circuits before any corroboration attempt
+    assert client.post_calls == []
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"
+    assert candidate["decided_by"] is None
+
+
+async def test_shield_does_not_block_an_operator_survivor_retiring_an_operator_fact(tmp_path):
+    """Regression pin for the shield/spec-A interaction: the shield only
+    protects an operator-taught fact from anyone OTHER than the operator.
+    Two operator-taught facts in conflict (the dual-operator scenario) must
+    still promote through the existing spec-A path, untouched -- the shield
+    must never fire here."""
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="intake:chat-older", newer_source="intake:chat-newer"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    report = await run_revision_pass(db_path, ScriptedLLM(verdict), policy="operator")
+
+    assert report.shielded == 0
+    assert report.promoted == 1
+    assert _knowledge_row(db_path, older_id)["superseded_by"] == newer_id
+
+
+async def test_ask_bound_caps_at_three_even_with_four_same_team_colleagues(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [
+        {"name": "ana", "team": "billing"},
+        {"name": "rin", "team": "billing"},
+        {"name": "zeb", "team": "billing"},
+        {"name": "tom", "team": "billing"},
+        {"name": "kai", "team": "billing"},
+    ]
+    provider, client = _colleagues_provider(
+        monkeypatch,
+        agents,
+        replies={"rin": ["agreed"], "zeb": ["agreed"], "tom": ["agreed"]},
+    )
+
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree", "agree", "agree"),
+        policy="operator",
+        colleagues=provider,
+    )
+
+    assert len(client.post_calls) == 3
+    asked_names = {call[1]["target"] for call in client.post_calls}
+    assert asked_names == {"rin", "zeb", "tom"}
+    assert "kai" not in asked_names
+    assert report.quorum_promoted == 1  # 1 (asserter) + 3 agrees = 4 >= QUORUM
+
+
+async def test_directory_fetch_failure_during_corroboration_is_isolated_and_counted(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+
+    class _BrokenGetClient:
+        async def get(self, url, headers=None):
+            raise RuntimeError("switchboard unreachable")
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            raise AssertionError("should never ask when the directory can't be fetched")
+
+    provider = ColleaguesToolProvider(
+        "http://switchboard.test",
+        token_env="COLLEAGUE_TOKEN",
+        self_name="me",
+        client=_BrokenGetClient(),
+    )
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", colleagues=provider
+    )
+
+    assert report.errors == 1
+    assert report.quorum_promoted == 0
+    assert report.uncorroborable == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+
+
+async def test_judge_failure_during_corroboration_is_isolated_and_counted(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(monkeypatch, agents, replies={"rin": ["yes"]})
+
+    class _RaisesOnSecondCall:
+        """Answers the conflict-check verdict fine; the colleague-reply judge
+        call (the second .complete()) is where the model goes unreachable."""
+
+        def __init__(self, first_reply: str):
+            self.first_reply = first_reply
+            self.calls = 0
+
+        async def complete(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(text=self.first_reply, input_tokens=1, output_tokens=1)
+            raise RuntimeError("judge model unreachable")
+
+    report = await run_revision_pass(
+        db_path, _RaisesOnSecondCall(verdict), policy="operator", colleagues=provider
+    )
+
+    assert report.errors == 1
+    assert report.quorum_promoted == 0
+    assert _knowledge_row(db_path, older_id)["superseded_by"] is None
+
+
+async def test_second_run_is_idempotent_for_a_quorum_promoted_candidate(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(monkeypatch, agents, replies={"rin": ["agreed"]})
+
+    first = await run_revision_pass(
+        db_path, ScriptedLLM(verdict, "agree"), policy="operator", colleagues=provider
+    )
+    assert first.quorum_promoted == 1
+
+    provider2, client2 = _colleagues_provider(monkeypatch, agents, replies={"rin": ["agreed"]})
+    second = await run_revision_pass(
+        db_path, ScriptedLLM(), policy="operator", colleagues=provider2
+    )
+
+    assert second == RevisionReport()
+    assert len(_candidate_rows(db_path)) == 1  # no duplicate candidate from the re-run
+    assert client2.get_calls == []  # nothing pending left to corroborate
+
+
+async def test_events_emitted_in_order_for_quorum_promotion(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(monkeypatch, agents, replies={"rin": ["agreed"]})
+
+    events: list[str] = []
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree"),
+        policy="operator",
+        colleagues=provider,
+        emit=lambda t, **f: events.append(t),
+    )
+
+    assert events == [
+        "revision_start",
+        "revision_judged",
+        "revision_corroborating",
+        "revision_quorum",
+        "revision_done",
+    ]
+    assert report.quorum_promoted == 1
+
+
+async def test_revision_corroborating_and_quorum_events_carry_expected_fields(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(monkeypatch, agents, replies={"rin": ["agreed"]})
+
+    events: list[dict] = []
+    await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree"),
+        policy="operator",
+        colleagues=provider,
+        emit=lambda t, **f: events.append({"type": t, **f}),
+    )
+
+    corroborating = next(e for e in events if e["type"] == "revision_corroborating")
+    assert corroborating["asserter"] == "ana"
+    assert corroborating["team"] == "billing"
+
+    quorum = next(e for e in events if e["type"] == "revision_quorum")
+    assert quorum["agrees"] == 2
+    assert quorum["team"] == "billing"
+
+
+async def test_revision_done_payload_includes_the_new_counters(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, client = _colleagues_provider(monkeypatch, agents, replies={"rin": ["agreed"]})
+
+    events: list[dict] = []
+    await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree"),
+        policy="operator",
+        colleagues=provider,
+        emit=lambda t, **f: events.append({"type": t, **f}),
+    )
+
+    done = next(e for e in events if e["type"] == "revision_done")
+    assert done["quorum_promoted"] == 1
+    assert set(done) >= {
+        "judged",
+        "staged",
+        "promoted",
+        "skipped",
+        "errors",
+        "shielded",
+        "disputed",
+        "uncorroborable",
+        "uncorroborated",
+        "quorum_promoted",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agent wiring: _colleagues_for_revision -- reuse the wired provider, else
+# construct one from the same bundle spec, else None.
+# ---------------------------------------------------------------------------
+
+
+def test_colleagues_for_revision_reuses_the_agents_wired_provider(tmp_path):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  provider: colleagues\n  colleagues:\n"
+        "    url: http://switchboard.test\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    self: x\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+
+    agent = Agent.load(tmp_path, llm=ScriptedLLM())
+
+    assert isinstance(agent.tools, ColleaguesToolProvider)
+    assert agent._colleagues_for_revision() is agent.tools
+
+
+def test_colleagues_for_revision_constructs_from_spec_when_no_provider_is_wired(tmp_path):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  colleagues:\n"
+        "    url: http://switchboard.test\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    self: x\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+
+    agent = Agent.load(tmp_path, llm=ScriptedLLM())
+    assert not isinstance(agent.tools, ColleaguesToolProvider)  # tools.provider defaults to none
+
+    colleagues = agent._colleagues_for_revision()
+
+    assert isinstance(colleagues, ColleaguesToolProvider)
+    assert colleagues.url == "http://switchboard.test"
+    assert colleagues.self_name == "x"
+
+
+def test_colleagues_for_revision_is_none_when_nothing_configured(tmp_path):
+    root = _agent_bundle(tmp_path)
+    agent = Agent.load(root, llm=ScriptedLLM())
+
+    assert agent._colleagues_for_revision() is None
+
+
+async def test_start_revision_pass_threads_the_colleagues_provider_through(tmp_path, monkeypatch):
+    root = _agent_bundle(
+        tmp_path,
+        f"memory:\n  personal: techne\n  home: {tmp_path}\n  revision: operator\n"
+        "tools:\n  provider: colleagues\n  colleagues:\n"
+        "    url: http://switchboard.test\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    self: x\n",
+    )
+    agent = Agent.load(root, llm=ScriptedLLM())
+
+    calls = []
+
+    async def fake_run_revision_pass(db_path, model, *, policy, emit, colleagues=None):
+        calls.append(colleagues)
+        return RevisionReport()
+
+    monkeypatch.setattr("daedalus.memory.revision.run_revision_pass", fake_run_revision_pass)
+
+    task = agent._start_revision_pass()
+    assert task is not None
+    await task
+
+    assert calls == [agent.tools]
