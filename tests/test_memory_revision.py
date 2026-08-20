@@ -335,3 +335,82 @@ async def test_unknown_policy_is_a_swallowed_error(tmp_path):
     report = await run_revision_pass(db_path, ScriptedLLM(), policy="always")
 
     assert report == RevisionReport(judged=0, staged=0, promoted=0, skipped=0, errors=1)
+
+
+async def test_emit_callback_that_raises_is_caught_and_pass_still_completes(tmp_path):
+    """An emit callback that raises on every call does not prevent the pass
+    from completing and returning a valid report. The docstring promise
+    'Never raises' must hold even if the callback itself is broken."""
+    db_path = tmp_path / "techne.db"
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="intake:chat-x"
+    )
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    def breaking_emit(event_type: str, **fields) -> None:
+        raise RuntimeError(f"emit callback broken: {event_type}")
+
+    report = await run_revision_pass(
+        db_path, ScriptedLLM(verdict), policy="operator", emit=breaking_emit
+    )
+
+    # The pass completes successfully despite emit raising on every call.
+    assert report.promoted == 1
+    assert report.judged == 1
+    assert report.errors == 0  # emit failures are not counted as pass errors
+    # The promotion actually happens even though emit is broken.
+    assert _knowledge_row(db_path, older_id)["superseded_by"] == newer_id
+
+
+async def test_dual_operator_taught_both_facts_supersede_scenario(tmp_path):
+    """Regression test: seed TWO contradicting facts BOTH with operator-taught
+    sources (intake:chat-...), script a SUPERSEDE verdict, verify the candidate
+    promotes, exactly one row gets superseded_by set, and the survivor matches
+    techne's direction logic (not a re-implemented copy)."""
+    from techne.core.database import connect
+    from techne.core.knowledge import store
+
+    db_path = tmp_path / "techne.db"
+
+    # Seed two operator-taught facts that conflict (same tag, different claim).
+    older_id = store(
+        db_path, "The office is in Building A.", tags="office", source="intake:chat-older"
+    )
+    newer_id = store(
+        db_path, "The office is in Building C.", tags="office", source="intake:chat-newer"
+    )
+
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE knowledge SET event_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00", older_id),
+        )
+        conn.execute(
+            "UPDATE knowledge SET event_at = ? WHERE id = ?",
+            ("2026-06-01T00:00:00", newer_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Script the verdict to supersede (newer_id survives per techne's direction logic).
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    report = await run_revision_pass(db_path, ScriptedLLM(verdict), policy="operator")
+
+    # Both are operator-taught, so the candidate should promote.
+    assert report.promoted == 1
+    assert report.judged == 1
+
+    # Exactly one row has superseded_by set (the survivor is the one techne chose).
+    older_row = _knowledge_row(db_path, older_id)
+    newer_row = _knowledge_row(db_path, newer_id)
+    assert older_row["superseded_by"] == newer_id
+    assert newer_row["superseded_by"] is None
+
+    # Verify via candidate: target_ids are [retired_id, survivor_id] in order.
+    [candidate] = [c for c in _candidate_rows(db_path) if c["action"] == "retire"]
+    target_ids = json.loads(candidate["target_ids"])
+    assert target_ids == [older_id, newer_id]  # survivor is the one techne's logic chose
+    assert candidate["status"] == "promoted"

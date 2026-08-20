@@ -77,6 +77,15 @@ def _noop_emit(event_type: str, **fields) -> None:
     return None
 
 
+def _safe_emit(emit: Callable[..., None], event_type: str, **fields) -> None:
+    """Call emit with exception handling. If the callback raises, log it and
+    return normally so the pass is never interrupted by a broken callback."""
+    try:
+        emit(event_type, **fields)
+    except Exception:
+        log.exception("revision: emit callback raised for event %r", event_type)
+
+
 def _staged_pending_retire(conn, check_hash: str) -> list[dict]:
     """Candidate rows THIS check_hash just staged: pending, action='retire',
     origin='conflict'. Scoped by check_hash so a second run (whose emit
@@ -133,7 +142,7 @@ async def run_revision_pass(
     """
     emit = emit or _noop_emit
     report = RevisionReport()
-    emit("revision_start")
+    _safe_emit(emit, "revision_start")
 
     try:
         if policy not in KNOWN_POLICIES:
@@ -188,7 +197,8 @@ async def run_revision_pass(
                     conn.close()
 
                 report.judged += 1
-                emit(
+                _safe_emit(
+                    emit,
                     "revision_judged",
                     check_hash=check_hash,
                     focus_id=item["focus_id"],
@@ -209,7 +219,8 @@ async def run_revision_pass(
                             decision_reason=_DECISION_REASON,
                         )
                         report.promoted += 1
-                        emit(
+                        _safe_emit(
+                            emit,
                             "revision_promoted",
                             candidate_id=candidate_id,
                             survivor_id=survivor_id,
@@ -227,6 +238,6 @@ async def run_revision_pass(
         log.exception("revision: pass failed")
         report.errors += 1
     finally:
-        emit("revision_done", **report.as_dict())
+        _safe_emit(emit, "revision_done", **report.as_dict())
 
     return report
