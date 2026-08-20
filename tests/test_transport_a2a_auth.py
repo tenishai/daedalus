@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from joserfc import jwt  # noqa: E402
 from joserfc.jwk import OctKey, RSAKey  # noqa: E402
 
-from daedalus.task import Task  # noqa: E402
+from daedalus.task import VERIFIED_SUB_KEY, Task  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app  # noqa: E402
 from daedalus.transports.a2a_auth import AuthError, JwtVerifier  # noqa: E402
 
@@ -207,3 +207,102 @@ def test_agent_wiring_validates_auth_config():
         Agent._a2a_verifier({"jwks_url": "http://c:7400/jwks.json"})
     with pytest.raises(BundleError, match="mapping"):
         Agent._a2a_verifier("not-a-dict")
+
+
+# ---- stamping the verified subject onto task metadata (Task 2) -------------
+
+
+class FakeVerifier:
+    """Duck-typed verifier: always passes, returning whatever claims it was
+    built with. The stamping tests don't need real crypto -- that's covered
+    above -- only control over what verify_header hands back."""
+
+    def __init__(self, claims: dict):
+        self.claims = claims
+
+    async def verify_header(self, authorization: str | None) -> dict:
+        return self.claims
+
+
+class RecordingHandler:
+    """Records the Task it receives so a test can inspect the metadata the
+    transport stamped before handing off to the handler."""
+
+    def __init__(self):
+        self.received: Task | None = None
+
+    async def handle_task(self, task: Task) -> Task:
+        self.received = task
+        return task.reply(f"echo: {task.user_text()}")
+
+
+def test_peer_dispatch_stamps_verified_sub():
+    handler = RecordingHandler()
+    client = TestClient(
+        build_a2a_app(handler, verifier=FakeVerifier({"sub": "service:room"}))
+    )
+    response = client.post(
+        "/a2a/tasks", json=peer_body(), headers=auth_header("unused")
+    )
+    assert response.status_code == 200
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
+
+
+def test_peer_dispatch_overwrites_wire_supplied_sub_when_verified():
+    handler = RecordingHandler()
+    client = TestClient(
+        build_a2a_app(handler, verifier=FakeVerifier({"sub": "agent:ward"}))
+    )
+    body = peer_body()
+    body["metadata"] = {VERIFIED_SUB_KEY: "service:forged"}
+    response = client.post("/a2a/tasks", json=body, headers=auth_header("unused"))
+    assert response.status_code == 200
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "agent:ward"
+
+
+def test_rpc_message_send_stamps_verified_sub():
+    handler = RecordingHandler()
+    client = TestClient(
+        build_a2a_app(handler, verifier=FakeVerifier({"sub": "service:room"}))
+    )
+
+    fresh = client.post(
+        "/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": {"message": {"role": "user", "parts": [{"kind": "text", "text": "hi"}]}},
+        },
+        headers=auth_header("unused"),
+    ).json()
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
+    task_id = fresh["result"]["id"]
+
+    client.post(
+        "/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "again"}],
+                    "taskId": task_id,
+                }
+            },
+        },
+        headers=auth_header("unused"),
+    )
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
+
+
+def test_verifier_claims_without_sub_leave_key_absent():
+    handler = RecordingHandler()
+    client = TestClient(build_a2a_app(handler, verifier=FakeVerifier({})))
+    response = client.post(
+        "/a2a/tasks", json=peer_body(), headers=auth_header("unused")
+    )
+    assert response.status_code == 200
+    assert VERIFIED_SUB_KEY not in handler.received.metadata
