@@ -5,6 +5,7 @@ and a2a_auth's injectable-fetch idiom for outbound HTTP."""
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,11 @@ import pytest
 from daedalus.tools.colleagues import ColleaguesToolProvider
 
 NOT_CONFIGURED = "The colleague pass is not configured."
+
+
+def _techne_installed() -> bool:
+    # techne is not on PyPI; local runs use the sibling checkout (PYTHONPATH=src:../techne).
+    return importlib.util.find_spec("techne") is not None
 
 
 class FakeResponse:
@@ -418,6 +424,7 @@ async def test_boot_is_unaffected_by_a_missing_token(tmp_path):
 # --- remember happy path + provenance shapes --------------------------------
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 async def test_remember_stores_fact_with_team_provenance_and_low_confidence(
     monkeypatch, tmp_path
 ):
@@ -441,6 +448,7 @@ async def test_remember_stores_fact_with_team_provenance_and_low_confidence(
     assert "—" not in text
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 async def test_remember_stores_fact_without_team_suffix_when_team_empty(monkeypatch, tmp_path):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
     directory = {
@@ -477,6 +485,7 @@ async def test_remember_refuses_self_without_a_network_call(monkeypatch, tmp_pat
     assert "—" not in text
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 async def test_remember_refuses_a_name_absent_from_the_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
     client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
@@ -526,6 +535,7 @@ async def test_remember_degrades_when_token_env_absent(monkeypatch, tmp_path):
     assert client.get_calls == []
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 async def test_remember_store_failure_is_named_plainly(monkeypatch, tmp_path):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
     client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
@@ -541,6 +551,7 @@ async def test_remember_store_failure_is_named_plainly(monkeypatch, tmp_path):
 # --- the directory envelope stays exactly the same for remember too --------
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 async def test_remember_directory_request_shape_is_unchanged(monkeypatch, tmp_path):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
     client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
@@ -557,6 +568,7 @@ async def test_remember_directory_request_shape_is_unchanged(monkeypatch, tmp_pa
 # --- db_path wiring at the Agent level --------------------------------------
 
 
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
 def test_agent_threads_techne_db_path_into_colleagues_provider(tmp_path):
     from daedalus.agent import Agent
     from daedalus.bundle import Bundle
