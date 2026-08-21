@@ -31,6 +31,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    finish_reason: str | None = None  # "length" = truncated by max_tokens (finding #27)
 
 
 @runtime_checkable
