@@ -274,6 +274,12 @@ class Agent:
                     reason=ReasonCode.BUDGET_EXHAUSTED,
                 )
             response = await self.llm.complete(messages, tools=llm_tools)
+            truncated = response.finish_reason == "length"
+            if truncated:
+                # Silent truncation looks like a complete reply to every
+                # surface downstream (finding #27, born as kobo #1/#4) —
+                # trace it AND mark the reply so operators see the cut.
+                self._emit("truncated", max_tokens=self.bundle.spec.model.max_tokens)
             budget.spend(response.input_tokens + response.output_tokens)
             if budget.remaining() is not None:
                 self._emit(
@@ -290,7 +296,13 @@ class Agent:
                     self._emit("salvage", count=len(tool_calls))
             if not tool_calls:
                 await self.checkpoints.drop(task.id)
-                return task.reply(response.text)
+                text = response.text
+                if truncated:
+                    text += (
+                        f"\n\n[reply truncated: hit the model's max_tokens "
+                        f"limit ({self.bundle.spec.model.max_tokens})]"
+                    )
+                return task.reply(text)
 
             messages.append(self._assistant_message(response.text, tool_calls))
             for call in tool_calls:

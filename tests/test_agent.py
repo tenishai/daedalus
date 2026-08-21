@@ -161,3 +161,47 @@ async def test_serve_with_no_usable_transports_raises(tmp_path):
         warnings.simplefilter("ignore")
         with pytest.raises(RuntimeError, match="no usable transports"):
             await agent.serve()
+
+
+# --- finding #27: truncation is never silent --------------------------------
+
+
+async def test_truncated_reply_is_marked_and_traced():
+    """finish_reason == "length" (born as kobo #1/#4: a 1024-token cap made
+    replies LOOK complete on every surface) must mark the reply text AND
+    emit a truncated event for the trace panes."""
+    from daedalus.protocols import LLMResponse
+
+    events = []
+    agent = make_agent(
+        llm=ScriptedLLM(LLMResponse(text="the first half of a long ans", finish_reason="length")),
+        on_event=events.append,
+    )
+    task = await agent.handle_task(Task.from_text("explain everything"))
+    assert task.state is TaskState.COMPLETED
+    assert task.agent_text().startswith("the first half of a long ans")
+    assert "[reply truncated: hit the model's max_tokens" in task.agent_text()
+    truncated = [e for e in events if e["type"] == "truncated"]
+    assert len(truncated) == 1
+    assert truncated[0]["max_tokens"] == agent.bundle.spec.model.max_tokens
+
+
+async def test_complete_reply_carries_no_truncation_marker():
+    from daedalus.protocols import LLMResponse
+
+    events = []
+    agent = make_agent(
+        llm=ScriptedLLM(LLMResponse(text="all done", finish_reason="stop")),
+        on_event=events.append,
+    )
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.agent_text() == "all done"
+    assert not [e for e in events if e["type"] == "truncated"]
+
+
+async def test_finish_reason_defaults_to_none_for_scripted_replies():
+    """Fakes and older LLM impls that never set finish_reason stay silent —
+    absence of evidence is not evidence of truncation."""
+    agent = make_agent()  # plain ScriptedLLM string reply
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert "[reply truncated" not in task.agent_text()
