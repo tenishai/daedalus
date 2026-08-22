@@ -88,18 +88,29 @@ def _stitch_fences(chunks: list[str]) -> list[str]:
     """Keep every chunk independently valid Slack mrkdwn. Fences are
     detected the same way to_mrkdwn does above (``` delimits them, they
     come in pairs): if a fence is still open when a chunk ends, close it
-    there and reopen it at the top of the next chunk."""
+    there and reopen it at the top of the next chunk -- including the
+    FINAL chunk. A fence still open after the last chunk means the source
+    itself never closed it (an agent's reply cut off mid-fence, realistic
+    for long output); closing it there is both what keeps every posted
+    chunk balanced and the most faithful rendering of what the source
+    meant."""
     stitched: list[str] = []
     in_fence = False
-    last = len(chunks) - 1
-    for index, chunk in enumerate(chunks):
+    for chunk in chunks:
         piece = f"```\n{chunk}" if in_fence else chunk
         if chunk.count("```") % 2:
             in_fence = not in_fence
-        if in_fence and index != last:
+        if in_fence:
             piece = f"{piece}\n```"
         stitched.append(piece)
     return stitched
+
+
+# Stitching can add a reopen ("```\n") and/or a close ("\n```") to a chunk
+# AFTER it was packed to budget -- worst case both, on a chunk that sits
+# fully inside an open fence. Reserve that overhead inside the packing
+# budget so no posted chunk ever exceeds budget once stitching runs.
+_STITCH_OVERHEAD = len("```\n") + len("\n```")
 
 
 def _chunk_message(text: str, budget: int = _POST_BUDGET) -> list[str]:
@@ -109,7 +120,7 @@ def _chunk_message(text: str, budget: int = _POST_BUDGET) -> list[str]:
     unchanged -- today's one-call behavior for the common case."""
     if len(text) <= budget:
         return [text]
-    return _stitch_fences(_pack(text, budget, ("\n\n", "\n", None)))
+    return _stitch_fences(_pack(text, budget - _STITCH_OVERHEAD, ("\n\n", "\n", None)))
 
 
 class SlackApi:

@@ -360,3 +360,71 @@ async def test_chunked_fenced_message_posts_are_individually_valid_and_threaded(
     for call in web.calls:
         assert call["thread_ts"] == "30.0"
         assert call["text"].count("```") % 2 == 0
+
+
+async def test_unterminated_source_fence_still_closes_on_the_final_chunk():
+    """Chunking reviewer finding #1: an agent that opens a fence and never
+    closes it (a long reply, realistic) must not leave the LAST posted
+    chunk with a dangling fence -- every chunk renders as valid, balanced
+    markdown on its own, even the one that carries the source's own
+    unterminated intent."""
+    from daedalus.transports.slack import _chunk_message
+
+    text = "```\n" + "a" * 5000
+    chunks = _chunk_message(text)
+
+    assert len(chunks) == 3
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+
+
+async def test_fenced_chunks_never_exceed_the_post_budget_after_stitching():
+    """Chunking reviewer finding #2: stitching a closed/reopened fence onto
+    a chunk happens AFTER packing to budget, so a fenced chunk could come
+    out over budget. Every chunk actually posted to Slack must stay
+    <= the real 3900-char post budget once stitching is done."""
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join(f"line-{i:04d} of the log output here" for i in range(200))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text)
+
+    for chunk in chunks:
+        assert len(chunk) <= 3900
+
+
+async def test_fenced_chunks_never_exceed_a_small_post_budget_after_stitching():
+    """Same as above at a small budget, where the fixed stitch overhead is
+    proportionally much bigger and easiest to see blown."""
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join("LLL" for _ in range(29))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text, budget=120)
+
+    for chunk in chunks:
+        assert len(chunk) <= 120
+
+
+def test_fence_marker_straddling_a_hard_split_is_invisible_to_stitching():
+    """Disclosed edge, not fixed here: _pack's last-resort hard character
+    split cuts purely on character count -- it has no idea "```" is a
+    three-character token. If the split lands inside a fence marker on a
+    line with no other place to break (one giant unbroken line), neither
+    resulting piece contains a whole "```", so _stitch_fences never sees
+    the marker at all and the two chunks post with the fence silently
+    unbalanced. Pinning today's behavior on purpose rather than engineering
+    around a case the reviewer flagged as out of scope for this round."""
+    from daedalus.transports.slack import _pack, _stitch_fences
+
+    budget = 20
+    text = "x" * (budget - 2) + "```" + "y" * 10  # marker straddles the split
+
+    pieces = _pack(text, budget, (None,))
+    chunks = _stitch_fences(pieces)
+
+    assert len(chunks) == 2
+    assert "```" not in chunks[0]
+    assert "```" not in chunks[1]
