@@ -5,9 +5,25 @@ import asyncio
 
 from daedalus.protocols import DenyAll
 from daedalus.task import ReasonCode, Task, TaskState
-from daedalus.transports.slack import SlackReactionApprover, SlackTransport
+from daedalus.transports.slack import SlackApi, SlackReactionApprover, SlackTransport
 
 CH = "C0MAIN"
+
+
+class FakeWeb:
+    """Fakes the slack-sdk AsyncWebClient seam one layer below SlackApi, so
+    chunking inside SlackApi.post() (which wraps chat_postMessage) is
+    actually exercised -- FakeApi above replaces SlackApi wholesale and
+    never touches the chunking logic."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._ts = 0
+
+    async def chat_postMessage(self, channel, text, thread_ts=None):
+        self._ts += 1
+        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        return {"ts": f"ts-{self._ts}"}
 
 
 class FakeApi:
@@ -252,3 +268,95 @@ def test_serve_without_tokens_is_a_clean_error():
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
             transport.serve(EchoHandler())
         )
+
+
+# -- long replies get chunked instead of cut off by Slack's render limit --
+
+
+async def test_post_within_budget_is_a_single_call_unchanged():
+    web = FakeWeb()
+    api = SlackApi(web)
+    ts = await api.post(CH, "short reply", thread_ts="10.0")
+    assert len(web.calls) == 1
+    assert web.calls[0] == {"channel": CH, "text": "short reply", "thread_ts": "10.0"}
+    assert ts == "ts-1"
+
+
+async def test_long_plain_text_splits_on_paragraph_boundaries_content_preserved():
+    from daedalus.transports.slack import _chunk_message
+
+    budget = 3900
+    # 6 paragraphs sized so the greedy packer fits exactly two per chunk:
+    # three chunks from a message ~2.5x the budget.
+    paragraphs = [chr(65 + i) * 1625 for i in range(6)]  # "AAAA...", "BBBB...", ...
+    text = "\n\n".join(paragraphs)
+    assert len(text) > 2.4 * budget
+
+    chunks = _chunk_message(text, budget=budget)
+
+    assert len(chunks) == 3
+    assert "".join(chunks) == text  # no fences involved: no stitching, exact reassembly
+    for chunk in chunks:
+        assert len(chunk) <= budget
+    for paragraph in paragraphs:
+        # each paragraph landed whole in exactly one chunk -- never split mid-paragraph
+        assert sum(paragraph in chunk for chunk in chunks) == 1
+
+
+async def test_post_over_budget_makes_multiple_calls_same_thread_first_ts_returned():
+    web = FakeWeb()
+    api = SlackApi(web)
+    paragraphs = [chr(65 + i) * 1625 for i in range(6)]
+    text = "\n\n".join(paragraphs)
+
+    ts = await api.post(CH, text, thread_ts="20.0")
+
+    assert len(web.calls) == 3
+    assert ts == "ts-1"  # the FIRST posted chunk's ts, not the last
+    assert all(call["thread_ts"] == "20.0" for call in web.calls)
+    assert all(call["channel"] == CH for call in web.calls)
+    assert "".join(call["text"] for call in web.calls) == text
+
+
+async def test_fence_spanning_chunk_boundary_stays_balanced_and_reassembles():
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join(f"line-{i:02d} of the log output here" for i in range(30))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text, budget=120)
+
+    assert len(chunks) > 1
+    # every posted chunk renders valid Slack formatting on its own
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+
+    # the only real fence delimiters in the source are the outer open/close;
+    # every internal boundary was stitched closed-then-reopened by the chunker
+    assert chunks[0].startswith("```")
+    assert chunks[-1].endswith("```")
+
+    rebuilt = chunks[0]
+    for chunk in chunks[1:]:
+        assert rebuilt.endswith("\n```")
+        rebuilt = rebuilt[: -len("\n```")]
+        assert chunk.startswith("```\n")
+        rebuilt += chunk[len("```\n") :]
+    assert rebuilt == text
+
+
+async def test_chunked_fenced_message_posts_are_individually_valid_and_threaded():
+    web = FakeWeb()
+    api = SlackApi(web)
+    # long enough to clear the real 3900-char post budget, unlike the
+    # small-budget unit test above which only exercises _chunk_message directly
+    lines = "\n".join(f"line-{i:04d} of the log output here" for i in range(200))
+    text = f"```\n{lines}\n```"
+
+    ts = await api.post(CH, text, thread_ts="30.0")
+
+    assert len(web.calls) > 1
+    assert ts == "ts-1"
+    for call in web.calls:
+        assert call["thread_ts"] == "30.0"
+        assert call["text"].count("```") % 2 == 0
