@@ -30,6 +30,7 @@ _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
 _SEEN_CAP = 500
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+_POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
 
 
 def to_mrkdwn(text: str) -> str:
@@ -43,6 +44,74 @@ def to_mrkdwn(text: str) -> str:
     return "```".join(parts)
 
 
+def _split_keep_sep(text: str, sep: str) -> list[str]:
+    """Split text on sep, gluing sep back onto the piece before it so
+    "".join(pieces) reproduces text exactly."""
+    if sep not in text:
+        return [text]
+    parts = text.split(sep)
+    units = [part + sep for part in parts[:-1]]
+    if parts[-1]:
+        units.append(parts[-1])
+    return units
+
+
+def _pack(text: str, budget: int, seps: tuple[str | None, ...]) -> list[str]:
+    """Greedily fill <=budget pieces from text, splitting on seps[0] first
+    and falling back to the next separator whenever a single unit is still
+    too big to stand alone. seps[-1] must be None, meaning a hard
+    character split -- the last-resort base case that always fits."""
+    sep, *rest = seps
+    if sep is None:
+        return [text[i : i + budget] for i in range(0, len(text), budget)]
+    chunks: list[str] = []
+    current = ""
+    for unit in _split_keep_sep(text, sep):
+        if len(current) + len(unit) <= budget:
+            current += unit
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(unit) <= budget:
+            current = unit
+        else:
+            sub = _pack(unit, budget, tuple(rest))
+            chunks.extend(sub[:-1])
+            current = sub[-1]
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _stitch_fences(chunks: list[str]) -> list[str]:
+    """Keep every chunk independently valid Slack mrkdwn. Fences are
+    detected the same way to_mrkdwn does above (``` delimits them, they
+    come in pairs): if a fence is still open when a chunk ends, close it
+    there and reopen it at the top of the next chunk."""
+    stitched: list[str] = []
+    in_fence = False
+    last = len(chunks) - 1
+    for index, chunk in enumerate(chunks):
+        piece = f"```\n{chunk}" if in_fence else chunk
+        if chunk.count("```") % 2:
+            in_fence = not in_fence
+        if in_fence and index != last:
+            piece = f"{piece}\n```"
+        stitched.append(piece)
+    return stitched
+
+
+def _chunk_message(text: str, budget: int = _POST_BUDGET) -> list[str]:
+    """Split text for chat_postMessage into <=budget pieces: paragraph
+    boundaries first, then lines, then a hard character split as a last
+    resort. A message within budget comes back as a single-element list,
+    unchanged -- today's one-call behavior for the common case."""
+    if len(text) <= budget:
+        return [text]
+    return _stitch_fences(_pack(text, budget, ("\n\n", "\n", None)))
+
+
 class SlackApi:
     """The four Slack operations the transport needs, behind a seam tests fake."""
 
@@ -50,10 +119,24 @@ class SlackApi:
         self._web = web_client
 
     async def post(self, channel: str, text: str, thread_ts: str | None = None) -> str:
-        response = await self._web.chat_postMessage(
-            channel=channel, text=text, thread_ts=thread_ts
+        """Post text, chunked to stay under Slack's render budget so long
+        agent replies stop arriving truncated. Chunks post sequentially
+        into the same channel/thread; a failure partway through propagates
+        as before, it just leaves fewer chunks posted.
+
+        Returns the FIRST chunk's ts. The one caller that uses this return
+        value, SlackReactionApprover.approve(), polls reactions on it to
+        gate a tier-2 approval -- returning a single stable ts for "the
+        message this call posted" preserves that contract whether the text
+        became one message or several.
+        """
+        chunks = _chunk_message(text)
+        first = await self._web.chat_postMessage(
+            channel=channel, text=chunks[0], thread_ts=thread_ts
         )
-        return response["ts"]
+        for chunk in chunks[1:]:
+            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+        return first["ts"]
 
     async def react(self, channel: str, ts: str, name: str) -> None:
         try:
