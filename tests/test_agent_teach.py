@@ -163,7 +163,9 @@ async def test_teach_fires_revision_pass_and_serializes(tmp_path, monkeypatch, t
 
     calls: list[tuple[float, float]] = []
 
-    async def fake_run_revision_pass(db_path, model, *, policy, emit, colleagues=None):
+    async def fake_run_revision_pass(
+        db_path, model, *, policy, emit, colleagues=None, reask_cooldowns=None
+    ):
         start = time.monotonic()
         await asyncio.sleep(0.01)
         calls.append((start, time.monotonic()))
