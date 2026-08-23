@@ -1362,3 +1362,77 @@ async def test_agent_passes_one_persistent_cooldown_dict_across_passes(monkeypat
 
     assert seen[0] is not None
     assert seen[0] is seen[1]  # the SAME dict, for the agent's whole life
+
+
+async def test_a_failed_ask_round_does_not_stamp_the_cooldown(monkeypatch, tmp_path):
+    """Reviewer finding (reproduced): the stamp used to land BEFORE the ask
+    loop, so a judge that died mid-round parked the candidate for a whole
+    window on the strength of an attempt that never completed. The stamp
+    must land only when the round finishes -- a transient failure leaves
+    the candidate eligible on the very next pass, matching the module's
+    per-candidate error-isolation promise."""
+    db_path = tmp_path / "techne.db"
+    _, newer_id, _ = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    class _JudgeDies:
+        def __init__(self, first_reply: str):
+            self.first_reply = first_reply
+            self.calls = 0
+
+        async def complete(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(text=self.first_reply, input_tokens=1, output_tokens=1)
+            raise RuntimeError("judge model unreachable")
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider1, client1 = _colleagues_provider(monkeypatch, agents, replies={"rin": ["yes"]})
+    report1 = await run_revision_pass(
+        db_path,
+        _JudgeDies(verdict),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+    assert report1.errors == 1
+    assert client1.post_calls  # the ask fired, but the round never completed
+    assert cooldowns == {}  # so nothing was stamped
+
+    provider2, client2 = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+    report2 = await run_revision_pass(
+        db_path,
+        ScriptedLLM("agree"),
+        policy="operator",
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert report2.cooled == 0
+    assert len(client2.post_calls) == 1  # retried immediately, and this time
+    assert report2.quorum_promoted == 1  # the fact earned its promotion
+
+
+async def test_a_terminal_promotion_evicts_the_candidates_stamp(monkeypatch, tmp_path):
+    """A promoted candidate leaves 'pending' forever -- its stamp would just
+    sit in the dict for the process life. Terminal outcomes evict."""
+    db_path = tmp_path / "techne.db"
+    _, newer_id, _ = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider, _client = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree"),
+        policy="operator",
+        colleagues=provider,
+        reask_cooldowns=cooldowns,
+    )
+    assert report.quorum_promoted == 1
+    assert cooldowns == {}  # stamped during the round, evicted at promotion
