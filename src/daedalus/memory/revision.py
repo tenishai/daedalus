@@ -272,9 +272,14 @@ async def _run_colleague_branch(
 
     reask_cooldowns: per-candidate ask stamps (see COLLEAGUE_REASK_COOLDOWN_S).
     The gate is checked FIRST -- a cooling candidate skips even the directory
-    fetch -- but the stamp lands only where asks actually fire, so an
+    fetch -- but the stamp lands only when an ask round COMPLETES: an
     uncorroborable candidate (nobody to ask, no cost) keeps its per-pass
-    chance to catch a newly-arrived corroborator.
+    chance to catch a newly-arrived corroborator, and a round that dies
+    mid-loop (a judge model going unreachable) leaves the candidate
+    unstamped and eligible on the very next pass, matching the caller's
+    per-candidate error isolation. A quorum promotion evicts the stamp --
+    the candidate leaves 'pending' forever, so the entry would only sit in
+    the dict for the process life.
     """
     if reask_cooldowns is not None:
         last = reask_cooldowns.get(candidate_id)
@@ -310,8 +315,6 @@ async def _run_colleague_branch(
 
     asked = same_team[:MAX_VERIFICATION_ASKS]
     question = _verification_question(fact)
-    if reask_cooldowns is not None:
-        reask_cooldowns[candidate_id] = _now()
 
     agrees = 1  # the asserter counts as one agree
     disagreed = False
@@ -329,6 +332,12 @@ async def _run_colleague_branch(
         elif verdict == "agree":
             agrees += 1
 
+    # The round COMPLETED (every reply judged, nothing raised): stamp now,
+    # whatever the outcome. Stamping before the loop parked candidates for a
+    # whole window on rounds a dying judge never finished (reviewer-proven).
+    if reask_cooldowns is not None:
+        reask_cooldowns[candidate_id] = _now()
+
     if disagreed:
         report.disputed += 1
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
@@ -344,6 +353,8 @@ async def _run_colleague_branch(
             decision_reason=_QUORUM_DECISION_REASON,
         )
         report.quorum_promoted += 1
+        if reask_cooldowns is not None:
+            reask_cooldowns.pop(candidate_id, None)  # terminal: never routed again
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
     else:
         report.uncorroborated += 1
@@ -477,6 +488,13 @@ async def run_revision_pass(
         colleague-sourced candidate then fails corroboration (isolated,
         counted as an error) rather than being silently skipped, since a
         bundle with colleague-sourced facts staged is expected to have one.
+    reask_cooldowns: per-candidate ask stamps, or None (the default) to
+        re-ask every pass, the pre-cooldown behavior. Pass the SAME dict on
+        every call (the Agent owns one for its process life): a candidate
+        whose colleague ask round completed within COLLEAGUE_REASK_COOLDOWN_S
+        is counted as report.cooled and skipped -- no directory fetch, no
+        asks -- instead of re-verifying the same fact on every teach. Rounds
+        that fail mid-loop never stamp; quorum promotions evict their stamp.
 
     Never raises: every failure (bad policy, an unreachable model, a locked
     db, a malformed verdict, an unreachable colleague or directory) is
