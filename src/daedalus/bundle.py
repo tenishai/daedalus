@@ -101,6 +101,8 @@ class LiminalSpec(_WarnExtra):
 class ColleaguesSpec(_WarnExtra):
     url: str | None = None  # switchboard directory base URL
     token_env: str | None = None  # env var holding the bearer token; unset/empty = degraded
+    # Deliberately named `self`: Pydantic v2 model fields never collide with a
+    # method's self (BaseModel builds __init__ from the schema, not the name).
     self: str | None = None  # this agent's own name, excluded from directory listings
 
 

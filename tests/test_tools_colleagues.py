@@ -183,7 +183,9 @@ async def test_list_colleagues_http_error_names_the_status(monkeypatch):
 
 async def test_ask_colleague_happy_path_returns_reply_text(monkeypatch):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
-    reply = {"status": {"message": {"parts": [{"text": "the invoice cleared"}]}}}
+    reply = {
+        "status": {"message": {"parts": [{"kind": "text", "text": "the invoice cleared"}]}}
+    }
     client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
     provider = make_provider(client)
     text = await provider.call(
@@ -194,7 +196,7 @@ async def test_ask_colleague_happy_path_returns_reply_text(monkeypatch):
 
 async def test_ask_colleague_envelope_shape_is_pinned(monkeypatch):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
-    reply = {"status": {"message": {"parts": [{"text": "ok"}]}}}
+    reply = {"status": {"message": {"parts": [{"kind": "text", "text": "ok"}]}}}
     client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
     provider = make_provider(client)
     await provider.call(
@@ -231,6 +233,41 @@ async def test_ask_colleague_envelope_shape_is_pinned(monkeypatch):
         "history": [],
     }
     assert body == {"target": "rin", "task": task}
+
+
+async def test_ask_colleague_multi_part_reply_joins_all_text_parts(monkeypatch):
+    """The join-all-parts contract (transports.a2a.text_of, mirrored): a
+    multi-part reply arrives whole, non-text parts are skipped, order kept.
+    parts[0] alone would have silently dropped everything after the first."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    reply = {
+        "status": {
+            "message": {
+                "parts": [
+                    {"kind": "text", "text": "the invoice cleared"},
+                    {"kind": "file", "uri": "s3://irrelevant"},
+                    {"kind": "text", "text": "refund issued yesterday"},
+                ]
+            }
+        }
+    }
+    client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
+    provider = make_provider(client)
+    text = await provider.call(
+        "colleagues.ask_colleague", {"name": "rin", "question": "did it clear?"}
+    )
+    assert text == "the invoice cleared\nrefund issued yesterday"
+
+
+async def test_ask_colleague_reply_with_no_text_parts_is_named_plainly(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    reply = {"status": {"message": {"parts": [{"kind": "file", "uri": "s3://x"}]}}}
+    client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
+    provider = make_provider(client)
+    text = await provider.call(
+        "colleagues.ask_colleague", {"name": "rin", "question": "hi"}
+    )
+    assert text == "The colleague answered in a shape I could not read."
 
 
 async def test_ask_colleague_refuses_self_without_a_network_call(monkeypatch):
