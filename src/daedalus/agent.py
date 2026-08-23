@@ -130,6 +130,12 @@ class Agent:
 
         self.events = EventBus()
         self._revision_lock = asyncio.Lock()
+        # Per-candidate colleague re-ask stamps, alive for this agent's whole
+        # process life: revision fires per teach, and without this one stuck
+        # candidate re-asked the same colleagues on every teach. A restart
+        # forgets the stamps and re-asks once -- the acceptable end of the
+        # trade (see revision.COLLEAGUE_REASK_COOLDOWN_S).
+        self._reask_cooldowns: dict[int, float] = {}
         self._revision_fires: set[asyncio.Task] = set()
 
     def _emit(self, event_type: str, **fields) -> None:
@@ -636,7 +642,12 @@ class Agent:
         async def _pass() -> None:
             async with self._revision_lock:
                 await run_revision_pass(
-                    db_path, self.llm, policy=policy, emit=self._emit, colleagues=colleagues
+                    db_path,
+                    self.llm,
+                    policy=policy,
+                    emit=self._emit,
+                    colleagues=colleagues,
+                    reask_cooldowns=self._reask_cooldowns,
                 )
 
         return asyncio.create_task(_pass())

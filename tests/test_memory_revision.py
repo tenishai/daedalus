@@ -1129,7 +1129,9 @@ async def test_start_revision_pass_threads_the_colleagues_provider_through(tmp_p
 
     calls = []
 
-    async def fake_run_revision_pass(db_path, model, *, policy, emit, colleagues=None):
+    async def fake_run_revision_pass(
+        db_path, model, *, policy, emit, colleagues=None, reask_cooldowns=None
+    ):
         calls.append(colleagues)
         return RevisionReport()
 
@@ -1140,3 +1142,223 @@ async def test_start_revision_pass_threads_the_colleagues_provider_through(tmp_p
     await task
 
     assert calls == [agent.tools]
+
+
+# ---------------------------------------------------------------------------
+# Per-candidate re-ask cooldown -- the terminal-noise fix. Revision fires per
+# teach now, and the standing-pending rescan gave every pending candidate its
+# day in court EVERY pass: one stuck candidate re-asked the same colleagues
+# on every teach (46/183 of one room's conversations were one agent
+# re-verifying the same fact). A pass handed `reask_cooldowns` (a dict the
+# Agent owns for its lifetime) asks each candidate's colleagues at most once
+# per cooldown window; None (the default) keeps the old per-pass behavior.
+# ---------------------------------------------------------------------------
+
+
+def _pending_colleague_candidate(monkeypatch, db_path):
+    """Seed a colleague-sourced contradiction and return the provider maker:
+    each call returns a fresh provider/client pair over the same directory
+    (ana asserts, rin is the same-team colleague who never quite agrees)."""
+    older_id, newer_id = _seed_contradiction(
+        db_path, older_source="seed:onboarding", newer_source="colleague:ana#team=billing"
+    )
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+
+    def make():
+        return _colleagues_provider(
+            monkeypatch, agents, replies={"rin": ["not sure, could be either"]}
+        )
+
+    return older_id, newer_id, make
+
+
+async def test_within_cooldown_a_standing_candidate_is_not_reasked(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    _, newer_id, make = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    provider1, client1 = make()
+    report1 = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "unclear"),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+    assert report1.uncorroborated == 1
+    assert len(client1.post_calls) == 1  # rin was asked once
+    assert cooldowns  # the ask stamped the candidate
+
+    provider2, client2 = make()
+    report2 = await run_revision_pass(
+        db_path,
+        ScriptedLLM(),
+        policy="operator",
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert client2.post_calls == []  # nobody re-asked within the window
+    assert client2.get_calls == []  # not even the directory was re-fetched
+    assert report2.cooled == 1
+    assert report2.uncorroborated == 0
+    [candidate] = _candidate_rows(db_path)
+    assert candidate["status"] == "pending"  # still gets its day, tomorrow
+
+
+async def test_after_the_cooldown_expires_the_candidate_is_asked_again(monkeypatch, tmp_path):
+    import daedalus.memory.revision as revision_module
+
+    db_path = tmp_path / "techne.db"
+    _, newer_id, make = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    clock = {"t": 1000.0}
+    # Patch the globals of the run_revision_pass THIS FILE calls: an earlier
+    # test pops daedalus.memory.revision from sys.modules, so the module
+    # object behind `revision_module` can differ from the one our file-top
+    # import came from -- setattr on the former would miss the latter.
+    monkeypatch.setitem(run_revision_pass.__globals__, "_now", lambda: clock["t"])
+
+    provider1, client1 = make()
+    await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "unclear"),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+    assert len(client1.post_calls) == 1
+
+    clock["t"] += revision_module.COLLEAGUE_REASK_COOLDOWN_S + 1.0
+
+    provider2, client2 = make()
+    report2 = await run_revision_pass(
+        db_path,
+        ScriptedLLM("unclear"),
+        policy="operator",
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert len(client2.post_calls) == 1  # asked again, once, after expiry
+    assert report2.cooled == 0
+    assert report2.uncorroborated == 1
+
+
+async def test_no_cooldown_dict_keeps_the_per_pass_reask_behavior(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    _, newer_id, make = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+
+    provider1, client1 = make()
+    await run_revision_pass(
+        db_path, ScriptedLLM(verdict, "unclear"), policy="operator", colleagues=provider1
+    )
+    assert len(client1.post_calls) == 1
+
+    provider2, client2 = make()
+    report2 = await run_revision_pass(
+        db_path, ScriptedLLM("unclear"), policy="operator", colleagues=provider2
+    )
+    assert len(client2.post_calls) == 1  # old behavior: every pass re-asks
+    assert report2.cooled == 0
+
+
+async def test_uncorroborable_candidates_are_never_stamped(monkeypatch, tmp_path):
+    """No same-team colleague today: no asks fire, so no stamp -- the moment
+    the directory grows a corroborator, the very next pass asks. Cooling an
+    uncorroborable candidate would blind the rescan to directory growth for
+    a whole window, for zero saved asks."""
+    db_path = tmp_path / "techne.db"
+    _, newer_id, _ = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    lonely = [{"name": "ana", "team": "billing"}]  # asserter only; nobody to ask
+    provider1, _client1 = _colleagues_provider(monkeypatch, lonely)
+    report1 = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+    assert report1.uncorroborable == 1
+    assert cooldowns == {}  # nothing stamped
+
+    grown = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider2, client2 = _colleagues_provider(
+        monkeypatch, grown, replies={"rin": ["yes, that matches what I know"]}
+    )
+    report2 = await run_revision_pass(
+        db_path,
+        ScriptedLLM("agree"),
+        policy="operator",
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert len(client2.post_calls) == 1  # the new colleague is asked immediately
+    assert report2.quorum_promoted == 1
+
+
+async def test_cooled_rides_the_report_dict_and_the_done_event(monkeypatch, tmp_path):
+    db_path = tmp_path / "techne.db"
+    _, newer_id, make = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    provider1, _c1 = make()
+    await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "unclear"),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+
+    events: list[dict] = []
+
+    def emit(event_type, **fields):
+        events.append({"type": event_type, **fields})
+
+    provider2, _c2 = make()
+    report = await run_revision_pass(
+        db_path,
+        ScriptedLLM(),
+        policy="operator",
+        emit=emit,
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert report.as_dict()["cooled"] == 1
+    done = next(e for e in events if e["type"] == "revision_done")
+    assert done["cooled"] == 1
+    assert any(e["type"] == "revision_cooled" for e in events)
+
+
+async def test_agent_passes_one_persistent_cooldown_dict_across_passes(monkeypatch, tmp_path):
+    root = _agent_bundle(
+        tmp_path,
+        "memory:\n  personal: techne\n  revision: operator\n",
+    )
+    db_path = tmp_path / "techne.db"
+    agent = Agent.load(root, llm=ScriptedLLM(), memory=TechneMemoryStore(db_path=db_path))
+
+    seen: list[dict] = []
+
+    async def fake_run_revision_pass(
+        db_path, model, *, policy, emit, colleagues=None, reask_cooldowns=None
+    ):
+        seen.append(reask_cooldowns)
+        return RevisionReport()
+
+    monkeypatch.setattr("daedalus.memory.revision.run_revision_pass", fake_run_revision_pass)
+
+    first = agent._start_revision_pass()
+    await first
+    second = agent._start_revision_pass()
+    await second
+
+    assert seen[0] is not None
+    assert seen[0] is seen[1]  # the SAME dict, for the agent's whole life

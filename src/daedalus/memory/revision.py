@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,19 @@ QUORUM = 2
 #: Hard cap on how many same-team colleagues get asked to verify a single
 #: candidate in a single pass -- bounded fanout, not an exhaustive canvass.
 MAX_VERIFICATION_ASKS = 3
+
+#: How long a candidate's colleague asks stay satisfied before the standing-
+#: pending rescan may ask again. Revision fires per teach, and without this
+#: window one stuck candidate re-verified the same fact with the same
+#: colleagues on every teach -- terminal noise and model spend, no new
+#: information. In-process only (the dict lives on the Agent): a restarted
+#: pod re-asks once, which is the acceptable end of this trade.
+COLLEAGUE_REASK_COOLDOWN_S = 24 * 60 * 60.0
+
+
+def _now() -> float:
+    """Monotonic clock, module-level so tests can monkeypatch it."""
+    return time.monotonic()
 
 
 class ModelCall(Protocol):
@@ -125,6 +139,7 @@ class RevisionReport:
     uncorroborable: int = 0
     uncorroborated: int = 0
     quorum_promoted: int = 0
+    cooled: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -138,6 +153,7 @@ class RevisionReport:
             "uncorroborable": self.uncorroborable,
             "uncorroborated": self.uncorroborated,
             "quorum_promoted": self.quorum_promoted,
+            "cooled": self.cooled,
         }
 
 
@@ -243,6 +259,7 @@ async def _run_colleague_branch(
     fact: str,
     asserter: str,
     team: str,
+    reask_cooldowns: dict[int, float] | None = None,
 ) -> None:
     """The colleague corroboration branch for one pending retire candidate
     whose survivor was sourced "colleague:<asserter>#team=<team>".
@@ -252,7 +269,22 @@ async def _run_colleague_branch(
     candidate and counts it as an error -- this function itself never
     catches, so a caller that doesn't wrap it does not get the "never
     raises" promise, by design (see run_revision_pass's per-candidate try).
+
+    reask_cooldowns: per-candidate ask stamps (see COLLEAGUE_REASK_COOLDOWN_S).
+    The gate is checked FIRST -- a cooling candidate skips even the directory
+    fetch -- but the stamp lands only where asks actually fire, so an
+    uncorroborable candidate (nobody to ask, no cost) keeps its per-pass
+    chance to catch a newly-arrived corroborator.
     """
+    if reask_cooldowns is not None:
+        last = reask_cooldowns.get(candidate_id)
+        if last is not None and (_now() - last) < COLLEAGUE_REASK_COOLDOWN_S:
+            report.cooled += 1
+            _safe_emit(
+                emit, "revision_cooled", candidate_id=candidate_id, asserter=asserter, team=team
+            )
+            return
+
     _safe_emit(
         emit, "revision_corroborating", candidate_id=candidate_id, asserter=asserter, team=team
     )
@@ -278,6 +310,8 @@ async def _run_colleague_branch(
 
     asked = same_team[:MAX_VERIFICATION_ASKS]
     question = _verification_question(fact)
+    if reask_cooldowns is not None:
+        reask_cooldowns[candidate_id] = _now()
 
     agrees = 1  # the asserter counts as one agree
     disagreed = False
@@ -328,6 +362,7 @@ async def _route_pending_retire_candidate(
     survivor_source: str | None,
     survivor_content: str | None,
     retiree_source: str | None,
+    reask_cooldowns: dict[int, float] | None = None,
 ) -> None:
     """Route one pending 'retire' candidate to its outcome: the operator
     shield, spec-A promotion (survivor is operator-taught), the colleague
@@ -389,6 +424,7 @@ async def _route_pending_retire_candidate(
             fact=survivor_content or "",
             asserter=asserter,
             team=team,
+            reask_cooldowns=reask_cooldowns,
         )
         return
 
@@ -421,6 +457,7 @@ async def run_revision_pass(
     policy: str = OPERATOR_POLICY,
     emit: Callable[..., None] | None = None,
     colleagues: ColleaguesLike | None = None,
+    reask_cooldowns: dict[int, float] | None = None,
 ) -> RevisionReport:
     """Judge every staged contradiction, promote what the operator taught or
     what a same-team quorum of colleagues corroborates.
@@ -536,6 +573,7 @@ async def run_revision_pass(
                             survivor_source=decision["survivor_source"],
                             survivor_content=decision["survivor_content"],
                             retiree_source=decision["retiree_source"],
+                            reask_cooldowns=reask_cooldowns,
                         )
                     except Exception:
                         log.exception(
@@ -589,6 +627,7 @@ async def run_revision_pass(
                     survivor_source=decision["survivor_source"],
                     survivor_content=decision["survivor_content"],
                     retiree_source=decision["retiree_source"],
+                    reask_cooldowns=reask_cooldowns,
                 )
             except Exception:
                 log.exception(
