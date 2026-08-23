@@ -4,7 +4,10 @@ Serves the bundle's agent card at /.well-known/agent-card.json and accepts
 two dispatch surfaces: A2A JSON-RPC (message/send, tasks/get) for spec
 callers, and POST /a2a/tasks taking a bare Task envelope — the shape a
 cabal's DispatchRouter sends to federated peers (broker/router.py
-_dispatch_remote). Non-streaming, bound to loopback by default. Optional
+_dispatch_remote). N.B. the switchboard's own inbound /a2a/tasks speaks a
+different dialect — a routing envelope {target, task} (what the colleagues
+provider POSTs) — the shared path is convention, not compatibility: this
+surface takes the bare Task only. Non-streaming, bound to loopback by default. Optional
 JWT verification (transport `auth` config) gates both POST surfaces; card
 signing stays deferred (cabal accepts an empty card at graduation and does
 not verify cards on dispatch). Requires the a2a extra: pip install

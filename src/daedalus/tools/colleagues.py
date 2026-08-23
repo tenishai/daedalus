@@ -16,6 +16,17 @@ _NOT_CONFIGURED = "The colleague pass is not configured."
 _UNREADABLE_REPLY = "The colleague answered in a shape I could not read."
 
 
+def _text_parts_of(message: dict) -> str:
+    """Join ALL text parts, in order — the same contract as
+    transports.a2a.text_of, mirrored here rather than imported because that
+    module requires the a2a extra (fastapi) and this provider must not.
+    Taking parts[0] alone would silently drop text the day a peer emits a
+    multi-part reply."""
+    parts = message.get("parts") or []
+    texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("kind") == "text"]
+    return "\n".join(t for t in texts if t)
+
+
 def _format_colleague(agent: dict) -> str:
     name = agent.get("name", "unknown")
     team = agent.get("team") or "unspecified"
@@ -126,6 +137,10 @@ class ColleaguesToolProvider:
             return "I cannot ask myself a question. Try asking one of my colleagues instead."
         client = self._ensure_client()
         headers = {"Authorization": f"Bearer {token}"}
+        # Dialect note: this is the SWITCHBOARD's inbound routing envelope
+        # ({target, task}), POSTed to the switchboard's /a2a/tasks. Daedalus's
+        # own peer surface serves the same path but takes the bare Task
+        # (design.md §8) — same route string, two different callers.
         envelope = {
             "target": target,
             "task": {
@@ -152,10 +167,10 @@ class ColleaguesToolProvider:
             return f"Asking {target} failed: HTTP {response.status_code}."
         try:
             data = response.json()
-            text = data["status"]["message"]["parts"][0]["text"]
+            text = _text_parts_of(data["status"]["message"])
         except Exception:
             return _UNREADABLE_REPLY
-        if not isinstance(text, str):
+        if not text:
             return _UNREADABLE_REPLY
         return text
 
