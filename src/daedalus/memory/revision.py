@@ -332,13 +332,16 @@ async def _run_colleague_branch(
         elif verdict == "agree":
             agrees += 1
 
-    # The round COMPLETED (every reply judged, nothing raised): stamp now,
-    # whatever the outcome. Stamping before the loop parked candidates for a
-    # whole window on rounds a dying judge never finished (reviewer-proven).
-    if reask_cooldowns is not None:
-        reask_cooldowns[candidate_id] = _now()
-
+    # The round COMPLETED (every reply judged, nothing raised): stamp per
+    # outcome. Stamping before the loop parked candidates for a whole window
+    # on rounds a dying judge never finished (reviewer-proven), and stamping
+    # before promote_candidate() did the same for an earned promotion whose
+    # db write failed (the re-review's follow-up) -- so the non-terminal
+    # outcomes stamp, and the terminal one never stamps at all (it only
+    # evicts whatever expired stamp an earlier round may have left).
     if disagreed:
+        if reask_cooldowns is not None:
+            reask_cooldowns[candidate_id] = _now()
         report.disputed += 1
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
         return
@@ -357,6 +360,8 @@ async def _run_colleague_branch(
             reask_cooldowns.pop(candidate_id, None)  # terminal: never routed again
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
     else:
+        if reask_cooldowns is not None:
+            reask_cooldowns[candidate_id] = _now()
         report.uncorroborated += 1
         _safe_emit(emit, "revision_quorum", candidate_id=candidate_id, agrees=agrees, team=team)
 
