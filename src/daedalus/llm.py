@@ -97,4 +97,5 @@ class LiteLLMClient:
             tool_calls=tool_calls,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            finish_reason=getattr(response.choices[0], "finish_reason", None),
         )
