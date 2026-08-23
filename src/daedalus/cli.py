@@ -84,6 +84,8 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [memory] recalled {event['count']} item(s)")
     elif kind == "budget":
         click.echo(f"  [budget] -{event['spent']} tokens, {event['remaining']} remaining")
+    elif kind == "truncated":
+        click.echo(f"  [truncated] reply cut by max_tokens ({event['max_tokens']})")
 
 
 @main.command()
