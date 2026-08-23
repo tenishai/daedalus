@@ -1436,3 +1436,51 @@ async def test_a_terminal_promotion_evicts_the_candidates_stamp(monkeypatch, tmp
     )
     assert report.quorum_promoted == 1
     assert cooldowns == {}  # stamped during the round, evicted at promotion
+
+
+async def test_a_failed_promotion_does_not_stamp_either(monkeypatch, tmp_path):
+    """Re-review follow-up: the same premature-stamp shape one step later.
+    A quorum round that COMPLETED but whose promote_candidate() write failed
+    (locked db) must leave the candidate unstamped -- the earned promotion
+    retries on the very next pass instead of cooling for a window."""
+    db_path = tmp_path / "techne.db"
+    _, newer_id, _ = _pending_colleague_candidate(monkeypatch, db_path)
+    verdict = _supersede_verdict(newer_id, "The office is in Building C.")
+    cooldowns: dict[int, float] = {}
+
+    from techne.core import reflect as reflect_module
+
+    def promote_dies(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(reflect_module, "promote_candidate", promote_dies)
+
+    agents = [{"name": "ana", "team": "billing"}, {"name": "rin", "team": "billing"}]
+    provider1, client1 = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+    report1 = await run_revision_pass(
+        db_path,
+        ScriptedLLM(verdict, "agree"),
+        policy="operator",
+        colleagues=provider1,
+        reask_cooldowns=cooldowns,
+    )
+    assert report1.errors == 1
+    assert report1.quorum_promoted == 0
+    assert client1.post_calls  # the round genuinely ran
+    assert cooldowns == {}  # but the failed write left no stamp
+
+    monkeypatch.undo()  # promote works again
+    provider2, client2 = _colleagues_provider(
+        monkeypatch, agents, replies={"rin": ["yes, that matches what I know"]}
+    )
+    report2 = await run_revision_pass(
+        db_path,
+        ScriptedLLM("agree"),
+        policy="operator",
+        colleagues=provider2,
+        reask_cooldowns=cooldowns,
+    )
+    assert report2.cooled == 0
+    assert report2.quorum_promoted == 1  # retried immediately and landed
