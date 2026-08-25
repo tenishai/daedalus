@@ -16,6 +16,10 @@ REASON_KEY = "daedalus_reason_code"
 # taxonomy, shared lineage (CHP → cabal → daedalus). We write both keys so a
 # cabal dispatching to a daedalus agent sees the reason without translation.
 CABAL_REASON_KEY = "cabal_reason_code"
+# Transport-owned: the a2a transport stamps the verified JWT subject here
+# after token verification and unconditionally discards any wire-supplied
+# value, so handlers can trust it (daedalus.memory.teach gates on it).
+VERIFIED_SUB_KEY = "_verified_sub"
 
 
 class TaskState(StrEnum):

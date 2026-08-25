@@ -11,6 +11,7 @@ from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
 from daedalus.enforcement import Enforcement
+from daedalus.memory.teach import FILENAME_KEY, apply_teach, is_teach_task, teach_authorized
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -24,7 +25,7 @@ from daedalus.protocols import (
     ToolProvider,
     Transport,
 )
-from daedalus.task import ReasonCode, Task, TaskState
+from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 
 
 def _munge(name: str) -> str:
@@ -128,6 +129,14 @@ class Agent:
         from daedalus.events import EventBus
 
         self.events = EventBus()
+        self._revision_lock = asyncio.Lock()
+        # Per-candidate colleague re-ask stamps, alive for this agent's whole
+        # process life: revision fires per teach, and without this one stuck
+        # candidate re-asked the same colleagues on every teach. A restart
+        # forgets the stamps and re-asks once -- the acceptable end of the
+        # trade (see revision.COLLEAGUE_REASK_COOLDOWN_S).
+        self._reask_cooldowns: dict[int, float] = {}
+        self._revision_fires: set[asyncio.Task] = set()
 
     def _emit(self, event_type: str, **fields) -> None:
         """The runtime's trace stream: --verbose renders it in the terminal;
@@ -245,6 +254,8 @@ class Agent:
         return self.bundle.spec.name
 
     async def handle_task(self, task: Task) -> Task:
+        if is_teach_task(task):
+            return await self._handle_teach(task)
         if self.enforcement.locked:
             name, _ = self.enforcement.load_error
             return task.reply(
@@ -280,6 +291,43 @@ class Agent:
                 )
             result.set_agent_text(post.text)
         return result
+
+    async def _handle_teach(self, task: Task) -> Task:
+        """The operator teach lane: write the note into techne now, no
+        model, no enforcement, no rebuild. Sits above the enforcement
+        locked check on purpose: memory writes are operator-gated by the
+        transport-stamped sub, not law-gated -- a broken orchestrator file
+        must not also brick teaching."""
+        if not teach_authorized(task):
+            self._emit("teach_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Teaching is operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return task.reply(
+                "I have no personal memory configured, so I cannot keep this.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        filename = task.metadata.get(FILENAME_KEY, "")
+        result = await asyncio.to_thread(
+            apply_teach, task.user_text(), str(filename), Path(db_path)
+        )
+        if result.error:
+            return task.reply(
+                f"I could not keep that: {result.error}.", state=TaskState.FAILED
+            )
+        if result.already_known:
+            return task.reply("I already know this one. Nothing new to keep.")
+        self._emit("teach_stored", source=result.source, entries=len(result.entry_ids))
+        fire = self._start_revision_pass()
+        if fire is not None:
+            self._revision_fires.add(fire)
+            fire.add_done_callback(self._revision_fires.discard)
+        return task.reply("Learned. I will remember that.")
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
@@ -604,9 +652,15 @@ class Agent:
         colleagues = self._colleagues_for_revision()
 
         async def _pass() -> None:
-            await run_revision_pass(
-                db_path, self.llm, policy=policy, emit=self._emit, colleagues=colleagues
-            )
+            async with self._revision_lock:
+                await run_revision_pass(
+                    db_path,
+                    self.llm,
+                    policy=policy,
+                    emit=self._emit,
+                    colleagues=colleagues,
+                    reask_cooldowns=self._reask_cooldowns,
+                )
 
         return asyncio.create_task(_pass())
 

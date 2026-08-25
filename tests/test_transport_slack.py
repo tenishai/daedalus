@@ -5,9 +5,25 @@ import asyncio
 
 from daedalus.protocols import DenyAll
 from daedalus.task import ReasonCode, Task, TaskState
-from daedalus.transports.slack import SlackReactionApprover, SlackTransport
+from daedalus.transports.slack import SlackApi, SlackReactionApprover, SlackTransport
 
 CH = "C0MAIN"
+
+
+class FakeWeb:
+    """Fakes the slack-sdk AsyncWebClient seam one layer below SlackApi, so
+    chunking inside SlackApi.post() (which wraps chat_postMessage) is
+    actually exercised -- FakeApi above replaces SlackApi wholesale and
+    never touches the chunking logic."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._ts = 0
+
+    async def chat_postMessage(self, channel, text, thread_ts=None):
+        self._ts += 1
+        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        return {"ts": f"ts-{self._ts}"}
 
 
 class FakeApi:
@@ -252,3 +268,163 @@ def test_serve_without_tokens_is_a_clean_error():
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
             transport.serve(EchoHandler())
         )
+
+
+# -- long replies get chunked instead of cut off by Slack's render limit --
+
+
+async def test_post_within_budget_is_a_single_call_unchanged():
+    web = FakeWeb()
+    api = SlackApi(web)
+    ts = await api.post(CH, "short reply", thread_ts="10.0")
+    assert len(web.calls) == 1
+    assert web.calls[0] == {"channel": CH, "text": "short reply", "thread_ts": "10.0"}
+    assert ts == "ts-1"
+
+
+async def test_long_plain_text_splits_on_paragraph_boundaries_content_preserved():
+    from daedalus.transports.slack import _chunk_message
+
+    budget = 3900
+    # 6 paragraphs sized so the greedy packer fits exactly two per chunk:
+    # three chunks from a message ~2.5x the budget.
+    paragraphs = [chr(65 + i) * 1625 for i in range(6)]  # "AAAA...", "BBBB...", ...
+    text = "\n\n".join(paragraphs)
+    assert len(text) > 2.4 * budget
+
+    chunks = _chunk_message(text, budget=budget)
+
+    assert len(chunks) == 3
+    assert "".join(chunks) == text  # no fences involved: no stitching, exact reassembly
+    for chunk in chunks:
+        assert len(chunk) <= budget
+    for paragraph in paragraphs:
+        # each paragraph landed whole in exactly one chunk -- never split mid-paragraph
+        assert sum(paragraph in chunk for chunk in chunks) == 1
+
+
+async def test_post_over_budget_makes_multiple_calls_same_thread_first_ts_returned():
+    web = FakeWeb()
+    api = SlackApi(web)
+    paragraphs = [chr(65 + i) * 1625 for i in range(6)]
+    text = "\n\n".join(paragraphs)
+
+    ts = await api.post(CH, text, thread_ts="20.0")
+
+    assert len(web.calls) == 3
+    assert ts == "ts-1"  # the FIRST posted chunk's ts, not the last
+    assert all(call["thread_ts"] == "20.0" for call in web.calls)
+    assert all(call["channel"] == CH for call in web.calls)
+    assert "".join(call["text"] for call in web.calls) == text
+
+
+async def test_fence_spanning_chunk_boundary_stays_balanced_and_reassembles():
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join(f"line-{i:02d} of the log output here" for i in range(30))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text, budget=120)
+
+    assert len(chunks) > 1
+    # every posted chunk renders valid Slack formatting on its own
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+
+    # the only real fence delimiters in the source are the outer open/close;
+    # every internal boundary was stitched closed-then-reopened by the chunker
+    assert chunks[0].startswith("```")
+    assert chunks[-1].endswith("```")
+
+    rebuilt = chunks[0]
+    for chunk in chunks[1:]:
+        assert rebuilt.endswith("\n```")
+        rebuilt = rebuilt[: -len("\n```")]
+        assert chunk.startswith("```\n")
+        rebuilt += chunk[len("```\n") :]
+    assert rebuilt == text
+
+
+async def test_chunked_fenced_message_posts_are_individually_valid_and_threaded():
+    web = FakeWeb()
+    api = SlackApi(web)
+    # long enough to clear the real 3900-char post budget, unlike the
+    # small-budget unit test above which only exercises _chunk_message directly
+    lines = "\n".join(f"line-{i:04d} of the log output here" for i in range(200))
+    text = f"```\n{lines}\n```"
+
+    ts = await api.post(CH, text, thread_ts="30.0")
+
+    assert len(web.calls) > 1
+    assert ts == "ts-1"
+    for call in web.calls:
+        assert call["thread_ts"] == "30.0"
+        assert call["text"].count("```") % 2 == 0
+
+
+async def test_unterminated_source_fence_still_closes_on_the_final_chunk():
+    """Chunking reviewer finding #1: an agent that opens a fence and never
+    closes it (a long reply, realistic) must not leave the LAST posted
+    chunk with a dangling fence -- every chunk renders as valid, balanced
+    markdown on its own, even the one that carries the source's own
+    unterminated intent."""
+    from daedalus.transports.slack import _chunk_message
+
+    text = "```\n" + "a" * 5000
+    chunks = _chunk_message(text)
+
+    assert len(chunks) == 3
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0
+
+
+async def test_fenced_chunks_never_exceed_the_post_budget_after_stitching():
+    """Chunking reviewer finding #2: stitching a closed/reopened fence onto
+    a chunk happens AFTER packing to budget, so a fenced chunk could come
+    out over budget. Every chunk actually posted to Slack must stay
+    <= the real 3900-char post budget once stitching is done."""
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join(f"line-{i:04d} of the log output here" for i in range(200))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text)
+
+    for chunk in chunks:
+        assert len(chunk) <= 3900
+
+
+async def test_fenced_chunks_never_exceed_a_small_post_budget_after_stitching():
+    """Same as above at a small budget, where the fixed stitch overhead is
+    proportionally much bigger and easiest to see blown."""
+    from daedalus.transports.slack import _chunk_message
+
+    lines = "\n".join("LLL" for _ in range(29))
+    text = f"```\n{lines}\n```"
+
+    chunks = _chunk_message(text, budget=120)
+
+    for chunk in chunks:
+        assert len(chunk) <= 120
+
+
+def test_fence_marker_straddling_a_hard_split_is_invisible_to_stitching():
+    """Disclosed edge, not fixed here: _pack's last-resort hard character
+    split cuts purely on character count -- it has no idea "```" is a
+    three-character token. If the split lands inside a fence marker on a
+    line with no other place to break (one giant unbroken line), neither
+    resulting piece contains a whole "```", so _stitch_fences never sees
+    the marker at all and the two chunks post with the fence silently
+    unbalanced. Pinning today's behavior on purpose rather than engineering
+    around a case the reviewer flagged as out of scope for this round."""
+    from daedalus.transports.slack import _pack, _stitch_fences
+
+    budget = 20
+    text = "x" * (budget - 2) + "```" + "y" * 10  # marker straddles the split
+
+    pieces = _pack(text, budget, (None,))
+    chunks = _stitch_fences(pieces)
+
+    assert len(chunks) == 2
+    assert "```" not in chunks[0]
+    assert "```" not in chunks[1]
