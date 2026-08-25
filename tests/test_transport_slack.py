@@ -224,6 +224,24 @@ async def test_dedupe_cache_is_bounded():
     assert len(transport._seen) <= 500
 
 
+async def test_tool_blocked_task_gets_x_reaction_and_reply_text():
+    """Enforcement blocking a task surfaces through the existing generic
+    failed-task handling -- no slack-specific wiring needed."""
+
+    class ToolBlockedHandler(EchoHandler):
+        async def handle_task(self, task: Task) -> Task:
+            return task.reply(
+                "A rule stopped this task: blocked by z.py: nope.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+
+    transport, api, handler = make(handler=ToolBlockedHandler())
+    await transport.handle_event(event("deploy", ts="200.0"), handler)
+    assert ("200.0", "x") in api.reacts
+    assert api.posts[-1][1] == "A rule stopped this task: blocked by z.py: nope."
+
+
 def test_serve_without_tokens_is_a_clean_error():
     transport = SlackTransport(CH, bot_token=None, app_token=None)
     transport.bot_token = None  # in case env leaked one in

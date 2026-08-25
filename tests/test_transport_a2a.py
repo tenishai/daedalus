@@ -1,14 +1,33 @@
 """The a2a transport: card serving, message/send, tasks/get, continuity."""
 
+from pathlib import Path
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from daedalus.agent import Agent  # noqa: E402
+from daedalus.bundle import Bundle  # noqa: E402
 from daedalus.task import ReasonCode, Task, TaskState  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app, task_to_a2a  # noqa: E402
+from tests.fakes import ScriptedLLM  # noqa: E402
 
 CARD = {"name": "greeter", "description": "golden", "version": "0.1.0", "skills": []}
+
+
+def _post_draft_blocking_bundle(tmp_path: Path) -> Path:
+    """A real bundle whose one enforcement hook always rejects the draft --
+    the reviewer's repro for the CRITICAL leaked-draft finding."""
+    (tmp_path / "agent.yaml").write_text("name: x\nmodel:\n  id: m\n")
+    (tmp_path / "agent-card.json").write_text('{"name": "x"}')
+    (tmp_path / "persona.md").write_text("You are x.")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "z_reject.py").write_text(
+        "def post_draft(draft):\n    raise ValueError('leaks a secret')\n"
+    )
+    return tmp_path
 
 
 class EchoHandler:
@@ -237,3 +256,70 @@ def test_peer_task_visible_to_jsonrpc_tasks_get():
     client.post("/a2a/tasks", json=cabal_task(task_id="task-77"))
     fetched = rpc(client, "tasks/get", {"id": "task-77"})["result"]
     assert fetched["status"]["state"] == "completed"
+
+
+def test_peer_dispatch_tool_blocked_is_a_failed_task_not_a_500():
+    """Enforcement blocking a task is a task outcome, not a transport error --
+    the handler returns a failed Task rather than raising."""
+
+    class ToolBlockedHandler:
+        async def handle_task(self, task: Task) -> Task:
+            return task.reply(
+                "A rule stopped this task: blocked by z.py: nope.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+
+    client = TestClient(build_a2a_app(ToolBlockedHandler(), card=CARD))
+    response = client.post("/a2a/tasks", json=cabal_task("deploy"))
+    assert response.status_code == 200
+    task = response.json()
+    assert task["status"]["state"] == "failed"
+    assert task["metadata"]["daedalus_reason_code"] == 703
+    assert task["status"]["message"]["parts"][0]["text"] == (
+        "A rule stopped this task: blocked by z.py: nope."
+    )
+
+
+# ---- reviewed CRITICAL: a blocked draft leaves no trace on the wire ---------
+
+
+def test_peer_dispatch_blocked_draft_never_appears_in_response_payload(tmp_path):
+    """post_draft blocks -> the drafted secret must not leak to an a2a caller
+    anywhere in the response body. task_to_a2a serializes history verbatim,
+    so this is an end-to-end check with a real Agent, not just agent_text()."""
+    bundle_path = _post_draft_blocking_bundle(tmp_path)
+    agent = Agent(Bundle.load(bundle_path), llm=ScriptedLLM("the secret is 42"))
+    client = TestClient(build_a2a_app(agent, card=CARD))
+
+    response = client.post("/a2a/tasks", json=cabal_task("hi"))
+    assert response.status_code == 200
+    assert "the secret is 42" not in response.text
+
+    task = response.json()
+    assert task["status"]["state"] == "failed"
+    assert task["status"]["message"]["parts"][0]["text"] == (
+        "A rule stopped this reply: blocked by z_reject.py: leaks a secret."
+    )
+
+
+def test_taskid_continuation_never_refeeds_a_blocked_draft_to_the_model(tmp_path):
+    """The a2a taskId-continuation path persists Task across turns -- exactly
+    the transport the finding calls out (alongside Slack threads). A draft
+    blocked on turn 1 must not resurface in the model's messages on turn 2."""
+    bundle_path = _post_draft_blocking_bundle(tmp_path)
+    llm = ScriptedLLM("the secret is 42", "moving on")
+    agent = Agent(Bundle.load(bundle_path), llm=llm)
+    client = TestClient(build_a2a_app(agent, card=CARD))
+
+    first = send_text(client, "hi")["result"]
+    assert first["status"]["state"] == "failed"
+
+    send_text(client, "again", taskId=first["id"])
+
+    assert len(llm.calls) == 2
+    second_turn_messages = llm.calls[1]
+    assert not any(
+        "the secret is 42" in (message.get("content") or "")
+        for message in second_turn_messages
+    )

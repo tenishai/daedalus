@@ -10,6 +10,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
+from daedalus.enforcement import Enforcement
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -102,6 +103,7 @@ class Agent:
         on_event: Callable[[dict], None] | None = None,
     ):
         self.bundle = bundle
+        self.enforcement = Enforcement.load(bundle.path / "tools")
         if llm is None:
             import os
 
@@ -228,11 +230,41 @@ class Agent:
         return self.bundle.spec.name
 
     async def handle_task(self, task: Task) -> Task:
+        if self.enforcement.locked:
+            name, _ = self.enforcement.load_error
+            return task.reply(
+                f"My orchestrator file {name} failed to load. Fix or remove it in the room.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        pre = await self.enforcement.run_pre_task(task.user_text())
+        if pre.blocked:
+            return task.reply(
+                f"A rule stopped this task: {pre.detail}.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
         task.state = TaskState.WORKING
         recalled = await self.memory.recall(task.user_text())
         if recalled:
             self._emit("recall", count=len(recalled))
-        return await self._loop(task, self._messages(task, recalled))
+        result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        if result.agent_text():
+            post = await self.enforcement.run_post_draft(result.agent_text())
+            if post.blocked:
+                # The unlawful draft is discarded, never partially sent: it
+                # must not linger in history where task_to_a2a would
+                # serialize it to a2a callers, or a persisted Task (Slack
+                # threads, a2a taskId continuation) would feed it back into
+                # the model's context on the next turn.
+                result.discard_last_agent_message()
+                return result.reply(
+                    f"A rule stopped this reply: {post.detail}.",
+                    state=TaskState.FAILED,
+                    reason=ReasonCode.TOOL_BLOCKED,
+                )
+            result.set_agent_text(post.text)
+        return result
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
@@ -381,10 +413,14 @@ class Agent:
             ],
         }
 
-    def _messages(self, task: Task, recalled: list[str]) -> list[dict]:
+    def _messages(
+        self, task: Task, recalled: list[str], notices: list[str] | None = None
+    ) -> list[dict]:
         system = self.bundle.persona
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
+        if notices:
+            system += "\n\n## Notices\n" + "\n".join(f"- {item}" for item in notices)
         messages = [{"role": "system", "content": system}]
         for message in task.history:
             role = "assistant" if message.role == "agent" else "user"
@@ -439,9 +475,14 @@ class Agent:
                 from daedalus.transports.a2a import A2aTransport
 
                 options = spec.options()
+                card = self.bundle.card
+                if self.enforcement.active:
+                    # A new dict -- the on-disk card / bundle.card in memory
+                    # is never mutated to carry the stamp.
+                    card = {**card, "enforcement": self.enforcement.card_stamp()}
                 built.append(
                     A2aTransport(
-                        card=self.bundle.card,
+                        card=card,
                         host=str(options.get("host", "127.0.0.1")),
                         port=int(options.get("port", 9200)),
                         events=self.events,
