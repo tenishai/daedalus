@@ -74,9 +74,12 @@ transports:
   - kind: cli                           # always available for `daedalus chat`
 
 tools:
-  provider: mcp                         # mcp | liminal | none
+  provider: mcp                         # mcp | liminal | colleagues | none
   servers:                              # provider=mcp: direct MCP servers
     - command: ["npx", "@modelcontextprotocol/server-github"]
+  colleagues:                           # provider=colleagues: switchboard directory
+    url: http://cabal:8300              # list_colleagues + ask_colleague over A2A
+    token_env: CABAL_AGENT_TOKEN        # unset/empty = degraded, never a boot failure
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read
