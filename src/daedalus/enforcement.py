@@ -50,7 +50,9 @@ class Enforcement:
                 if not callable(getattr(mod, "pre_task", None)) and not callable(
                     getattr(mod, "post_draft", None)
                 ):
-                    return cls([], load_error=(path.name, "defines neither pre_task nor post_draft"))
+                    return cls(
+                        [], load_error=(path.name, "defines neither pre_task nor post_draft")
+                    )
                 modules.append((path.name, mod))
             except Exception as exc:  # noqa: BLE001  law never half-loads
                 return cls([], load_error=(path.name, _first_line(exc)))
