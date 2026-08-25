@@ -212,6 +212,18 @@ class Agent:
             providers.append(
                 LiminalToolProvider(spec.liminal.url, token_env=spec.liminal.token_env)
             )
+        elif spec.provider == "colleagues":
+            if not spec.colleagues.url:
+                raise BundleError("tools.provider 'colleagues' requires tools.colleagues.url")
+            from daedalus.tools.colleagues import ColleaguesToolProvider
+
+            providers.append(
+                ColleaguesToolProvider(
+                    spec.colleagues.url,
+                    token_env=spec.colleagues.token_env,
+                    self_name=spec.colleagues.self,
+                )
+            )
 
         if not providers:
             return NoTools()
