@@ -5,11 +5,19 @@ and a2a_auth's injectable-fetch idiom for outbound HTTP."""
 
 from __future__ import annotations
 
+import importlib.util
+from unittest.mock import patch
+
 import pytest
 
 from daedalus.tools.colleagues import ColleaguesToolProvider
 
 NOT_CONFIGURED = "The colleague pass is not configured."
+
+
+def _techne_installed() -> bool:
+    # techne is not on PyPI; local runs use the sibling checkout (PYTHONPATH=src:../techne).
+    return importlib.util.find_spec("techne") is not None
 
 
 class FakeResponse:
@@ -62,9 +70,13 @@ DIRECTORY = {
 }
 
 
-def make_provider(client, *, token_env="COLLEAGUE_TOKEN", self_name="me"):
+def make_provider(client, *, token_env="COLLEAGUE_TOKEN", self_name="me", db_path=None):
     return ColleaguesToolProvider(
-        "http://switchboard.test", token_env=token_env, self_name=self_name, client=client
+        "http://switchboard.test",
+        token_env=token_env,
+        self_name=self_name,
+        client=client,
+        db_path=db_path,
     )
 
 
@@ -123,13 +135,60 @@ def test_provider_colleagues_without_url_fails_at_load(tmp_path):
         Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
 
 
-async def test_tools_lists_both_tool_specs():
+async def test_tools_lists_all_three_tool_specs():
     provider = make_provider(FakeHTTPClient())
     specs = await provider.tools()
     assert [s["name"] for s in specs] == [
         "colleagues.list_colleagues",
         "colleagues.ask_colleague",
+        "colleagues.remember",
     ]
+
+
+# --- fetch_agents: public, token-gated --------------------------------------
+#
+# fetch_agents() used to be the private _fetch_agents(), fired the directory
+# GET unconditionally (unlike its siblings _list_colleagues/_remember, which
+# check the token first), and was reached across the module boundary by
+# revision.py's ColleaguesLike Protocol -- a private-method leak. It is now
+# public, and gates on the token itself before ever touching the network.
+
+
+async def test_fetch_agents_is_public_and_returns_the_directory(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    provider = make_provider(client)
+    agents, error = await provider.fetch_agents()
+    assert error is None
+    assert agents == DIRECTORY["agents"]
+    url, headers = client.get_calls[0]
+    assert url == "http://switchboard.test/directory"
+    assert headers["Authorization"] == "Bearer secret"
+
+
+async def test_fetch_agents_raises_typed_error_without_a_token_env_and_never_touches_network():
+    from daedalus.tools.colleagues import ColleaguesNotConfigured
+
+    class _NeverCalledClient:
+        async def get(self, url, headers=None):
+            raise AssertionError("fetch_agents must token-gate before any network call")
+
+    provider = ColleaguesToolProvider(
+        "http://switchboard.test", token_env=None, self_name="me", client=_NeverCalledClient()
+    )
+    with pytest.raises(ColleaguesNotConfigured):
+        await provider.fetch_agents()
+
+
+async def test_fetch_agents_raises_typed_error_when_token_env_value_is_empty(monkeypatch):
+    from daedalus.tools.colleagues import ColleaguesNotConfigured
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "")
+    client = FakeHTTPClient()
+    provider = make_provider(client)
+    with pytest.raises(ColleaguesNotConfigured):
+        await provider.fetch_agents()
+    assert client.get_calls == []
 
 
 # --- list_colleagues happy path + self-exclusion ----------------------------
@@ -360,3 +419,191 @@ async def test_boot_is_unaffected_by_a_missing_token(tmp_path):
     (tmp_path / "persona.md").write_text("You are x.")
     agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM())  # must not raise
     assert agent.tools is not None
+
+
+# --- remember happy path + provenance shapes --------------------------------
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_remember_stores_fact_with_team_provenance_and_low_confidence(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    db_path = tmp_path / "techne.db"
+    provider = make_provider(client, db_path=db_path)
+    with patch("techne.core.knowledge.store") as fake_store:
+        text = await provider.call(
+            "colleagues.remember",
+            {"fact": "Refunds take 3 business days.", "learned_from": "rin"},
+        )
+    fake_store.assert_called_once_with(
+        db_path,
+        "Refunds take 3 business days.",
+        type="fact",
+        confidence="low",
+        source="colleague:rin#team=billing",
+    )
+    assert "rin" in text
+    assert "—" not in text
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_remember_stores_fact_without_team_suffix_when_team_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    directory = {
+        "agents": [
+            {"name": "me", "team": "ops"},
+            {"name": "zeb", "team": ""},
+        ]
+    }
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, directory)])
+    db_path = tmp_path / "techne.db"
+    provider = make_provider(client, db_path=db_path)
+    with patch("techne.core.knowledge.store") as fake_store:
+        text = await provider.call(
+            "colleagues.remember", {"fact": "The build is green.", "learned_from": "zeb"}
+        )
+    fake_store.assert_called_once_with(
+        db_path, "The build is green.", type="fact", confidence="low", source="colleague:zeb"
+    )
+    assert "zeb" in text
+
+
+# --- remember refusals -------------------------------------------------------
+
+
+async def test_remember_refuses_self_without_a_network_call(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient()
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    text = await provider.call(
+        "colleagues.remember", {"fact": "anything", "learned_from": "me"}
+    )
+    assert "myself" in text.lower() or "cannot" in text.lower()
+    assert client.get_calls == []
+    assert "—" not in text
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_remember_refuses_a_name_absent_from_the_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    with patch("techne.core.knowledge.store") as fake_store:
+        text = await provider.call(
+            "colleagues.remember", {"fact": "anything", "learned_from": "ghost"}
+        )
+    assert "ghost" in text
+    fake_store.assert_not_called()
+    assert "—" not in text
+
+
+# --- remember failure modes (never raise) -----------------------------------
+
+
+async def test_remember_directory_fetch_failure_is_named_plainly(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(500)])
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    text = await provider.call(
+        "colleagues.remember", {"fact": "anything", "learned_from": "rin"}
+    )
+    assert "500" in text
+    assert "—" not in text
+
+
+async def test_remember_degrades_when_db_path_is_absent(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient()
+    provider = make_provider(client, db_path=None)
+    text = await provider.call(
+        "colleagues.remember", {"fact": "anything", "learned_from": "rin"}
+    )
+    assert client.get_calls == []  # no point fetching the directory; nowhere to store it
+    assert "—" not in text
+
+
+async def test_remember_degrades_when_token_env_absent(monkeypatch, tmp_path):
+    monkeypatch.delenv("COLLEAGUE_TOKEN", raising=False)
+    client = FakeHTTPClient()
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    text = await provider.call(
+        "colleagues.remember", {"fact": "anything", "learned_from": "rin"}
+    )
+    assert text == NOT_CONFIGURED
+    assert client.get_calls == []
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_remember_store_failure_is_named_plainly(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    with patch("techne.core.knowledge.store", side_effect=RuntimeError("disk full")):
+        text = await provider.call(
+            "colleagues.remember", {"fact": "anything", "learned_from": "rin"}
+        )
+    assert "disk full" in text or "could not" in text.lower()
+    assert "—" not in text
+
+
+# --- the directory envelope stays exactly the same for remember too --------
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_remember_directory_request_shape_is_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(get_responses=[FakeResponse(200, DIRECTORY)])
+    provider = make_provider(client, db_path=tmp_path / "techne.db")
+    with patch("techne.core.knowledge.store"):
+        await provider.call(
+            "colleagues.remember", {"fact": "anything", "learned_from": "rin"}
+        )
+    url, headers = client.get_calls[0]
+    assert url == "http://switchboard.test/directory"
+    assert headers["Authorization"] == "Bearer secret"
+
+
+# --- db_path wiring at the Agent level --------------------------------------
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+def test_agent_threads_techne_db_path_into_colleagues_provider(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        f"memory:\n  personal: techne\n  home: {tmp_path}\n"
+        "tools:\n  provider: colleagues\n  colleagues:\n"
+        "    url: http://switchboard.test\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    self: x\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+    assert isinstance(agent.tools, ColleaguesToolProvider)
+    assert agent.tools.db_path == agent.memory.db_path
+    assert agent.tools.db_path is not None
+
+
+def test_agent_leaves_colleagues_db_path_none_without_techne_memory(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  provider: colleagues\n  colleagues:\n"
+        "    url: http://switchboard.test\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    self: x\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM())
+    assert isinstance(agent.tools, ColleaguesToolProvider)
+    assert agent.tools.db_path is None
