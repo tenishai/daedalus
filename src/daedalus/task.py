@@ -35,6 +35,7 @@ class ReasonCode(IntEnum):
     HUMAN_INPUT_REQUIRED = 700
     POLICY_VIOLATION = 701
     BUDGET_EXHAUSTED = 702
+    TOOL_BLOCKED = 703
     ESCALATION = 704
 
 
@@ -67,6 +68,34 @@ class Task(BaseModel):
             if message.role == "agent":
                 return message.text
         return ""
+
+    def set_agent_text(self, text: str) -> None:
+        """Overwrite the most recent agent message's text in place.
+
+        Unlike reply(), this does not append a new turn or touch state /
+        metadata -- it is the post_draft transform's mutator: the draft
+        already in history becomes the lawful text, not an additional turn.
+        """
+        for message in reversed(self.history):
+            if message.role == "agent":
+                message.text = text
+                return
+
+    def discard_last_agent_message(self) -> None:
+        """Remove the most recent agent message from history, in place.
+
+        The post_draft transform's other mutator: when a hook blocks the
+        draft, the draft must not merely lose the "current reply" spot --
+        it must vanish from history entirely. task_to_a2a serializes the
+        full history verbatim (a blocked draft would leak to a2a callers),
+        and transports that persist the Task across turns (Slack threads,
+        a2a taskId continuation) feed history back into the model's context
+        on the next call. "Discarded, never partially sent."
+        """
+        for index in range(len(self.history) - 1, -1, -1):
+            if self.history[index].role == "agent":
+                del self.history[index]
+                return
 
     def reply(
         self,
