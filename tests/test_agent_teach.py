@@ -294,9 +294,12 @@ async def test_knowledge_refused_for_colleague_sub(tmp_path, techne_db):
     assert _all_rows(techne_db) == []
 
 
-async def test_tool_marker_is_a_refusing_stub_and_never_reaches_model(tmp_path, techne_db):
-    """TOOL_MARKER's handler is a later task; landing the constant now must
-    not let an early tool envelope fall through to the model."""
+async def test_tool_marker_without_a_filename_never_reaches_model(tmp_path, techne_db):
+    """TOOL_MARKER's real handler lands in tests/test_agent_tool.py (arc3d
+    Task 5); this file just keeps the "never falls through to the model"
+    guarantee pinned for the marker family as a whole. No memory.home is
+    configured on this techne-only bundle, so the handler's own
+    no-persistent-volume refusal is the exact path exercised here."""
     agent = _techne_agent(tmp_path, techne_db)
     task = Task.from_text("do something")
     task.metadata[SYSTEM_TASK_KEY] = TOOL_MARKER
