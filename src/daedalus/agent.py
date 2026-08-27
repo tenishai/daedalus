@@ -11,7 +11,18 @@ from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
 from daedalus.enforcement import Enforcement
-from daedalus.memory.teach import FILENAME_KEY, apply_teach, is_teach_task, teach_authorized
+from daedalus.memory.teach import (
+    DELETE_KEY,
+    FILENAME_KEY,
+    KNOWLEDGE_MARKER,
+    SYSTEM_TASK_KEY,
+    TEACH_MARKER,
+    TOOL_MARKER,
+    apply_knowledge,
+    apply_knowledge_delete,
+    apply_teach,
+    teach_authorized,
+)
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -254,8 +265,9 @@ class Agent:
         return self.bundle.spec.name
 
     async def handle_task(self, task: Task) -> Task:
-        if is_teach_task(task):
-            return await self._handle_teach(task)
+        marker = task.metadata.get(SYSTEM_TASK_KEY)
+        if marker is not None:
+            return await self._dispatch_system_task(marker, task)
         if self.enforcement.locked:
             name, _ = self.enforcement.load_error
             return task.reply(
@@ -291,6 +303,24 @@ class Agent:
                 )
             result.set_agent_text(post.text)
         return result
+
+    async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
+        """Route a system-task-marked task to its handler, pre-model. An
+        unrecognized marker is refused outright rather than falling through
+        to the model, which would otherwise treat an operator-only envelope
+        as an ordinary chat turn."""
+        if marker == TEACH_MARKER:
+            return await self._handle_teach(task)
+        if marker == KNOWLEDGE_MARKER:
+            return await self._handle_knowledge(task)
+        if marker == TOOL_MARKER:
+            return await self._handle_tool(task)
+        self._emit("system_task_refused", marker=marker)
+        return task.reply(
+            f"Unknown system task {marker!r}. Refusing rather than guessing.",
+            state=TaskState.FAILED,
+            reason=ReasonCode.POLICY_VIOLATION,
+        )
 
     async def _handle_teach(self, task: Task) -> Task:
         """The operator teach lane: write the note into techne now, no
@@ -328,6 +358,67 @@ class Agent:
             self._revision_fires.add(fire)
             fire.add_done_callback(self._revision_fires.discard)
         return task.reply("Learned. I will remember that.")
+
+    async def _handle_knowledge(self, task: Task) -> Task:
+        """The operator knowledge lane: a knowledge FILE's edit or delete,
+        landed now, no model, no enforcement, no rebuild. Same
+        authorization gate as teach -- knowledge writes are exactly as
+        operator-grade, so teach_authorized is reused verbatim rather than
+        reimplemented. DELETE_KEY in metadata routes to
+        apply_knowledge_delete; its absence is a write (apply_knowledge)."""
+        if not teach_authorized(task):
+            self._emit("knowledge_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Knowledge writes are operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return task.reply(
+                "I have no personal memory configured, so I cannot keep this.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        filename = task.metadata.get(FILENAME_KEY, "")
+        if task.metadata.get(DELETE_KEY):
+            result = await asyncio.to_thread(
+                apply_knowledge_delete, str(filename), Path(db_path)
+            )
+            if result.error:
+                return task.reply(
+                    f"I could not remove that: {result.error}.", state=TaskState.FAILED
+                )
+            self._emit(
+                "knowledge_deleted", source=result.source, entries=len(result.entry_ids)
+            )
+            return task.reply("Forgotten. I no longer keep that.")
+        result = await asyncio.to_thread(
+            apply_knowledge, task.user_text(), str(filename), Path(db_path)
+        )
+        if result.error:
+            return task.reply(
+                f"I could not keep that: {result.error}.", state=TaskState.FAILED
+            )
+        if result.already_known:
+            return task.reply("I already know this one. Nothing new to keep.")
+        self._emit("knowledge_stored", source=result.source, entries=len(result.entry_ids))
+        fire = self._start_revision_pass()
+        if fire is not None:
+            self._revision_fires.add(fire)
+            fire.add_done_callback(self._revision_fires.discard)
+        return task.reply("Learned. I will remember that.")
+
+    async def _handle_tool(self, task: Task) -> Task:
+        """TOOL_MARKER's real handler is a later task. This refusing stub
+        only lands the marker: an early tool envelope is refused outright
+        rather than silently falling through to the model."""
+        self._emit("tool_task_refused")
+        return task.reply(
+            "Tool tasks are not handled yet.",
+            state=TaskState.FAILED,
+            reason=ReasonCode.TOOL_BLOCKED,
+        )
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
