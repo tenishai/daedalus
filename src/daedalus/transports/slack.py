@@ -31,6 +31,7 @@ _SEEN_CAP = 500
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
+_THINKING = ":hourglass_flowing_sand: _thinking..._"
 
 
 def to_mrkdwn(text: str) -> str:
@@ -148,6 +149,20 @@ class SlackApi:
         for chunk in chunks[1:]:
             await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
         return first["ts"]
+
+    async def update(
+        self, channel: str, ts: str, text: str, thread_ts: str | None = None
+    ) -> None:
+        """Rewrite an already-posted message in place, chunked the same way
+        post() chunks: the first chunk replaces the message via chat.update,
+        and any overflow posts as ordinary follow-ups in the same thread.
+        The transport uses this to turn its own thinking placeholder INTO
+        the reply -- one message that visibly progresses from working to
+        answered, instead of a placeholder left behind above the answer."""
+        chunks = _chunk_message(text)
+        await self._web.chat_update(channel=channel, ts=ts, text=chunks[0])
+        for chunk in chunks[1:]:
+            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
 
     async def react(self, channel: str, ts: str, name: str) -> None:
         try:
@@ -293,6 +308,16 @@ class SlackTransport:
             approver.thread_ts = thread
 
         await self._api.react(self.channel, ts, "eyes")
+        # Thinking state (2026-08-27 operator feedback): a visible in-thread
+        # placeholder the moment work starts, updated IN PLACE into the
+        # final reply below -- the room's Slack presence shows working vs
+        # answered as one message's lifecycle, not silence then a wall of
+        # text. Placeholder failure is never load-bearing: None falls back
+        # to exactly the old post-at-the-end behavior.
+        try:
+            thinking_ts = await self._api.post(self.channel, _THINKING, thread_ts=thread)
+        except Exception:
+            thinking_ts = None
         try:
             task = await handler.handle_task(task)
             self._threads[thread] = task
@@ -303,7 +328,16 @@ class SlackTransport:
             reply = f"error: {exc}"
         await self._api.unreact(self.channel, ts, "eyes")
         await self._api.react(self.channel, ts, "white_check_mark" if ok else "x")
-        await self._api.post(self.channel, to_mrkdwn(reply), thread_ts=thread)
+        rendered = to_mrkdwn(reply)
+        if thinking_ts is not None:
+            try:
+                await self._api.update(self.channel, thinking_ts, rendered, thread_ts=thread)
+            except Exception:
+                # chat.update can fail independently (deleted placeholder,
+                # message too old): the reply must still land somewhere.
+                await self._api.post(self.channel, rendered, thread_ts=thread)
+        else:
+            await self._api.post(self.channel, rendered, thread_ts=thread)
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, thread)
