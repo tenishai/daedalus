@@ -7,6 +7,17 @@ removed files are dropped; learned (non-seed) entries are never touched.
 Section convention: knowledge files are split on `## ` headings; the filename
 stem picks the techne knowledge type (see TYPE_MAP; anything else is a fact).
 
+bundle/skills/<id>/SKILL.md rides the SAME convergence pass (2026-08-27:
+until then the runtime never read bundle/skills at all -- kobo staged skill
+picks into every image and every one of them was dead weight). Each SKILL.md
+enters `sync()`'s ledger under the collision-free key `skills/<id>/SKILL.md`
+and seeds as ONE whole-file `procedure` entry -- a skill is a coherent
+procedure, and splitting it on `## ` headings the way knowledge files split
+would fragment the very steps that make it one. Any leading YAML
+frontmatter (the marketplace's version/profiles block) is stripped: it is
+catalog metadata, not procedure. A skill's support files beyond SKILL.md
+are not seeded (nothing consumes them yet); the SKILL.md is the directive.
+
 bundle/intake/*.{md,txt} gets the opposite lifecycle: a one-shot append pass
 (see ingest_intake) ledgered by content-sha rather than filename. Once a
 file's sha is ledgered it is never touched again — not on content change
@@ -52,8 +63,32 @@ TYPE_MAP = {
 _H2 = re.compile(r"^## ", re.MULTILINE)
 
 
+_SKILL_KEY_PREFIX = "skills/"
+
+# Leading YAML frontmatter block (marketplace SKILL.md dialect: version,
+# profiles, owner...). Catalog metadata, never procedure -- stripped before
+# seeding. DOTALL so the block may span lines; anchored at the very start.
+_FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
+
 def type_for(filename: str) -> str:
+    if filename.startswith(_SKILL_KEY_PREFIX):
+        return "procedure"
     return TYPE_MAP.get(Path(filename).stem, "fact")
+
+
+def parse_skill_file(key: str, path: Path) -> list[str]:
+    """One whole-file procedure section per SKILL.md (see the module
+    docstring for why skills are never split on headings the way
+    knowledge files are). The section leads with a heading naming the
+    skill id -- the bundle directory name, taken from `key`'s middle
+    segment -- so the seeded entry self-describes in recall the same way
+    a knowledge file's own `## ` heading does."""
+    text = _FRONTMATTER.sub("", path.read_text(), count=1).strip()
+    if not text:
+        return []
+    skill_id = key.split("/")[1]
+    return [f"## Skill: {skill_id}\n\n{text}"]
 
 
 def parse_knowledge_file(path: Path) -> list[str]:
@@ -160,6 +195,7 @@ def sync(
     purge_fn=None,
     list_ids_fn: Callable[[Path, str], list[int]] | None = None,
     retire_fn: Callable[[Path, list[int], int], None] | None = None,
+    skills_dir: Path | None = None,
 ) -> dict:
     try:
         conn, state = _load_state(state_db)
@@ -179,6 +215,15 @@ def sync(
 
     try:
         current = {p.name: p for p in sorted(knowledge_dir.glob("*.md"))}
+        if skills_dir is not None:
+            # Same ledger, same convergence, same staleness rules -- one
+            # removal pass over one `current` map is load-bearing: a second
+            # sync() call against the same state_db would see the other
+            # call's rows as removed files and delete their entries.
+            # Key shape `skills/<id>/SKILL.md` cannot collide with a flat
+            # knowledge filename.
+            for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+                current[f"skills/{skill_md.parent.name}/SKILL.md"] = skill_md
         seeded = removed = unchanged = 0
 
         for filename in set(state) - set(current):
@@ -204,9 +249,14 @@ def sync(
             """Store `path`'s sections fresh under the ordinary seed source.
             Exception cleanup only; the caller decides what to do with the
             old entries (if any) and writes the ledger row."""
+            sections = (
+                parse_skill_file(filename, path)
+                if filename.startswith(_SKILL_KEY_PREFIX)
+                else parse_knowledge_file(path)
+            )
             ids: list[int] = []
             try:
-                for section in parse_knowledge_file(path):
+                for section in sections:
                     ids.append(
                         store_fn(techne_db, section, type_for(filename), "seed", f"seed:{filename}")
                     )
@@ -540,6 +590,7 @@ def main(argv: list[str]) -> int:
         purge_fn=purge_fn,
         list_ids_fn=_ids_by_source,
         retire_fn=retire_fn,
+        skills_dir=bundle / "skills",
     )
     if not knowledge_dir.is_dir() and result == {"seeded": 0, "removed": 0, "unchanged": 0}:
         # Truly never-seeded bundle: no knowledge/ now, and no prior state to
