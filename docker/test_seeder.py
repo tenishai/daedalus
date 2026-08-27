@@ -996,3 +996,84 @@ def test_knowledge_convergence_ignores_intake_dir(tmp_path, monkeypatch, caplog)
     ]
     assert len(seed_sources) == 3
     assert len(intake_sources) == 3
+
+
+# --- skills seeding (2026-08-27: bundle/skills was dead weight before) --------
+
+
+def _skills(tmp_path):
+    sdir = tmp_path / "skills"
+    (sdir / "cost-report").mkdir(parents=True)
+    (sdir / "cost-report" / "SKILL.md").write_text(
+        "---\nname: cost-report\nversion: 1.2.0\nprofiles: [sre]\n---\n"
+        "# Cost report\n\nRun the monthly cost query and post it.\n"
+    )
+    return sdir
+
+
+def test_skill_seeds_as_one_procedure_entry_with_frontmatter_stripped(tmp_path):
+    from seeder import parse_skill_file
+
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    result = sync(
+        kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+        fake.store, fake.delete, skills_dir=sdir,
+    )
+    assert result["seeded"] == 4  # 3 knowledge sections + 1 whole-file skill
+    skill_rows = [(c, t, s) for c, t, s in fake.rows.values()
+                  if s == "seed:skills/cost-report/SKILL.md"]
+    assert len(skill_rows) == 1
+    content, type_, _ = skill_rows[0]
+    assert type_ == "procedure"
+    assert content.startswith("## Skill: cost-report")
+    assert "Run the monthly cost query" in content
+    assert "version:" not in content  # frontmatter stripped
+    sections = parse_skill_file(
+        "skills/cost-report/SKILL.md", sdir / "cost-report" / "SKILL.md"
+    )
+    assert len(sections) == 1 and "profiles" not in sections[0]
+
+
+def test_skill_without_frontmatter_seeds_verbatim_body(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = tmp_path / "skills"
+    (sdir / "plain").mkdir(parents=True)
+    (sdir / "plain" / "SKILL.md").write_text("Just do the thing.\n")
+    sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+         fake.store, fake.delete, skills_dir=sdir)
+    rows = [c for c, _, s in fake.rows.values() if s == "seed:skills/plain/SKILL.md"]
+    assert rows == ["## Skill: plain\n\nJust do the thing."]
+
+
+def test_skill_change_and_removal_converge_like_knowledge(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+
+    before = dict(fake.rows)
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+    assert r["seeded"] == 0 and fake.rows == before
+
+    (sdir / "cost-report" / "SKILL.md").write_text("Revised procedure.\n")
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+    assert r["seeded"] == 1
+    rows = [c for c, _, s in fake.rows.values()
+            if s == "seed:skills/cost-report/SKILL.md"]
+    assert rows == ["## Skill: cost-report\n\nRevised procedure."]
+
+    shutil.rmtree(sdir / "cost-report")
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+    assert r["removed"] == 1
+    assert not [s for _, _, s in fake.rows.values()
+                if s == "seed:skills/cost-report/SKILL.md"]
+
+
+def test_sync_without_skills_dir_is_byte_identical_to_before(tmp_path):
+    """The knowledge-only call shape (no skills_dir) behaves exactly as it
+    always has -- the parameter is additive."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    result = sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+                  fake.store, fake.delete)
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
