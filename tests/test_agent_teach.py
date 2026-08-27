@@ -17,7 +17,13 @@ from pathlib import Path
 import pytest
 
 from daedalus.agent import Agent
-from daedalus.memory.teach import FILENAME_KEY, SYSTEM_TASK_KEY, TEACH_MARKER
+from daedalus.memory.teach import (
+    FILENAME_KEY,
+    KNOWLEDGE_MARKER,
+    SYSTEM_TASK_KEY,
+    TEACH_MARKER,
+    TOOL_MARKER,
+)
 from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 
 techne = pytest.importorskip("techne", reason="techne is not installed")
@@ -209,3 +215,106 @@ async def test_teach_invalid_filename_replies_error(tmp_path, techne_db):
     assert result.state is TaskState.FAILED
     assert "invalid teach filename" in result.agent_text()
     assert _all_rows(techne_db) == []
+
+
+# ---- the marker dispatch: knowledge, tool (stub), and unknown markers ----
+
+
+def _knowledge_task(
+    text="The dog is named Tsuru.",
+    *,
+    sub="service:room",
+    filename="chat-20260820-dog.md",
+    delete=False,
+):
+    task = Task.from_text(text)
+    task.metadata[SYSTEM_TASK_KEY] = KNOWLEDGE_MARKER
+    task.metadata[FILENAME_KEY] = filename
+    if delete:
+        from daedalus.memory.teach import DELETE_KEY
+
+        task.metadata[DELETE_KEY] = True
+    if sub is not None:
+        task.metadata[VERIFIED_SUB_KEY] = sub
+    return task
+
+
+async def test_knowledge_task_stores_and_replies_learned(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+
+    result = await agent.handle_task(_knowledge_task())
+
+    assert result.agent_text() == "Learned. I will remember that."
+    assert result.state is TaskState.COMPLETED
+    rows = [e for e in _all_rows(techne_db) if e.get("source", "").startswith("intake:")]
+    assert len(rows) == 1
+
+
+async def test_knowledge_task_never_reaches_model_or_enforcement(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+    agent.enforcement = _BlockingEnforcement()
+
+    result = await agent.handle_task(_knowledge_task())
+
+    assert result.agent_text() == "Learned. I will remember that."
+    assert result.state is TaskState.COMPLETED
+
+
+async def test_knowledge_task_edit_retires_the_old_fact(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+
+    await agent.handle_task(_knowledge_task(text="The dog is named Tsuru."))
+    result = await agent.handle_task(_knowledge_task(text="The dog is named Kestrel."))
+
+    assert result.agent_text() == "Learned. I will remember that."
+    live = knowledge.list_entries(techne_db, limit=10_000_000)
+    contents = [e["content"] for e in live]
+    assert not any("Tsuru" in c for c in contents)
+    assert any("Kestrel" in c for c in contents)
+
+
+async def test_knowledge_task_delete_removes_recall(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+
+    await agent.handle_task(_knowledge_task(text="The dog is named Tsuru."))
+    result = await agent.handle_task(_knowledge_task(delete=True))
+
+    assert result.state is TaskState.COMPLETED
+    live = knowledge.list_entries(techne_db, limit=10_000_000)
+    assert not any("Tsuru" in e["content"] for e in live)
+
+
+async def test_knowledge_refused_for_colleague_sub(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+
+    result = await agent.handle_task(_knowledge_task(sub="agent:ward"))
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.POLICY_VIOLATION
+    assert _all_rows(techne_db) == []
+
+
+async def test_tool_marker_without_a_filename_never_reaches_model(tmp_path, techne_db):
+    """TOOL_MARKER's real handler lands in tests/test_agent_tool.py (arc3d
+    Task 5); this file just keeps the "never falls through to the model"
+    guarantee pinned for the marker family as a whole. No memory.home is
+    configured on this techne-only bundle, so the handler's own
+    no-persistent-volume refusal is the exact path exercised here."""
+    agent = _techne_agent(tmp_path, techne_db)
+    task = Task.from_text("do something")
+    task.metadata[SYSTEM_TASK_KEY] = TOOL_MARKER
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.FAILED
+
+
+async def test_unknown_system_task_marker_is_refused_and_never_reaches_model(tmp_path, techne_db):
+    agent = _techne_agent(tmp_path, techne_db)
+    task = Task.from_text("hi")
+    task.metadata[SYSTEM_TASK_KEY] = "reboot"
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.POLICY_VIOLATION

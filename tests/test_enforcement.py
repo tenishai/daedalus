@@ -153,6 +153,103 @@ async def test_card_stamp_shapes(tmp_path):
     }
 
 
+# ---- overlay directory (arc3d Task 5): image tools first, then overlay, ---
+# ---- boot-only, no shadowing -----------------------------------------------
+
+
+async def test_overlay_tools_load_after_image_tools_in_filename_order(tmp_path):
+    image = _write_tool(tmp_path, "a_image.py", "def pre_task(message):\n    return {}\n")
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "b_overlay.py").write_text("def pre_task(message):\n    return {}\n")
+
+    law = Enforcement.load(image, overlay)
+
+    assert law.locked is False
+    assert law.hook_files == ["a_image.py", "b_overlay.py"]
+
+
+async def test_overlay_only_no_image_tools_dir_at_all(tmp_path):
+    image = tmp_path / "tools"  # never created
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "solo.py").write_text("def pre_task(message):\n    return {}\n")
+
+    law = Enforcement.load(image, overlay)
+
+    assert law.locked is False
+    assert law.hook_files == ["solo.py"]
+
+
+async def test_overlay_tool_survives_being_loaded_again_after_a_simulated_restart(tmp_path):
+    """"Restart" here is exactly what it is at boot in the real runtime:
+    Enforcement.load called again from scratch against the same two
+    directories. The overlay file the first load saw must still be there
+    for the second -- load itself never mutates or clears anything."""
+    image = tmp_path / "tools"  # never created: no image tools at all
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "sticky.py").write_text("def pre_task(message):\n    return {}\n")
+
+    first = Enforcement.load(image, overlay)
+    second = Enforcement.load(image, overlay)
+
+    assert first.hook_files == ["sticky.py"]
+    assert second.hook_files == ["sticky.py"]
+
+
+async def test_overlay_tool_shadowing_image_tool_is_skipped_at_load_with_loud_log(
+    tmp_path, caplog
+):
+    """A file planted directly on the overlay directory's disk (bypassing
+    kobo and the runtime's own apply_tool write-time check entirely) must
+    still never shadow the baseline image-bundle tool of the same name: the
+    image copy is the one that loads and the one that runs, and the skip is
+    logged loudly enough to notice."""
+    image = _write_tool(
+        tmp_path,
+        "guard.py",
+        "def pre_task(message):\n    return {'notices': ['image guard ran']}\n",
+    )
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "guard.py").write_text(
+        "def pre_task(message):\n    return {'notices': ['overlay guard ran']}\n"
+    )
+
+    with caplog.at_level("WARNING"):
+        law = Enforcement.load(image, overlay)
+
+    assert law.locked is False
+    assert law.hook_files == ["guard.py"]
+    result = await law.run_pre_task("hi")
+    assert result.notices == ["image guard ran"]
+    assert "guard.py" in caplog.text
+    assert "shadow" in caplog.text.lower()
+
+
+async def test_overlay_broken_hook_locks_same_as_an_image_one(tmp_path):
+    image = _write_tool(tmp_path, "a_image.py", "def pre_task(message):\n    return {}\n")
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "broken.py").write_text("import definitely_not_a_module\n")
+
+    law = Enforcement.load(image, overlay)
+
+    assert law.locked is True
+    assert law.load_error[0] == "broken.py"
+    assert law.hook_files == []
+
+
+def test_no_overlay_dir_is_byte_identical_to_image_only_load(tmp_path):
+    image = _write_tool(tmp_path, "a_image.py", "def pre_task(message):\n    return {}\n")
+
+    without_overlay = Enforcement.load(image)
+    with_missing_overlay = Enforcement.load(image, tmp_path / "overlay-never-created")
+
+    assert without_overlay.hook_files == with_missing_overlay.hook_files == ["a_image.py"]
+
+
 def test_reason_code_tool_blocked_is_703():
     # The brief specified 702, but task.py already carries BUDGET_EXHAUSTED = 702
     # (cabal's canonical taxonomy at cabal/src/cabal/core/a2a/codes.py explicitly

@@ -11,7 +11,19 @@ from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
 from daedalus.enforcement import Enforcement
-from daedalus.memory.teach import FILENAME_KEY, apply_teach, is_teach_task, teach_authorized
+from daedalus.memory.teach import (
+    DELETE_KEY,
+    FILENAME_KEY,
+    KNOWLEDGE_MARKER,
+    SYSTEM_TASK_KEY,
+    TEACH_MARKER,
+    TOOL_MARKER,
+    apply_knowledge,
+    apply_knowledge_delete,
+    apply_teach,
+    teach_authorized,
+)
+from daedalus.memory.tooling import apply_tool
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -104,7 +116,7 @@ class Agent:
         on_event: Callable[[dict], None] | None = None,
     ):
         self.bundle = bundle
-        self.enforcement = Enforcement.load(bundle.path / "tools")
+        self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
 
@@ -146,6 +158,19 @@ class Agent:
         self.events.publish(event)
         if self.on_event is not None:
             self.on_event(event)
+
+    def _tool_overlay_dir(self) -> Path | None:
+        """The persistent overlay directory for fast-lane-delivered tools
+        (arc3d Task 5), beside the techne db on the agent's own volume --
+        `spec.memory.home`, mounted at /techne in live pods. Never
+        `bundle.path`, which is the image and resets to its baked-in
+        contents on every restart. None when no home is configured, same
+        guard `_memory_from_spec` uses for `db_path` -- independent of
+        `spec.memory.personal`: the home directory is the persistent volume
+        mount itself, and techne.db is just one file that happens to live
+        there, so a tool write needs nothing more than `home` being set."""
+        home = self.bundle.spec.memory.home
+        return Path(home).expanduser() / "tools-overlay" if home else None
 
     def _memory_from_spec(self) -> MemoryStore:
         spec = self.bundle.spec.memory
@@ -254,8 +279,16 @@ class Agent:
         return self.bundle.spec.name
 
     async def handle_task(self, task: Task) -> Task:
-        if is_teach_task(task):
-            return await self._handle_teach(task)
+        # Deferred: matches this file's existing convention of importing
+        # daedalus.tools.* at point of use rather than at module level (see
+        # the tools_from_spec provider branches above), not a real cycle --
+        # colleagues.py imports nothing from daedalus.agent.
+        from daedalus.tools.colleagues import current_context_id
+
+        current_context_id.set(task.context_id or task.id)
+        marker = task.metadata.get(SYSTEM_TASK_KEY)
+        if marker is not None:
+            return await self._dispatch_system_task(marker, task)
         if self.enforcement.locked:
             name, _ = self.enforcement.load_error
             return task.reply(
@@ -291,6 +324,24 @@ class Agent:
                 )
             result.set_agent_text(post.text)
         return result
+
+    async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
+        """Route a system-task-marked task to its handler, pre-model. An
+        unrecognized marker is refused outright rather than falling through
+        to the model, which would otherwise treat an operator-only envelope
+        as an ordinary chat turn."""
+        if marker == TEACH_MARKER:
+            return await self._handle_teach(task)
+        if marker == KNOWLEDGE_MARKER:
+            return await self._handle_knowledge(task)
+        if marker == TOOL_MARKER:
+            return await self._handle_tool(task)
+        self._emit("system_task_refused", marker=marker)
+        return task.reply(
+            f"Unknown system task {marker!r}. Refusing rather than guessing.",
+            state=TaskState.FAILED,
+            reason=ReasonCode.POLICY_VIOLATION,
+        )
 
     async def _handle_teach(self, task: Task) -> Task:
         """The operator teach lane: write the note into techne now, no
@@ -328,6 +379,102 @@ class Agent:
             self._revision_fires.add(fire)
             fire.add_done_callback(self._revision_fires.discard)
         return task.reply("Learned. I will remember that.")
+
+    async def _handle_knowledge(self, task: Task) -> Task:
+        """The operator knowledge lane: a knowledge FILE's edit or delete,
+        landed now, no model, no enforcement, no rebuild. Same
+        authorization gate as teach -- knowledge writes are exactly as
+        operator-grade, so teach_authorized is reused verbatim rather than
+        reimplemented. DELETE_KEY in metadata routes to
+        apply_knowledge_delete; its absence is a write (apply_knowledge)."""
+        if not teach_authorized(task):
+            self._emit("knowledge_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Knowledge writes are operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return task.reply(
+                "I have no personal memory configured, so I cannot keep this.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        filename = task.metadata.get(FILENAME_KEY, "")
+        if task.metadata.get(DELETE_KEY):
+            result = await asyncio.to_thread(
+                apply_knowledge_delete, str(filename), Path(db_path)
+            )
+            if result.error:
+                return task.reply(
+                    f"I could not remove that: {result.error}.", state=TaskState.FAILED
+                )
+            self._emit(
+                "knowledge_deleted", source=result.source, entries=len(result.entry_ids)
+            )
+            return task.reply("Forgotten. I no longer keep that.")
+        result = await asyncio.to_thread(
+            apply_knowledge, task.user_text(), str(filename), Path(db_path)
+        )
+        if result.error:
+            return task.reply(
+                f"I could not keep that: {result.error}.", state=TaskState.FAILED
+            )
+        if result.already_known:
+            return task.reply("I already know this one. Nothing new to keep.")
+        self._emit("knowledge_stored", source=result.source, entries=len(result.entry_ids))
+        fire = self._start_revision_pass()
+        if fire is not None:
+            self._revision_fires.add(fire)
+            fire.add_done_callback(self._revision_fires.discard)
+        return task.reply("Learned. I will remember that.")
+
+    async def _handle_tool(self, task: Task) -> Task:
+        """The operator tool lane (arc3d Task 5): a fast-delivered tool
+        file, re-validated by THIS runtime against the exact same
+        mechanical contract kobo's room applies (the fast lane skips CI by
+        definition, so kobo's own validation is never trusted alone) and,
+        only once it passes, written into the overlay directory on the
+        agent's persistent volume -- never the image bundle, which resets
+        to its baked-in contents on every restart. Same authorization gate
+        as teach/knowledge: tool writes are exactly as operator-grade.
+
+        No hot reload: the enforcement loader (daedalus.enforcement.
+        Enforcement.load) only re-runs at process boot, so a tool delivered
+        here is inert in this process no matter what -- the reply says so
+        plainly rather than implying anything more."""
+        if not teach_authorized(task):
+            self._emit("tool_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Tool writes are operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        overlay_dir = self._tool_overlay_dir()
+        if overlay_dir is None:
+            return task.reply(
+                "I have no persistent tools directory configured, so I cannot keep this.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        filename = task.metadata.get(FILENAME_KEY, "")
+        result = await asyncio.to_thread(
+            apply_tool,
+            task.user_text(),
+            str(filename),
+            self.bundle.path / "tools",
+            overlay_dir,
+        )
+        if result.error:
+            self._emit("tool_refused", error=result.error)
+            return task.reply(
+                f"I could not keep that tool: {result.error}.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        self._emit("tool_stored", filename=result.filename)
+        return task.reply("Tool delivered. It will be active after my next restart.")
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
