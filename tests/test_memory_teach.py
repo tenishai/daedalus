@@ -345,6 +345,127 @@ def test_apply_knowledge_delete_unknown_filename_is_a_clean_error(techne_db):
     assert result.error
 
 
+# ---- knowledge lane vs the boot seeder's OWN ledger (seed_state) ----
+#
+# bundle/knowledge/*.md is ingested at boot by docker/seeder.py's sync()
+# into seed_state, keyed by filename, source `seed:{filename}` -- a
+# completely different table from intake_state. A file the fast lane edits
+# or deletes is very often one the seeder already seeded at boot (e.g. a
+# roster file refreshed over chat). These tests seed through the REAL
+# seeder first, exactly as boot does, then exercise the fast lane on top.
+
+
+def _seed_via_seeder(seeder, techne_db, tmp_path, filename, text):
+    """Seed `filename` into `techne_db` via the REAL boot seeder (docker/
+    seeder.py's sync()), the way bundle/knowledge/*.md is ingested at boot.
+    Returns sync()'s result dict."""
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir(exist_ok=True)
+    (kdir / filename).write_text(text, encoding="utf-8")
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(db, content, type=type, tags=tags, confidence="high", source=source)
+
+    return seeder.sync(
+        kdir, techne_db, techne_db.parent / "seed_state.db", store_fn, knowledge.delete
+    )
+
+
+def test_apply_knowledge_edit_retires_a_seeded_prior_too(techne_db, tmp_path):
+    """The reviewer's probe: a file seeded at boot (seed_state, source
+    seed:{filename}) and then edited over the fast lane must have its
+    seeded fact retired too, not just whatever intake_state has on record
+    (nothing, for a file never previously fast-lane-edited). Before the
+    fix, apply_knowledge only ever looked at intake_state, so the seeded
+    fact and the newly taught one were BOTH live at once -- a ghost."""
+    from techne.core import search
+
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    seed_result = _seed_via_seeder(
+        seeder, techne_db, tmp_path, filename, "The dog is named Tsuru.\n"
+    )
+    assert seed_result["seeded"] == 1
+
+    edited = apply_knowledge("The dog is named Kestrel.\n", filename, techne_db)
+    assert edited.stored and not edited.error
+
+    old_hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    new_hits = search.search(techne_db, "Kestrel", table="knowledge", use_vectors=False)
+    assert old_hits == [], "the seeded prior must miss recall after a fast-lane edit"
+    assert any("Kestrel" in h["content"] for h in new_hits)
+
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+    assert any("Kestrel" in c for c in live_contents)
+
+
+def test_apply_knowledge_delete_retires_a_seeded_prior_too(techne_db, tmp_path):
+    """Mirror of the edit probe for delete: a file that was ONLY ever seeded
+    (never previously fast-lane-edited) has no intake_state row at all.
+    Before the fix, apply_knowledge_delete looked ONLY at intake_state and
+    returned a clean 'no knowledge on record' error without touching the
+    seeded fact, leaving it recallable forever."""
+    from techne.core import search
+
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    _seed_via_seeder(seeder, techne_db, tmp_path, filename, "The dog is named Tsuru.\n")
+
+    deleted = apply_knowledge_delete(filename, techne_db)
+    assert deleted.stored and not deleted.error
+
+    hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    assert hits == [], "the seeded fact must miss recall after a fast-lane delete"
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+
+
+def test_seeder_resync_after_fast_lane_edit_is_unchanged_not_reingested(techne_db, tmp_path):
+    """After a fast-lane edit to a seeded file, the archive lane eventually
+    carries the SAME bytes back into bundle/knowledge/{filename} for the
+    next image build. That next boot's seeder must see a sha match and call
+    the file unchanged -- never re-ingest a duplicate copy under a fresh
+    seed:{filename} source alongside the fast lane's own live entries."""
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    _seed_via_seeder(seeder, techne_db, tmp_path, filename, "The dog is named Tsuru.\n")
+
+    new_text = "The dog is named Kestrel.\n"
+    edited = apply_knowledge(new_text, filename, techne_db)
+    assert edited.stored
+
+    # The archive lane later delivers the identical bytes back into
+    # knowledge/ for the next image build.
+    kdir = tmp_path / "knowledge"
+    (kdir / filename).write_text(new_text, encoding="utf-8")
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(db, content, type=type, tags=tags, confidence="high", source=source)
+
+    result = seeder.sync(
+        kdir, techne_db, techne_db.parent / "seed_state.db", store_fn, knowledge.delete
+    )
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 1}
+
+    # No duplicate: exactly one live entry carries the new content, none
+    # for the old.
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert live_contents.count("The dog is named Kestrel.") == 1
+    assert not any("Tsuru" in c for c in live_contents)
+
+    # Ledger is consistent: exactly one seed_state row for the filename,
+    # its sha matching the archived (== fast-lane-taught) bytes.
+    state = techne_db.parent / "seed_state.db"
+    rows = sqlite3.connect(state).execute(
+        "SELECT filename, sha256, entry_ids FROM seed_state WHERE filename = ?", (filename,)
+    ).fetchall()
+    assert len(rows) == 1
+    digest = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    assert rows[0][1] == digest
+    assert json.loads(rows[0][2]) == edited.entry_ids
+
+
 def test_is_teach_task_ignores_the_knowledge_marker():
     """is_teach_task stays an exact match on TEACH_MARKER -- the knowledge
     lane is a distinct marker, not a teach variant."""
