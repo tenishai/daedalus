@@ -147,6 +147,50 @@
       "title": "GateSpec",
       "type": "object"
     },
+    "GitHubSpec": {
+      "additionalProperties": true,
+      "description": "The room PR broker's client half (2026-08-27 spec). A SIDECAR block,\nnot a `provider` value: an agent keeps its one primary provider (almost\nalways colleagues) and gains github.* alongside it, the same composition\n`builtin` already rides. Absent broker_url = the block is off.",
+      "properties": {
+        "broker_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Broker Url"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        },
+        "self": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Self"
+        }
+      },
+      "title": "GitHubSpec",
+      "type": "object"
+    },
     "LiminalSpec": {
       "additionalProperties": true,
       "properties": {
@@ -300,6 +344,9 @@
         },
         "colleagues": {
           "$ref": "#/$defs/ColleaguesSpec"
+        },
+        "github": {
+          "$ref": "#/$defs/GitHubSpec"
         },
         "builtin": {
           "additionalProperties": {

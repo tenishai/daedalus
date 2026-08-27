@@ -26,9 +26,19 @@ class FakeWeb:
         return {"ts": f"ts-{self._ts}"}
 
 
+def _reply_text(api):
+    """The exchange's final reply text under the thinking-state lifecycle:
+    the placeholder's in-place update when one happened, else the last
+    plain post (the fallback paths)."""
+    if api.updates:
+        return api.updates[-1][2]
+    return api.posts[-1][1]
+
+
 class FakeApi:
     def __init__(self, reactions_script=None):
         self.posts: list[tuple[str, str, str | None]] = []
+        self.updates: list[tuple[str, str, str, str | None]] = []
         self.reacts: list[tuple[str, str]] = []
         self.unreacts: list[tuple[str, str]] = []
         self._reactions_script = list(reactions_script or [])
@@ -38,6 +48,9 @@ class FakeApi:
         self.posts.append((channel, text, thread_ts))
         self._ts += 1
         return f"ts-{self._ts}"
+
+    async def update(self, channel, ts, text, thread_ts=None):
+        self.updates.append((channel, ts, text, thread_ts))
 
     async def react(self, channel, ts, name):
         self.reacts.append((ts, name))
@@ -85,7 +98,7 @@ async def test_message_gets_reaction_lifecycle_and_threaded_reply():
     assert ("100.1", "eyes") in api.reacts
     assert ("100.1", "eyes") in api.unreacts
     assert ("100.1", "white_check_mark") in api.reacts
-    channel, text, thread_ts = api.posts[-1]
+    channel, _pl_ts, text, thread_ts = api.updates[-1]
     assert (channel, text, thread_ts) == (CH, "echo: hello there", "100.1")
 
 
@@ -95,7 +108,7 @@ async def test_duplicate_ts_dispatches_once():
     await transport.handle_event(event(ts="7.7"), handler)
     # app_mention duplicate of the same message dedupes too
     await transport.handle_event(event(ts="7.7", type="app_mention"), handler)
-    assert len(api.posts) == 1
+    assert len(api.posts) == 1  # the placeholder alone; the reply rode its update
 
 
 async def test_bot_messages_wrong_channel_and_subtypes_are_ignored():
@@ -120,7 +133,7 @@ async def test_mention_prefix_is_stripped():
     await transport.handle_event(
         event("<@U0BOT> read the makefile", ts="60.0", type="app_mention"), handler
     )
-    assert api.posts[-1][1] == "echo: read the makefile"
+    assert _reply_text(api) == "echo: read the makefile"
 
 
 async def test_handler_exception_becomes_x_and_error_reply():
@@ -131,7 +144,7 @@ async def test_handler_exception_becomes_x_and_error_reply():
     transport, api, handler = make(handler=Exploding())
     await transport.handle_event(event(ts="70.0"), handler)
     assert ("70.0", "x") in api.reacts
-    assert "error: boom" in api.posts[-1][1]
+    assert "error: boom" in _reply_text(api)
 
 
 async def test_escalation_copies_to_route_channel():
@@ -230,7 +243,7 @@ async def test_replies_are_posted_as_mrkdwn():
 
     transport, api, handler = make(handler=MarkdownHandler())
     await transport.handle_event(event(ts="90.0"), handler)
-    assert api.posts[-1][1] == "*Verdict*\n*looks good*"
+    assert _reply_text(api) == "*Verdict*\n*looks good*"
 
 
 async def test_dedupe_cache_is_bounded():
@@ -255,7 +268,7 @@ async def test_tool_blocked_task_gets_x_reaction_and_reply_text():
     transport, api, handler = make(handler=ToolBlockedHandler())
     await transport.handle_event(event("deploy", ts="200.0"), handler)
     assert ("200.0", "x") in api.reacts
-    assert api.posts[-1][1] == "A rule stopped this task: blocked by z.py: nope."
+    assert _reply_text(api) == "A rule stopped this task: blocked by z.py: nope."
 
 
 def test_serve_without_tokens_is_a_clean_error():
@@ -428,3 +441,71 @@ def test_fence_marker_straddling_a_hard_split_is_invisible_to_stitching():
     assert len(chunks) == 2
     assert "```" not in chunks[0]
     assert "```" not in chunks[1]
+
+
+# --- thinking states (2026-08-27 operator feedback) ----------------------------
+
+
+async def _mention(transport, handler, text="hi"):
+    await transport.handle_event(
+        {"type": "app_mention", "text": text, "ts": "1.0", "channel": CH},
+        handler,
+    )
+
+
+def test_thinking_placeholder_posts_then_updates_into_the_reply():
+    import asyncio
+
+    from daedalus.transports.slack import SlackTransport
+
+    api = FakeApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
+    asyncio.run(_mention(transport, EchoHandler()))
+
+    # The FIRST post of the exchange is the placeholder, in-thread.
+    channel, text, thread_ts = api.posts[0]
+    assert "thinking" in text
+    assert thread_ts == "1.0"
+    # The reply arrived as an UPDATE of that same placeholder, not a new post.
+    assert len(api.updates) == 1
+    _, updated_ts, updated_text, _ = api.updates[0]
+    assert updated_ts == "ts-1"
+    assert "echo" in updated_text
+    # No trailing reply post beyond the placeholder itself.
+    assert len(api.posts) == 1  # the placeholder alone; the reply rode its update
+
+
+def test_thinking_placeholder_failure_falls_back_to_plain_post():
+    import asyncio
+
+    from daedalus.transports.slack import SlackTransport
+
+    class NoPlaceholderApi(FakeApi):
+        async def post(self, channel, text, thread_ts=None):
+            if "thinking" in text:
+                raise RuntimeError("slack hiccup")
+            return await super().post(channel, text, thread_ts)
+
+    api = NoPlaceholderApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
+    asyncio.run(_mention(transport, EchoHandler()))
+
+    assert api.updates == []
+    assert any("echo" in text for _, text, _ in api.posts)
+
+
+def test_update_failure_still_lands_the_reply_as_a_post():
+    import asyncio
+
+    from daedalus.transports.slack import SlackTransport
+
+    class NoUpdateApi(FakeApi):
+        async def update(self, channel, ts, text, thread_ts=None):
+            raise RuntimeError("message too old")
+
+    api = NoUpdateApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
+    asyncio.run(_mention(transport, EchoHandler()))
+
+    replies = [text for _, text, _ in api.posts if "thinking" not in text]
+    assert any("echo" in text for text in replies)

@@ -106,11 +106,24 @@ class ColleaguesSpec(_WarnExtra):
     self: str | None = None  # this agent's own name, excluded from directory listings
 
 
+class GitHubSpec(_WarnExtra):
+    """The room PR broker's client half (2026-08-27 spec). A SIDECAR block,
+    not a `provider` value: an agent keeps its one primary provider (almost
+    always colleagues) and gains github.* alongside it, the same composition
+    `builtin` already rides. Absent broker_url = the block is off."""
+
+    broker_url: str | None = None  # the room's own base URL, in-cluster
+    token_env: str | None = None  # env var holding the agent's colleague JWT
+    # Same deliberate `self` naming as ColleaguesSpec above.
+    self: str | None = None  # this agent's own name, for the broker route
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
     liminal: LiminalSpec = Field(default_factory=LiminalSpec)
     colleagues: ColleaguesSpec = Field(default_factory=ColleaguesSpec)
+    github: GitHubSpec = Field(default_factory=GitHubSpec)
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10

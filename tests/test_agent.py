@@ -205,3 +205,44 @@ async def test_finish_reason_defaults_to_none_for_scripted_replies():
     agent = make_agent()  # plain ScriptedLLM string reply
     task = await agent.handle_task(Task.from_text("hi"))
     assert "[reply truncated" not in task.agent_text()
+
+
+# --- attribution enforcement (2026-08-27 ruling) --------------------------------
+
+
+async def test_consulted_colleague_omitted_from_draft_gets_appended():
+    """The runtime enforces the attribution law: a colleague consulted
+    during the task but unnamed in the draft is appended deterministically."""
+    from daedalus.tools.colleagues import consulted_colleagues
+
+    class ConsultingLLM(ScriptedLLM):
+        async def complete(self, messages, tools=None):
+            ledger = consulted_colleagues.get()
+            if ledger is not None:
+                ledger.append("gemini-one")
+            return await super().complete(messages, tools)
+
+    agent = make_agent(llm=ConsultingLLM("The PSA range is 10.140.9.0/24."))
+    task = await agent.handle_task(Task.from_text("what's our PSA range?"))
+    assert "(consulted: gemini-one)" in task.agent_text()
+
+
+async def test_consulted_colleague_already_named_is_left_alone():
+    from daedalus.tools.colleagues import consulted_colleagues
+
+    class ConsultingLLM(ScriptedLLM):
+        async def complete(self, messages, tools=None):
+            ledger = consulted_colleagues.get()
+            if ledger is not None:
+                ledger.append("gemini-one")
+            return await super().complete(messages, tools)
+
+    agent = make_agent(llm=ConsultingLLM("gemini-one says the range is 10.140.9.0/24."))
+    task = await agent.handle_task(Task.from_text("what's our PSA range?"))
+    assert "consulted:" not in task.agent_text()
+
+
+async def test_no_consultation_appends_nothing():
+    agent = make_agent(llm=ScriptedLLM("plain answer"))
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.agent_text() == "plain answer"
