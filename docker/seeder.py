@@ -13,6 +13,21 @@ file's sha is ledgered it is never touched again — not on content change
 (new sha, new ingestion), not on deletion (memories outlive the file). Never
 part of knowledge convergence: intake rows never appear in seed_state and
 are never removed or counted by sync().
+
+Staleness protocol: bundle/knowledge/*.md can also be edited or deleted live,
+outside this seeder entirely, over daedalus's fast lane (see
+src/daedalus/memory/teach.py's apply_knowledge/apply_knowledge_delete). That
+lane stamps its seed_state row with lane='live' and previous_sha=<the sha the
+row held before its write, chained back to the image-era sha through any run
+of live writes with no rebuild between them>; a fast-lane delete leaves a
+TOMBSTONE row (lane='live', deleted=1) instead of dropping the row outright.
+Both exist so this seeder, which runs on every boot against whatever bytes
+happen to be baked into the image, can tell a genuinely new repo-direct edit
+apart from an image that simply predates the live write reaching a rebuild:
+matching the image's sha against sha256 (rebuilt in -- converged, return to
+plain seed lane) before falling back to previous_sha (stale image -- skip
+entirely, never delete, never re-seed) is what stops a stale-image boot from
+silently reverting a taught edit or resurrecting a fast-lane delete.
 """
 
 from __future__ import annotations
@@ -64,7 +79,10 @@ log = logging.getLogger("seeder")
 _SEED_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS seed_state (
        filename TEXT PRIMARY KEY,
        sha256 TEXT NOT NULL,
-       entry_ids TEXT NOT NULL
+       entry_ids TEXT NOT NULL,
+       lane TEXT NOT NULL DEFAULT 'seed',
+       previous_sha TEXT,
+       deleted INTEGER NOT NULL DEFAULT 0
    )"""
 
 _INTAKE_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS intake_state (
@@ -74,11 +92,31 @@ _INTAKE_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS intake_state (
    )"""
 
 
+def _migrate_seed_state_schema(conn: sqlite3.Connection) -> None:
+    """Additive ALTERs for a seed_state.db written before the staleness
+    protocol's columns existed. The CREATE TABLE IF NOT EXISTS above already
+    includes them for a brand-new db; this only ever fires against an
+    existing table from before this change (a live PVC's seed_state.db
+    predating this ship), so it must be ALTER-safe rather than destructive.
+    Existing rows read back as lane='seed', previous_sha=NULL, deleted=0 --
+    the same as if the columns had always been there and every prior write
+    had been a plain seed (unchanged legacy semantics)."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seed_state)")}
+    if "lane" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN lane TEXT NOT NULL DEFAULT 'seed'")
+    if "previous_sha" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN previous_sha TEXT")
+    if "deleted" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+
 def _state_conn(state_db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(state_db)
     try:
         conn.execute(_SEED_STATE_SCHEMA)
         conn.execute(_INTAKE_STATE_SCHEMA)
+        _migrate_seed_state_schema(conn)
     except sqlite3.DatabaseError:
         # Corrupt file (e.g. an unclean kill of a persistent volume left a
         # malformed sqlite image) — close and let the caller quarantine it.
@@ -96,8 +134,16 @@ def _load_state(state_db: Path) -> tuple[sqlite3.Connection, dict]:
     conn = _state_conn(state_db)
     try:
         state = {
-            row[0]: {"sha256": row[1], "entry_ids": json.loads(row[2])}
-            for row in conn.execute("SELECT filename, sha256, entry_ids FROM seed_state")
+            row[0]: {
+                "sha256": row[1],
+                "entry_ids": json.loads(row[2]),
+                "lane": row[3] or "seed",
+                "previous_sha": row[4],
+                "deleted": bool(row[5]),
+            }
+            for row in conn.execute(
+                "SELECT filename, sha256, entry_ids, lane, previous_sha, deleted FROM seed_state"
+            )
         }
     except sqlite3.DatabaseError:
         conn.close()
@@ -113,6 +159,7 @@ def sync(
     delete_fn,
     purge_fn=None,
     list_ids_fn: Callable[[Path, str], list[int]] | None = None,
+    retire_fn: Callable[[Path, list[int], int], None] | None = None,
 ) -> dict:
     try:
         conn, state = _load_state(state_db)
@@ -135,34 +182,28 @@ def sync(
         seeded = removed = unchanged = 0
 
         for filename in set(state) - set(current):
-            for entry_id in state[filename]["entry_ids"]:
+            row = state[filename]
+            if row["lane"] == "live" and row["deleted"]:
+                # A fast-lane delete's tombstone, and the image no longer
+                # has the file at all: the delete got rebuilt in. There is
+                # nothing live to retire (a tombstone's entries were
+                # already retired at delete time -- see docker/seeder.py's
+                # sibling, src/daedalus/memory/teach.py's
+                # apply_knowledge_delete), so just drop the now-redundant
+                # ledger row. Not counted as "removed": nothing was.
+                conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
+                conn.commit()
+                continue
+            for entry_id in row["entry_ids"]:
                 delete_fn(techne_db, entry_id)
             conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
             conn.commit()
             removed += 1
 
-        for filename, path in current.items():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            prior = state.get(filename)
-            if prior and prior["sha256"] == digest:
-                unchanged += 1
-                continue
-            if prior:
-                for entry_id in prior["entry_ids"]:
-                    delete_fn(techne_db, entry_id)
-            elif list_ids_fn is not None:
-                # Ground-truth convergence: no state row for this filename
-                # means either it's genuinely new, or a SIGKILL previously
-                # landed between a store_fn() call and the state-row commit
-                # below — no exception was raised, so the except-block
-                # cleanup never ran, and no state row was written to
-                # remember the entries either. Either way techne itself is
-                # the ground truth, so drop anything already sourced from
-                # this exact file before storing fresh entries — a restart
-                # can then never leave duplicates behind.
-                for entry_id in list_ids_fn(techne_db, f"seed:{filename}"):
-                    delete_fn(techne_db, entry_id)
-
+        def _store_sections(filename: str, path: Path) -> list[int]:
+            """Store `path`'s sections fresh under the ordinary seed source.
+            Exception cleanup only; the caller decides what to do with the
+            old entries (if any) and writes the ledger row."""
             ids: list[int] = []
             try:
                 for section in parse_knowledge_file(path):
@@ -180,13 +221,134 @@ def sync(
                             "cleanup failed for orphaned entry %s from %s", entry_id, filename
                         )
                 raise
+            return ids
 
+        def _write_seed_row(filename: str, digest: str, ids: list[int]) -> None:
             conn.execute(
-                "INSERT OR REPLACE INTO seed_state (filename, sha256, entry_ids) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO seed_state "
+                "(filename, sha256, entry_ids, lane, previous_sha, deleted) "
+                "VALUES (?, ?, ?, 'seed', NULL, 0)",
                 (filename, digest, json.dumps(ids)),
             )
             conn.commit()
-            seeded += len(ids)
+
+        def _reseed(filename: str, path: Path, digest: str) -> int:
+            """Store `path`'s sections fresh and (re)write its seed_state
+            row as an ordinary lane='seed' entry -- the shared tail of
+            every "there is new content to seed" branch that has no old
+            fast-lane survivor entries to worry about (a brand new
+            filename, an ordinary changed seed file, or a tombstone
+            converging with genuinely new content -- a tombstone's own
+            entries are already empty, retired at delete time)."""
+            ids = _store_sections(filename, path)
+            _write_seed_row(filename, digest, ids)
+            return len(ids)
+
+        def _retire_or_delete(entry_ids: list[int], survivor_id: int) -> None:
+            """Remove `entry_ids`, preferring retire_fn (repoint
+            superseded_by at `survivor_id`) over a hard delete_fn call.
+            This matters specifically for a lane='live' row's entries:
+            the fast lane's own apply_knowledge always retires whatever a
+            file's prior seed/intake entries were INTO its freshly-stored
+            entry as survivor (see src/daedalus/memory/teach.py), so a
+            lane='live' row's entry is very often itself already a
+            retirement survivor that something else's superseded_by points
+            at. Hard-deleting it violates techne's own foreign key on
+            superseded_by; retiring it into the newly-seeded survivor
+            instead is always safe, referenced or not, and mirrors exactly
+            what the fast lane does for its own edits. Callers without a
+            retire_fn (e.g. the stdlib-only unit tests in
+            docker/test_seeder.py, whose FakeStore has no such constraint)
+            fall back to the original hard-delete behavior."""
+            if retire_fn is not None:
+                if entry_ids:
+                    retire_fn(techne_db, entry_ids, survivor_id)
+            else:
+                for entry_id in entry_ids:
+                    delete_fn(techne_db, entry_id)
+
+        for filename, path in current.items():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            prior = state.get(filename)
+
+            if prior is None:
+                if list_ids_fn is not None:
+                    # Ground-truth convergence: no state row for this
+                    # filename means either it's genuinely new, or a
+                    # SIGKILL previously landed between a store_fn() call
+                    # and the state-row commit below — no exception was
+                    # raised, so the except-block cleanup never ran, and no
+                    # state row was written to remember the entries either.
+                    # Either way techne itself is the ground truth, so drop
+                    # anything already sourced from this exact file before
+                    # storing fresh entries — a restart can then never
+                    # leave duplicates behind.
+                    for entry_id in list_ids_fn(techne_db, f"seed:{filename}"):
+                        delete_fn(techne_db, entry_id)
+                seeded += _reseed(filename, path, digest)
+                continue
+
+            if prior["lane"] == "live":
+                if prior["deleted"]:
+                    if digest == prior["previous_sha"]:
+                        # STALE image of a deleted file: this boot's image
+                        # predates the fast-lane delete. Skip entirely --
+                        # keep the tombstone, never resurrect the file.
+                        unchanged += 1
+                        continue
+                    # Else: genuinely new content landed at this filename
+                    # after the delete (a repo-direct add, unrelated to the
+                    # dead version) -- falls through to the generic reseed
+                    # below, same as any other new file. Nothing to
+                    # delete_fn: the tombstone's entries were already
+                    # retired at delete time.
+                    seeded += _reseed(filename, path, digest)
+                    continue
+                if digest == prior["sha256"]:
+                    # The archive commit landed the fast-lane write's exact
+                    # content back into the image: converged. Return the
+                    # row to plain seed lane so a FUTURE repo-direct edit
+                    # is ordinary convergence, not staleness logic again.
+                    conn.execute(
+                        "UPDATE seed_state SET lane = 'seed', previous_sha = NULL "
+                        "WHERE filename = ?",
+                        (filename,),
+                    )
+                    conn.commit()
+                    unchanged += 1
+                    continue
+                if prior["previous_sha"] is not None and digest == prior["previous_sha"]:
+                    # STALE image: this boot's image predates the
+                    # fast-lane write entirely. Skip entirely -- no
+                    # delete, no re-seed. The live write's entries stand
+                    # exactly as they are; this is the destructive
+                    # scenario the staleness protocol exists to prevent.
+                    unchanged += 1
+                    continue
+                # Genuinely new content (a repo-direct edit), unrelated to
+                # the live write: normal convergence wins. The live entries
+                # may be retirement survivors (see _retire_or_delete), so
+                # store the new content FIRST to have a survivor id before
+                # touching them. (An empty new file has no section to
+                # survive into -- falls back to a direct delete_fn sweep,
+                # same as the ordinary changed-seed-file path below.)
+                ids = _store_sections(filename, path)
+                if ids:
+                    _retire_or_delete(prior["entry_ids"], ids[0])
+                else:
+                    for entry_id in prior["entry_ids"]:
+                        delete_fn(techne_db, entry_id)
+                _write_seed_row(filename, digest, ids)
+                seeded += len(ids)
+                continue
+
+            if prior["sha256"] == digest:
+                unchanged += 1
+                continue
+
+            for entry_id in prior["entry_ids"]:
+                delete_fn(techne_db, entry_id)
+            seeded += _reseed(filename, path, digest)
 
         return {"seeded": seeded, "removed": removed, "unchanged": unchanged}
     finally:
@@ -322,6 +484,40 @@ def main(argv: list[str]) -> int:
         for entry in _seed_sourced_entries(db_path):
             knowledge.delete(db_path, entry["id"])
 
+    def retire_fn(db_path, entry_ids, survivor_id):
+        # A lane='live' row's entries are very often themselves retirement
+        # survivors from the fast lane's own earlier edit (see
+        # src/daedalus/memory/teach.py's apply_knowledge, which always
+        # retires a file's prior seed/intake entries INTO its freshly
+        # stored entry) -- hard-deleting one here would trip techne's own
+        # foreign key on knowledge.superseded_by. Retiring into the new
+        # survivor instead is always safe and mirrors exactly what the
+        # fast lane does for its own edits. Mirrors
+        # daedalus.memory.teach._retire_entries's own skip-if-already-gone
+        # guard (duplicated, not imported: sibling deployables, not a
+        # shared dependency -- see docker/seeder.py's module docstring).
+        from techne.core.database import connect
+        from techne.core.knowledge import _retire_in_conn
+
+        conn = connect(db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for entry_id in entry_ids:
+                if entry_id == survivor_id:
+                    continue
+                row = conn.execute(
+                    "SELECT superseded_by FROM knowledge WHERE id = ?", (entry_id,)
+                ).fetchone()
+                if row is None or row["superseded_by"] is not None:
+                    continue  # already gone, or already retired -- idempotent
+                _retire_in_conn(conn, entry_id, survivor_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _ids_by_intake_source(db_path, source):
         # Mirrors _ids_by_source above, wired in as ingest_intake()'s
         # list_ids_fn instead of sync()'s. An exact match against a
@@ -343,6 +539,7 @@ def main(argv: list[str]) -> int:
         knowledge.delete,
         purge_fn=purge_fn,
         list_ids_fn=_ids_by_source,
+        retire_fn=retire_fn,
     )
     if not knowledge_dir.is_dir() and result == {"seeded": 0, "removed": 0, "unchanged": 0}:
         # Truly never-seeded bundle: no knowledge/ now, and no prior state to

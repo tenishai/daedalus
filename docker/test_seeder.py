@@ -355,6 +355,261 @@ def test_corrupt_state_with_purge_and_list_ids_fn_converges(tmp_path):
     assert all(ids == [] for _, ids in list_ids_calls)
 
 
+# --- staleness protocol: seed_state rows the fast lane wrote (lane='live',
+# previous_sha, tombstones) must never let a stale image boot destroy or
+# resurrect fast-lane memory. These exercise sync()'s branch logic directly
+# via hand-written rows -- docker/test_seeder.py stays stdlib-only, so the
+# fast lane's own read/write side (apply_knowledge/apply_knowledge_delete)
+# is exercised end-to-end instead in tests/test_memory_teach.py, which
+# needs techne on the path.
+
+
+def _seed_state_row(state_db, filename):
+    conn = sqlite3.connect(state_db)
+    row = conn.execute(
+        "SELECT sha256, entry_ids, lane, previous_sha, deleted FROM seed_state "
+        "WHERE filename = ?",
+        (filename,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def _mark_live(state_db, filename, sha256, previous_sha, entry_ids, deleted=False):
+    """Simulate what a fast-lane write (apply_knowledge) or delete
+    (apply_knowledge_delete) leaves behind in seed_state, without needing
+    techne on the path."""
+    conn = sqlite3.connect(state_db)
+    conn.execute(
+        "UPDATE seed_state SET sha256 = ?, entry_ids = ?, lane = 'live', "
+        "previous_sha = ?, deleted = ? WHERE filename = ?",
+        (sha256, json.dumps(entry_ids), previous_sha, int(deleted), filename),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_live_row_rebuilt_in_is_unchanged_and_flips_lane_to_seed(tmp_path):
+    """image_sha == row.sha: the archive commit landed the fast-lane
+    write's exact content back into the image. Converged -- treat as
+    unchanged and return the row to plain seed lane."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    gotchas_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    gotchas_ids = [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]
+    _mark_live(state, "gotchas.md", gotchas_sha, "a" * 64, gotchas_ids)
+
+    before = dict(fake.rows)
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 2}
+    assert fake.rows == before  # nothing stored, nothing deleted
+
+    assert _seed_state_row(state, "gotchas.md") == (
+        gotchas_sha, json.dumps(gotchas_ids), "seed", None, 0
+    )
+
+
+def test_live_row_stale_image_is_skipped_entirely(tmp_path):
+    """image_sha == row.previous_sha: this boot's image predates the
+    fast-lane write. Skip entirely -- no delete, no re-seed. The live
+    write's entries stand exactly as they are. This is the flagship
+    destructive scenario the staleness protocol exists to prevent."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # The image on disk still holds the ORIGINAL (pre-edit) bytes -- what a
+    # restart before any rebuild would boot against.
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+
+    # Simulate the fast lane's own write: new "live" entries replace the
+    # seeded ones, sha256 now names content that only exists in techne, not
+    # yet on disk.
+    for entry_id in [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]:
+        fake.delete(None, entry_id)
+    live_id = fake.store(None, "## A2\nalpha revised\n", "evaluation", "seed", "seed:gotchas.md")
+    live_sha = hashlib.sha256(b"## A2\nalpha revised\n").hexdigest()
+    _mark_live(state, "gotchas.md", live_sha, original_sha, [live_id])
+
+    before = dict(fake.rows)
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 2}
+    assert fake.rows == before  # the live entry survives untouched, nothing resurrected
+
+    assert _seed_state_row(state, "gotchas.md") == (
+        live_sha, json.dumps([live_id]), "live", original_sha, 0
+    )
+
+
+def test_live_row_genuinely_new_content_converges_normally(tmp_path):
+    """image_sha is neither row.sha nor row.previous_sha: a repo-direct edit
+    landed, unrelated to the fast-lane write. Normal convergence wins:
+    retire the live entries, seed the new content fresh under lane='seed'."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    for entry_id in [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]:
+        fake.delete(None, entry_id)
+    live_id = fake.store(None, "## A2\nalpha revised\n", "evaluation", "seed", "seed:gotchas.md")
+    live_sha = hashlib.sha256(b"## A2\nalpha revised\n").hexdigest()
+    _mark_live(state, "gotchas.md", live_sha, original_sha, [live_id])
+
+    # A THIRD sha appears in the image: a repo-direct edit, unrelated to
+    # either the original seed or the fast-lane write.
+    (kdir / "gotchas.md").write_text("## A3\nthird version\n")
+
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 1, "removed": 0, "unchanged": 1}
+    assert live_id not in fake.rows  # the live entry was retired, not left dangling
+    assert any(
+        c.startswith("## A3") for (c, _, s) in fake.rows.values() if s == "seed:gotchas.md"
+    )
+
+    new_sha = hashlib.sha256(b"## A3\nthird version\n").hexdigest()
+    row = _seed_state_row(state, "gotchas.md")
+    assert row[0] == new_sha
+    assert row[2] == "seed"
+    assert row[3] is None
+
+
+def test_tombstone_stale_image_is_skipped_and_tombstone_kept(tmp_path):
+    """A fast-lane DELETE leaves a tombstone (lane='live', deleted=1). A
+    stale image that still has the pre-delete bytes must not resurrect the
+    file: image_sha == previous_sha -> skip, keep the tombstone."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    for entry_id in [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]:
+        fake.delete(None, entry_id)
+    _mark_live(state, "gotchas.md", original_sha, original_sha, [], deleted=True)
+
+    before = dict(fake.rows)
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 2}
+    assert not any(s == "seed:gotchas.md" for (_, _, s) in fake.rows.values())
+    assert fake.rows == before  # nothing resurrected
+
+    assert _seed_state_row(state, "gotchas.md") == (
+        original_sha, "[]", "live", original_sha, 1
+    )  # tombstone intact
+
+
+def test_tombstone_rebuilt_in_drops_the_tombstone(tmp_path):
+    """The delete's archive commit removes the file from the image
+    entirely. Once the image no longer has the file either, the tombstone
+    has converged and can be dropped."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    for entry_id in [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]:
+        fake.delete(None, entry_id)
+    _mark_live(state, "gotchas.md", original_sha, original_sha, [], deleted=True)
+
+    (kdir / "gotchas.md").unlink()  # the delete got rebuilt into the image
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 1}
+    assert not any(s == "seed:gotchas.md" for (_, _, s) in fake.rows.values())
+    assert _seed_state_row(state, "gotchas.md") is None  # tombstone dropped
+
+
+def test_tombstone_genuinely_new_content_seeds_fresh(tmp_path):
+    """A brand-new file lands at the same filename after a delete (repo-
+    direct content, unrelated to the dead version): seed it fresh, same as
+    any other new file -- lane='seed', tombstone gone."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    for entry_id in [i for i, (_, _, s) in fake.rows.items() if s == "seed:gotchas.md"]:
+        fake.delete(None, entry_id)
+    _mark_live(state, "gotchas.md", original_sha, original_sha, [], deleted=True)
+
+    (kdir / "gotchas.md").write_text("## Fresh\nbrand new content\n")
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result == {"seeded": 1, "removed": 0, "unchanged": 1}
+    assert any(
+        c.startswith("## Fresh") for (c, _, s) in fake.rows.values() if s == "seed:gotchas.md"
+    )
+
+    new_sha = hashlib.sha256(b"## Fresh\nbrand new content\n").hexdigest()
+    row = _seed_state_row(state, "gotchas.md")
+    assert row[0] == new_sha
+    assert row[2] == "seed"
+    assert row[3] is None
+    assert row[4] == 0
+
+
+def test_legacy_seed_state_without_lane_columns_still_converges(tmp_path):
+    """A seed_state.db written before the lane/previous_sha/deleted columns
+    existed (an existing production PVC) must still work: the migration
+    ALTERs the columns in additively, and rows with no lane on record
+    behave as lane='seed' -- unchanged semantics, not an error."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    state = tmp_path / "seed_state.db"
+
+    gotchas_ids = _seed_directly(
+        fake, "gotchas.md", ["## A\nalpha\n", "## B\nbeta\n"], "evaluation"
+    )
+    facts_ids = _seed_directly(fake, "facts.md", ["## C\ngamma\n"], "fact")
+
+    # Write the OLD-format table by hand: no lane/previous_sha/deleted
+    # columns at all, exactly as an existing seed_state.db looks before
+    # this change ships.
+    conn = sqlite3.connect(state)
+    conn.execute(
+        "CREATE TABLE seed_state (filename TEXT PRIMARY KEY, sha256 TEXT NOT NULL, "
+        "entry_ids TEXT NOT NULL)"
+    )
+    gotchas_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    facts_sha = hashlib.sha256((kdir / "facts.md").read_bytes()).hexdigest()
+    conn.execute(
+        "INSERT INTO seed_state (filename, sha256, entry_ids) VALUES (?, ?, ?)",
+        ("gotchas.md", gotchas_sha, json.dumps(gotchas_ids)),
+    )
+    conn.execute(
+        "INSERT INTO seed_state (filename, sha256, entry_ids) VALUES (?, ?, ?)",
+        ("facts.md", facts_sha, json.dumps(facts_ids)),
+    )
+    conn.commit()
+    conn.close()
+
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # Unchanged files (bytes match what the legacy rows recorded) -- no
+    # crash, no re-seed, treated as ordinary lane='seed' rows.
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 2}
+    assert set(fake.rows) == set(gotchas_ids) | set(facts_ids)
+
+    # The migration ran: the columns now exist, and legacy rows read back
+    # as lane='seed' with no previous_sha and no tombstone flag.
+    conn = sqlite3.connect(state)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seed_state)")}
+    assert {"lane", "previous_sha", "deleted"} <= cols
+    rows = conn.execute(
+        "SELECT filename, lane, previous_sha, deleted FROM seed_state ORDER BY filename"
+    ).fetchall()
+    conn.close()
+    assert rows == [
+        ("facts.md", "seed", None, 0),
+        ("gotchas.md", "seed", None, 0),
+    ]
+
+
 # --- intake: one-shot ingestion. Opposite lifecycle from knowledge sync --
 # ledgered by content-sha (not filename), never removed on convergence, and
 # the sha-scoped techne source (`intake:<filename>#<sha12>`) is what makes a

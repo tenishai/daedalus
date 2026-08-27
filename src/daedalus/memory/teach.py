@@ -39,11 +39,21 @@ seeder already ingested at boot (a roster file refreshed over chat, for
 instance), so apply_knowledge and apply_knowledge_delete read and maintain
 seed_state too: retiring only intake_state would leave the boot-seeded
 prior live forever, ghosting beside every edit and surviving every delete.
-An edit rewrites the seed_state row to the new content's sha and entry ids
-(never drops it) so a later rebuild that carries the same bytes back into
-bundle/knowledge/{filename} makes the next boot's seeder see a sha match
-and call the file unchanged; a delete drops the row outright, since there
-is no new content for a future boot to match against.
+
+Both writers stamp seed_state with docker/seeder.py's staleness protocol:
+an edit rewrites the row to the new content's sha and entry ids under
+lane='live', with previous_sha chained back to the image-era sha; a delete
+leaves a TOMBSTONE (lane='live', deleted=1, same previous_sha chaining)
+instead of dropping the row. The runtime image these writes land in is
+baked at build time and does not change until a later rebuild, so the
+seeder that runs on EVERY boot needs a way to tell "this image predates the
+fast-lane write" apart from "someone edited the file directly in the repo"
+-- both look like a sha mismatch otherwise. previous_sha is that signal: a
+stale image matches it and is skipped outright (no delete, no re-seed,
+never reverts the edit or resurrects the delete); a rebuilt image matches
+the new sha and converges the row back to plain lane='seed'; anything else
+is genuinely new content and converges normally. See docker/seeder.py's
+module docstring and sync() for the seeder's half of this protocol.
 
 "Retire" here is techne's own belief-revision primitive (techne.core.
 knowledge._retire_in_conn, techne#213) -- the same one the revision pass
@@ -114,8 +124,27 @@ _INTAKE_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS intake_state (
 _SEED_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS seed_state (
        filename TEXT PRIMARY KEY,
        sha256 TEXT NOT NULL,
-       entry_ids TEXT NOT NULL
+       entry_ids TEXT NOT NULL,
+       lane TEXT NOT NULL DEFAULT 'seed',
+       previous_sha TEXT,
+       deleted INTEGER NOT NULL DEFAULT 0
    )"""
+
+
+def _migrate_seed_state_schema(conn: sqlite3.Connection) -> None:
+    """Additive ALTERs for a seed_state.db written before the staleness
+    protocol's columns existed -- mirrors docker/seeder.py's own migration
+    byte-for-byte (kept duplicated, not imported: this module and the boot
+    seeder are parity-tested siblings, not a shared dependency). Safe to
+    call every time; it is a no-op once the columns exist."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(seed_state)")}
+    if "lane" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN lane TEXT NOT NULL DEFAULT 'seed'")
+    if "previous_sha" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN previous_sha TEXT")
+    if "deleted" not in cols:
+        conn.execute("ALTER TABLE seed_state ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
 
 
 @dataclass
@@ -292,6 +321,18 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
     `seed:{filename}`) -- a second, independent ledger this function must
     also check and retire from, or the seeded prior stays live forever
     beside every edit. See the module docstring and _SEED_STATE_SCHEMA.
+
+    That seed_state row is stamped lane='live' with previous_sha chained
+    back to the image-era sha (the sha the row held before ANY unconverged
+    live write, not just the immediately preceding one -- a second edit
+    before a rebuild must not overwrite previous_sha with the first edit's
+    sha, or the seeder loses the ability to recognize a still-stale image
+    as stale). This is docker/seeder.py's staleness protocol: without it, a
+    restart on an image that predates this write would hash the image's
+    stale bytes, see them differ from this row's sha256, and "converge" by
+    hard-deleting this write's entries and re-seeding the stale content --
+    silently reverting the edit. Matching previous_sha instead tells the
+    seeder to skip the file entirely on a stale boot.
     """
     if not _FILENAME_RE.match(filename or ""):
         return TeachResult(stored=False, error=f"invalid knowledge filename {filename!r}")
@@ -309,6 +350,7 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
     try:
         conn.execute(_INTAKE_STATE_SCHEMA)
         conn.execute(_SEED_STATE_SCHEMA)
+        _migrate_seed_state_schema(conn)
         conn.commit()
         row = conn.execute(
             "SELECT 1 FROM intake_state WHERE sha256 = ?", (digest,)
@@ -329,9 +371,25 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
         # must retire THOSE entries too, or the seeded fact and the newly
         # taught one are both live at once (the ghost bug this closes).
         seeded = conn.execute(
-            "SELECT entry_ids FROM seed_state WHERE filename = ?", (filename,)
+            "SELECT sha256, entry_ids, lane, previous_sha FROM seed_state WHERE filename = ?",
+            (filename,),
         ).fetchone()
-        seeded_entry_ids: list[int] = json.loads(seeded[0]) if seeded else []
+        seeded_entry_ids: list[int] = json.loads(seeded[1]) if seeded else []
+        if seeded is None:
+            live_previous_sha = None
+        elif seeded[2] == "live":
+            # A live write (or tombstone) already sits here, unconverged --
+            # its own sha256 is fast-lane content, not real image bytes, so
+            # chain back to the previous_sha IT was carrying rather than
+            # clobbering it with this intermediate sha. That previous_sha
+            # is what a stale-image boot needs to compare against; losing
+            # it here would make the seeder mistake a still-stale original
+            # image for genuinely new content the very next boot.
+            live_previous_sha = seeded[3]
+        else:
+            # An ordinary lane='seed' row: its sha256 IS the image-era sha
+            # the running image was built with.
+            live_previous_sha = seeded[0]
 
         # Crash recovery, same as apply_teach: rows with this exact source
         # from an interrupted earlier attempt are replaced, never doubled.
@@ -377,16 +435,23 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
         )
         if seeded is not None:
             # Rewrite (never drop) the seed_state row to describe THIS
-            # write's content and live entries. The archive lane carries
-            # this exact text back into bundle/knowledge/{filename} for the
-            # next image build, so the next boot's seeder hashes identical
-            # bytes, matches this sha, and calls the file unchanged -- it
-            # never re-ingests under a fresh seed:{filename} source and
-            # never double-accounts the entries this write just stored.
+            # write's content and live entries, stamped lane='live' with
+            # previous_sha chained back to the image-era sha (see above).
+            # The archive lane carries this exact text back into
+            # bundle/knowledge/{filename} for the next image build, so the
+            # next boot's seeder hashes identical bytes, matches this sha,
+            # and calls the file unchanged (converging the row back to
+            # plain seed lane) -- it never re-ingests under a fresh
+            # seed:{filename} source and never double-accounts the entries
+            # this write just stored. If instead that next boot's image is
+            # STILL the stale one predating this write, the seeder matches
+            # previous_sha and skips entirely, rather than reverting the
+            # edit -- the whole point of tracking it.
             conn.execute(
                 "INSERT OR REPLACE INTO seed_state "
-                "(filename, sha256, entry_ids) VALUES (?, ?, ?)",
-                (filename, digest, json.dumps(ids)),
+                "(filename, sha256, entry_ids, lane, previous_sha, deleted) "
+                "VALUES (?, ?, ?, 'live', ?, 0)",
+                (filename, digest, json.dumps(ids), live_previous_sha),
             )
         conn.commit()
         return TeachResult(stored=True, entry_ids=ids, source=source)
@@ -415,6 +480,18 @@ def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
     BOTH ledgers, are then retired into that marker via _retire_entries.
     Only the marker stays live; every one of the file's real facts ends up
     superseded.
+
+    If a seed_state row existed (the file was ever boot-seeded), this
+    leaves a TOMBSTONE there instead of dropping it outright: lane='live',
+    deleted=1, previous_sha chained back to the image-era sha the same way
+    apply_knowledge does. Without a tombstone, a restart on an image that
+    still has the pre-delete bytes (the archive lane's removal of
+    bundle/knowledge/{filename} hasn't reached a rebuild yet) would find no
+    ledger row for a file the image DOES have, treat it as brand new, and
+    resurrect it. The tombstone lets docker/seeder.py's sync() recognize
+    that exact image content as stale-and-already-deleted and skip it
+    instead. Once a rebuild finally removes the file from the image too,
+    sync() drops the tombstone on its own (see sync()'s removal loop).
     """
     if not _FILENAME_RE.match(filename or ""):
         return TeachResult(stored=False, error=f"invalid knowledge filename {filename!r}")
@@ -426,20 +503,22 @@ def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
     try:
         conn.execute(_INTAKE_STATE_SCHEMA)
         conn.execute(_SEED_STATE_SCHEMA)
+        _migrate_seed_state_schema(conn)
         conn.commit()
         intake_row = conn.execute(
             "SELECT sha256, entry_ids FROM intake_state WHERE filename = ?",
             (filename,),
         ).fetchone()
         seed_row = conn.execute(
-            "SELECT entry_ids FROM seed_state WHERE filename = ?", (filename,)
+            "SELECT sha256, entry_ids, lane, previous_sha FROM seed_state WHERE filename = ?",
+            (filename,),
         ).fetchone()
         if intake_row is None and seed_row is None:
             return TeachResult(stored=False, error=f"no knowledge on record for {filename!r}")
 
         prior_sha = intake_row[0] if intake_row else None
         intake_entry_ids: list[int] = json.loads(intake_row[1]) if intake_row else []
-        seed_entry_ids: list[int] = json.loads(seed_row[0]) if seed_row else []
+        seed_entry_ids: list[int] = json.loads(seed_row[1]) if seed_row else []
         entry_ids = intake_entry_ids + [
             entry_id for entry_id in seed_entry_ids if entry_id not in intake_entry_ids
         ]
@@ -457,13 +536,19 @@ def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
         if prior_sha is not None:
             conn.execute("DELETE FROM intake_state WHERE sha256 = ?", (prior_sha,))
         if seed_row is not None:
-            # Drop it outright (no replacement, unlike the edit path): the
-            # file is gone, so there is no new content for a future boot's
-            # seeder to match against. A missing seed_state row plus the
-            # archive lane also removing bundle/knowledge/{filename} means
-            # the next boot's `current` file set never contains it either,
-            # so it converges to nothing seeded, nothing re-ingested.
-            conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
+            # Chain previous_sha back to the image-era sha exactly as
+            # apply_knowledge does: a row already lane='live' (an edit that
+            # never converged, or an earlier tombstone) carries the real
+            # image-era sha in ITS previous_sha already; an ordinary
+            # lane='seed' row's own sha256 IS the image-era sha.
+            seed_sha, _entry_ids_raw, seed_lane, seed_previous_sha = seed_row
+            tombstone_previous_sha = seed_previous_sha if seed_lane == "live" else seed_sha
+            conn.execute(
+                "INSERT OR REPLACE INTO seed_state "
+                "(filename, sha256, entry_ids, lane, previous_sha, deleted) "
+                "VALUES (?, ?, '[]', 'live', ?, 1)",
+                (filename, tombstone_previous_sha, tombstone_previous_sha),
+            )
         conn.commit()
         return TeachResult(
             stored=True, entry_ids=entry_ids, source=f"intake:{filename}#deleted"

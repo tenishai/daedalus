@@ -455,15 +455,173 @@ def test_seeder_resync_after_fast_lane_edit_is_unchanged_not_reingested(techne_d
     assert not any("Tsuru" in c for c in live_contents)
 
     # Ledger is consistent: exactly one seed_state row for the filename,
-    # its sha matching the archived (== fast-lane-taught) bytes.
+    # its sha matching the archived (== fast-lane-taught) bytes, and the
+    # row has converged back to plain seed lane (rebuilt in) -- no longer
+    # tracked as an unconverged live write.
     state = techne_db.parent / "seed_state.db"
     rows = sqlite3.connect(state).execute(
-        "SELECT filename, sha256, entry_ids FROM seed_state WHERE filename = ?", (filename,)
+        "SELECT filename, sha256, entry_ids, lane, previous_sha FROM seed_state WHERE filename = ?",
+        (filename,),
     ).fetchall()
     assert len(rows) == 1
     digest = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
     assert rows[0][1] == digest
     assert json.loads(rows[0][2]) == edited.entry_ids
+    assert rows[0][3] == "seed"
+    assert rows[0][4] is None
+
+
+# ---- staleness protocol: a stale image boot must never destroy or
+# resurrect fast-lane memory (re-review's Critical 1 on this branch) ----
+#
+# The fast lane's writes land in techne/seed_state on the agent's PVC, but
+# the running container's /bundle is whatever was baked into the image at
+# BUILD time -- it does not change until a later rebuild. The seeder in
+# docker/seeder.py runs on EVERY boot against that baked /bundle. Before
+# this protocol, any restart on an image that still had the pre-edit (or
+# pre-delete) bytes looked to the seeder exactly like a repo-direct content
+# change: sha mismatch, so hard-delete the fast lane's own live entries and
+# re-seed the stale image content. lane='live'/previous_sha (and, for a
+# delete, a tombstone row) let the seeder tell "this image is just stale"
+# apart from "this is genuinely new content" instead of conflating them.
+
+
+def test_stale_boot_after_fast_lane_edit_never_reverts_the_edit(techne_db, tmp_path):
+    """FLAGSHIP: seed via the real seeder, fast-lane edit, then re-run the
+    seeder against the ORIGINAL (stale, never-rebuilt) image bytes. The
+    edit must survive -- new content hits recall, old content misses,
+    nothing gets deleted, and the ledger row is untouched by the run."""
+    from techne.core import search
+
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    original_text = "The dog is named Tsuru.\n"
+    _seed_via_seeder(seeder, techne_db, tmp_path, filename, original_text)
+
+    edited = apply_knowledge("The dog is named Kestrel.\n", filename, techne_db)
+    assert edited.stored
+
+    # The image is never rebuilt: bundle/knowledge/colleagues.md on disk
+    # still holds the ORIGINAL pre-edit bytes -- exactly what a restart
+    # before any rebuild would boot against.
+    kdir = tmp_path / "knowledge"
+    assert (kdir / filename).read_text(encoding="utf-8") == original_text
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(db, content, type=type, tags=tags, confidence="high", source=source)
+
+    state = techne_db.parent / "seed_state.db"
+    before = sqlite3.connect(state).execute(
+        "SELECT filename, sha256, entry_ids, lane, previous_sha, deleted "
+        "FROM seed_state WHERE filename = ?",
+        (filename,),
+    ).fetchone()
+
+    result = seeder.sync(kdir, techne_db, state, store_fn, knowledge.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 1}
+
+    old_hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    new_hits = search.search(techne_db, "Kestrel", table="knowledge", use_vectors=False)
+    assert old_hits == [], "a stale-image boot must not revert the fast-lane edit"
+    assert any("Kestrel" in h["content"] for h in new_hits)
+
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+    assert any("Kestrel" in c for c in live_contents)
+
+    after = sqlite3.connect(state).execute(
+        "SELECT filename, sha256, entry_ids, lane, previous_sha, deleted "
+        "FROM seed_state WHERE filename = ?",
+        (filename,),
+    ).fetchone()
+    assert after == before  # the run touched nothing
+
+
+def test_stale_boot_after_fast_lane_delete_never_resurrects_the_file(techne_db, tmp_path):
+    """A fast-lane delete leaves a tombstone. A stale image that still has
+    the pre-delete bytes must not resurrect the file on the next boot."""
+    from techne.core import search
+
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    original_text = "The dog is named Tsuru.\n"
+    _seed_via_seeder(seeder, techne_db, tmp_path, filename, original_text)
+
+    deleted = apply_knowledge_delete(filename, techne_db)
+    assert deleted.stored
+
+    kdir = tmp_path / "knowledge"
+    assert (kdir / filename).read_text(encoding="utf-8") == original_text  # still stale
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(db, content, type=type, tags=tags, confidence="high", source=source)
+
+    state = techne_db.parent / "seed_state.db"
+    result = seeder.sync(kdir, techne_db, state, store_fn, knowledge.delete)
+
+    assert result == {"seeded": 0, "removed": 0, "unchanged": 1}
+
+    hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    assert hits == [], "a stale-image boot must not resurrect a fast-lane delete"
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+
+    row = sqlite3.connect(state).execute(
+        "SELECT lane, deleted FROM seed_state WHERE filename = ?", (filename,)
+    ).fetchone()
+    assert row is not None, "the tombstone must survive a stale boot"
+    assert row[0] == "live"
+    assert row[1] == 1
+
+
+def test_repo_direct_edit_after_live_write_converges_to_new_content(techne_db, tmp_path):
+    """A THIRD sha appears in the image -- neither the fast-lane content nor
+    the pre-edit image content -- meaning the file was edited directly in
+    the repo, bypassing the fast lane entirely. Normal convergence must
+    win: the live entries are retired, the new repo content is seeded, and
+    the ledger returns to plain seed lane."""
+    from techne.core import search
+
+    from daedalus.memory.teach import _retire_entries
+
+    seeder = _load_seeder()
+    filename = "colleagues.md"
+    _seed_via_seeder(seeder, techne_db, tmp_path, filename, "The dog is named Tsuru.\n")
+
+    edited = apply_knowledge("The dog is named Kestrel.\n", filename, techne_db)
+    assert edited.stored
+
+    kdir = tmp_path / "knowledge"
+    (kdir / filename).write_text("The dog is named Whiskers.\n", encoding="utf-8")
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(db, content, type=type, tags=tags, confidence="high", source=source)
+
+    # Kestrel's entry is itself the retirement survivor of Tsuru's seeded
+    # entry (apply_knowledge's own edit semantics) -- hard-deleting it via
+    # knowledge.delete would trip techne's own superseded_by foreign key,
+    # so this needs the same retire_fn wiring docker/seeder.py's main()
+    # uses for real boots.
+    state = techne_db.parent / "seed_state.db"
+    result = seeder.sync(
+        kdir, techne_db, state, store_fn, knowledge.delete, retire_fn=_retire_entries
+    )
+
+    assert result == {"seeded": 1, "removed": 0, "unchanged": 0}
+
+    for term, expect_hit in [("Tsuru", False), ("Kestrel", False), ("Whiskers", True)]:
+        hits = search.search(techne_db, term, table="knowledge", use_vectors=False)
+        assert bool(hits) == expect_hit, term
+
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert live_contents == ["The dog is named Whiskers."]
+
+    digest = hashlib.sha256(b"The dog is named Whiskers.\n").hexdigest()
+    row = sqlite3.connect(state).execute(
+        "SELECT sha256, lane, previous_sha FROM seed_state WHERE filename = ?", (filename,)
+    ).fetchone()
+    assert row == (digest, "seed", None)
 
 
 def test_is_teach_task_ignores_the_knowledge_marker():
