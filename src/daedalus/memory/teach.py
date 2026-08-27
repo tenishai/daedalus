@@ -30,6 +30,21 @@ the intake_state ledger already maps filename -> the entry_ids live for it,
 so it doubles as the replacement machinery. An edit retires the entries
 recorded for the filename's earlier sha before the new content lands under
 the new sha; a delete retires them and drops the ledger row outright.
+
+kobo's knowledge files live in bundle/knowledge/, which the boot seeder
+(docker/seeder.py) ingests on its OWN filename-keyed ledger, seed_state,
+under a `seed:{filename}` source -- a completely separate table from
+intake_state. A file this module edits or deletes is very often one the
+seeder already ingested at boot (a roster file refreshed over chat, for
+instance), so apply_knowledge and apply_knowledge_delete read and maintain
+seed_state too: retiring only intake_state would leave the boot-seeded
+prior live forever, ghosting beside every edit and surviving every delete.
+An edit rewrites the seed_state row to the new content's sha and entry ids
+(never drops it) so a later rebuild that carries the same bytes back into
+bundle/knowledge/{filename} makes the next boot's seeder see a sha match
+and call the file unchanged; a delete drops the row outright, since there
+is no new content for a future boot to match against.
+
 "Retire" here is techne's own belief-revision primitive (techne.core.
 knowledge._retire_in_conn, techne#213) -- the same one the revision pass
 uses to resolve a contradiction between two live facts -- not a hard
@@ -84,6 +99,21 @@ _TYPE_MAP = {
 _INTAKE_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS intake_state (
        sha256 TEXT PRIMARY KEY,
        filename TEXT NOT NULL,
+       entry_ids TEXT NOT NULL
+   )"""
+
+# The boot seeder's own ledger (docker/seeder.py), keyed by filename rather
+# than sha, for bundle/knowledge/*.md files it ingested with a `seed:
+# {filename}` source. apply_knowledge and apply_knowledge_delete read and
+# maintain this table too -- not just intake_state -- because a filename
+# the seeder already ingested at boot and a filename this module edits or
+# deletes are frequently the SAME file (kobo's knowledge files live in
+# bundle/knowledge/, seeded at boot, then edited/deleted live over this
+# fast lane). Retiring only intake_state would leave the seeded prior
+# live forever.
+_SEED_STATE_SCHEMA = """CREATE TABLE IF NOT EXISTS seed_state (
+       filename TEXT PRIMARY KEY,
+       sha256 TEXT NOT NULL,
        entry_ids TEXT NOT NULL
    )"""
 
@@ -256,6 +286,12 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
     first freshly-stored entry as survivor. The stale version can then never
     be recalled again, and the prior sha's now-superseded ledger row is
     dropped so `filename` never resolves to two ledger rows at once.
+
+    The same filename may ALSO have a seed_state row from the boot seeder
+    (docker/seeder.py ingesting bundle/knowledge/{filename} at boot, source
+    `seed:{filename}`) -- a second, independent ledger this function must
+    also check and retire from, or the seeded prior stays live forever
+    beside every edit. See the module docstring and _SEED_STATE_SCHEMA.
     """
     if not _FILENAME_RE.match(filename or ""):
         return TeachResult(stored=False, error=f"invalid knowledge filename {filename!r}")
@@ -272,6 +308,7 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
     conn = sqlite3.connect(state_db)
     try:
         conn.execute(_INTAKE_STATE_SCHEMA)
+        conn.execute(_SEED_STATE_SCHEMA)
         conn.commit()
         row = conn.execute(
             "SELECT 1 FROM intake_state WHERE sha256 = ?", (digest,)
@@ -285,6 +322,16 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
         ).fetchone()
         prior_sha = prior[0] if prior else None
         prior_entry_ids: list[int] = json.loads(prior[1]) if prior else []
+
+        # The boot seeder may already have ingested this exact filename from
+        # bundle/knowledge/ (source `seed:{filename}`, seed_state keyed by
+        # filename) -- a separate ledger from intake_state's. An edit here
+        # must retire THOSE entries too, or the seeded fact and the newly
+        # taught one are both live at once (the ghost bug this closes).
+        seeded = conn.execute(
+            "SELECT entry_ids FROM seed_state WHERE filename = ?", (filename,)
+        ).fetchone()
+        seeded_entry_ids: list[int] = json.loads(seeded[0]) if seeded else []
 
         # Crash recovery, same as apply_teach: rows with this exact source
         # from an interrupted earlier attempt are replaced, never doubled.
@@ -315,8 +362,11 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
                     pass
             raise
 
-        if prior_entry_ids:
-            _retire_entries(db_path, prior_entry_ids, ids[0])
+        retired_ids = prior_entry_ids + [
+            entry_id for entry_id in seeded_entry_ids if entry_id not in prior_entry_ids
+        ]
+        if retired_ids:
+            _retire_entries(db_path, retired_ids, ids[0])
 
         if prior_sha is not None:
             conn.execute("DELETE FROM intake_state WHERE sha256 = ?", (prior_sha,))
@@ -325,6 +375,19 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
             "(sha256, filename, entry_ids) VALUES (?, ?, ?)",
             (digest, filename, json.dumps(ids)),
         )
+        if seeded is not None:
+            # Rewrite (never drop) the seed_state row to describe THIS
+            # write's content and live entries. The archive lane carries
+            # this exact text back into bundle/knowledge/{filename} for the
+            # next image build, so the next boot's seeder hashes identical
+            # bytes, matches this sha, and calls the file unchanged -- it
+            # never re-ingests under a fresh seed:{filename} source and
+            # never double-accounts the entries this write just stored.
+            conn.execute(
+                "INSERT OR REPLACE INTO seed_state "
+                "(filename, sha256, entry_ids) VALUES (?, ?, ?)",
+                (filename, digest, json.dumps(ids)),
+            )
         conn.commit()
         return TeachResult(stored=True, entry_ids=ids, source=source)
     finally:
@@ -332,18 +395,26 @@ def apply_knowledge(text: str, filename: str, db_path: Path) -> TeachResult:
 
 
 def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
-    """Delete `filename`'s knowledge: retire every entry the ledger has on
-    record for it and drop the ledger row, so neither recall nor a future
+    """Delete `filename`'s knowledge: retire every entry EITHER ledger has on
+    record for it and drop both ledger rows, so neither recall nor a future
     boot seeder can see it again.
+
+    Two ledgers can hold entries for the same filename: intake_state (this
+    module's own edit/delete lane, keyed by sha) and seed_state (the boot
+    seeder's, docker/seeder.py, keyed by filename, source `seed:{filename}`).
+    A file that was seeded at boot and never edited over this fast lane
+    before has ONLY a seed_state row -- deleting it must still retire those
+    entries, not just no-op because intake_state has nothing on record.
 
     Retirement never deletes a knowledge row (techne's own rule). A plain
     delete has no replacement content to serve as the live survivor
     `_retire_in_conn` requires, so a minimal marker entry is minted via
     `knowledge.supersede()` -- itself a mint-plus-retire in one call, using
-    the file's own last entry as the one it replaces -- to carry that role;
-    the file's remaining entries are then retired into that marker via
-    _retire_entries. Only the marker stays live; every one of the file's
-    real facts ends up superseded.
+    the file's own last entry (from whichever ledger has one) as the one it
+    replaces -- to carry that role; the file's remaining entries, from
+    BOTH ledgers, are then retired into that marker via _retire_entries.
+    Only the marker stays live; every one of the file's real facts ends up
+    superseded.
     """
     if not _FILENAME_RE.match(filename or ""):
         return TeachResult(stored=False, error=f"invalid knowledge filename {filename!r}")
@@ -354,15 +425,24 @@ def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
     conn = sqlite3.connect(state_db)
     try:
         conn.execute(_INTAKE_STATE_SCHEMA)
+        conn.execute(_SEED_STATE_SCHEMA)
         conn.commit()
-        row = conn.execute(
+        intake_row = conn.execute(
             "SELECT sha256, entry_ids FROM intake_state WHERE filename = ?",
             (filename,),
         ).fetchone()
-        if row is None:
+        seed_row = conn.execute(
+            "SELECT entry_ids FROM seed_state WHERE filename = ?", (filename,)
+        ).fetchone()
+        if intake_row is None and seed_row is None:
             return TeachResult(stored=False, error=f"no knowledge on record for {filename!r}")
-        prior_sha, entry_ids_json = row
-        entry_ids: list[int] = json.loads(entry_ids_json)
+
+        prior_sha = intake_row[0] if intake_row else None
+        intake_entry_ids: list[int] = json.loads(intake_row[1]) if intake_row else []
+        seed_entry_ids: list[int] = json.loads(seed_row[0]) if seed_row else []
+        entry_ids = intake_entry_ids + [
+            entry_id for entry_id in seed_entry_ids if entry_id not in intake_entry_ids
+        ]
 
         if entry_ids:
             marker_source = f"intake:{filename}#deleted"
@@ -374,7 +454,16 @@ def apply_knowledge_delete(filename: str, db_path: Path) -> TeachResult:
             )
             _retire_entries(db_path, entry_ids[:-1], survivor_id)
 
-        conn.execute("DELETE FROM intake_state WHERE sha256 = ?", (prior_sha,))
+        if prior_sha is not None:
+            conn.execute("DELETE FROM intake_state WHERE sha256 = ?", (prior_sha,))
+        if seed_row is not None:
+            # Drop it outright (no replacement, unlike the edit path): the
+            # file is gone, so there is no new content for a future boot's
+            # seeder to match against. A missing seed_state row plus the
+            # archive lane also removing bundle/knowledge/{filename} means
+            # the next boot's `current` file set never contains it either,
+            # so it converges to nothing seeded, nothing re-ingested.
+            conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
         conn.commit()
         return TeachResult(
             stored=True, entry_ids=entry_ids, source=f"intake:{filename}#deleted"
