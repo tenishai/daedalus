@@ -254,6 +254,13 @@ class Agent:
         return self.bundle.spec.name
 
     async def handle_task(self, task: Task) -> Task:
+        # Deferred: matches this file's existing convention of importing
+        # daedalus.tools.* at point of use rather than at module level (see
+        # the tools_from_spec provider branches above), not a real cycle --
+        # colleagues.py imports nothing from daedalus.agent.
+        from daedalus.tools.colleagues import current_context_id
+
+        current_context_id.set(task.context_id or task.id)
         if is_teach_task(task):
             return await self._handle_teach(task)
         if self.enforcement.locked:
