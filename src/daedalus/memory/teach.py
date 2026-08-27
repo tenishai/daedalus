@@ -10,9 +10,12 @@ reaching the model. Three markers exist:
     it and is untouched by this module's knowledge additions.
   - KNOWLEDGE_MARKER ("knowledge"): a FILE with edit/delete semantics, not a
     note. apply_knowledge and apply_knowledge_delete below.
-  - TOOL_MARKER ("tool"): reserved for a later task. Landing the constant
-    now, with a refusing stub, means an early tool envelope is refused
-    rather than silently falling through to the model.
+  - TOOL_MARKER ("tool"): a fast-delivered tool file, re-validated and
+    written into a persistent overlay directory on the agent's own volume.
+    apply_tool lives in daedalus.memory.tooling (a sibling module, not
+    here: the mechanical validation it ports from kobo_api.tooling has
+    nothing in common with this module's techne-store plumbing), and its
+    dispatch is Agent._handle_tool, not a function in this file.
 
 Both apply_teach and apply_knowledge mirror the boot seeder (docker/seeder.py)
 byte-for-byte in provenance and outcome for a file's first write: same

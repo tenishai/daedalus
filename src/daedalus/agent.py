@@ -23,6 +23,7 @@ from daedalus.memory.teach import (
     apply_teach,
     teach_authorized,
 )
+from daedalus.memory.tooling import apply_tool
 from daedalus.protocols import (
     LLM,
     Approver,
@@ -115,7 +116,7 @@ class Agent:
         on_event: Callable[[dict], None] | None = None,
     ):
         self.bundle = bundle
-        self.enforcement = Enforcement.load(bundle.path / "tools")
+        self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
 
@@ -157,6 +158,19 @@ class Agent:
         self.events.publish(event)
         if self.on_event is not None:
             self.on_event(event)
+
+    def _tool_overlay_dir(self) -> Path | None:
+        """The persistent overlay directory for fast-lane-delivered tools
+        (arc3d Task 5), beside the techne db on the agent's own volume --
+        `spec.memory.home`, mounted at /techne in live pods. Never
+        `bundle.path`, which is the image and resets to its baked-in
+        contents on every restart. None when no home is configured, same
+        guard `_memory_from_spec` uses for `db_path` -- independent of
+        `spec.memory.personal`: the home directory is the persistent volume
+        mount itself, and techne.db is just one file that happens to live
+        there, so a tool write needs nothing more than `home` being set."""
+        home = self.bundle.spec.memory.home
+        return Path(home).expanduser() / "tools-overlay" if home else None
 
     def _memory_from_spec(self) -> MemoryStore:
         spec = self.bundle.spec.memory
@@ -410,15 +424,50 @@ class Agent:
         return task.reply("Learned. I will remember that.")
 
     async def _handle_tool(self, task: Task) -> Task:
-        """TOOL_MARKER's real handler is a later task. This refusing stub
-        only lands the marker: an early tool envelope is refused outright
-        rather than silently falling through to the model."""
-        self._emit("tool_task_refused")
-        return task.reply(
-            "Tool tasks are not handled yet.",
-            state=TaskState.FAILED,
-            reason=ReasonCode.TOOL_BLOCKED,
+        """The operator tool lane (arc3d Task 5): a fast-delivered tool
+        file, re-validated by THIS runtime against the exact same
+        mechanical contract kobo's room applies (the fast lane skips CI by
+        definition, so kobo's own validation is never trusted alone) and,
+        only once it passes, written into the overlay directory on the
+        agent's persistent volume -- never the image bundle, which resets
+        to its baked-in contents on every restart. Same authorization gate
+        as teach/knowledge: tool writes are exactly as operator-grade.
+
+        No hot reload: the enforcement loader (daedalus.enforcement.
+        Enforcement.load) only re-runs at process boot, so a tool delivered
+        here is inert in this process no matter what -- the reply says so
+        plainly rather than implying anything more."""
+        if not teach_authorized(task):
+            self._emit("tool_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Tool writes are operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        overlay_dir = self._tool_overlay_dir()
+        if overlay_dir is None:
+            return task.reply(
+                "I have no persistent tools directory configured, so I cannot keep this.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        filename = task.metadata.get(FILENAME_KEY, "")
+        result = await asyncio.to_thread(
+            apply_tool,
+            task.user_text(),
+            str(filename),
+            self.bundle.path / "tools",
+            overlay_dir,
         )
+        if result.error:
+            self._emit("tool_refused", error=result.error)
+            return task.reply(
+                f"I could not keep that tool: {result.error}.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        self._emit("tool_stored", filename=result.filename)
+        return task.reply("Tool delivered. It will be active after my next restart.")
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
