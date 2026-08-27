@@ -294,6 +294,44 @@ async def test_ask_colleague_envelope_shape_is_pinned(monkeypatch):
     assert body == {"target": "rin", "task": task}
 
 
+async def test_ask_colleague_propagates_the_inbound_context_id(monkeypatch):
+    """The switchboard's loop guard groups hops by contextId. Without this,
+    every hop mints a fresh id and the guard is inert -- which is how
+    gemini-one and probe looped five times in issue #5."""
+    from daedalus.tools.colleagues import current_context_id
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    reply = {"status": {"message": {"parts": [{"kind": "text", "text": "ok"}]}}}
+    client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
+    provider = make_provider(client)
+    token = current_context_id.set("ctx-from-inbound")
+    try:
+        await provider.call(
+            "colleagues.ask_colleague", {"name": "rin", "question": "did it clear?"}
+        )
+    finally:
+        current_context_id.reset(token)
+    _, body, _ = client.post_calls[0]
+    assert body["task"]["contextId"] == "ctx-from-inbound"
+
+
+async def test_ask_colleague_envelope_omits_context_id_when_none_is_set(monkeypatch):
+    """Regression guard: with no context threaded, the envelope stays exactly
+    as it was before this feature -- no contextId key at all."""
+    from daedalus.tools.colleagues import current_context_id
+
+    assert current_context_id.get() is None
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    reply = {"status": {"message": {"parts": [{"kind": "text", "text": "ok"}]}}}
+    client = FakeHTTPClient(post_responses=[FakeResponse(200, reply)])
+    provider = make_provider(client)
+    await provider.call(
+        "colleagues.ask_colleague", {"name": "rin", "question": "did it clear?"}
+    )
+    _, body, _ = client.post_calls[0]
+    assert "contextId" not in body["task"]
+
+
 async def test_ask_colleague_multi_part_reply_joins_all_text_parts(monkeypatch):
     """The join-all-parts contract (transports.a2a.text_of, mirrored): a
     multi-part reply arrives whole, non-text parts are skipped, order kept.
