@@ -8,8 +8,11 @@ import pytest
 
 from daedalus.memory.teach import (
     FILENAME_KEY,
+    KNOWLEDGE_MARKER,
     SYSTEM_TASK_KEY,
     TEACH_MARKER,
+    apply_knowledge,
+    apply_knowledge_delete,
     apply_teach,
     is_teach_task,
     teach_authorized,
@@ -184,3 +187,167 @@ def test_teach_and_seeder_produce_identical_rows(techne_db, tmp_path, note):
         "SELECT sha256, filename FROM intake_state"
     ).fetchall()
     assert taught_ledger == seeded_ledger
+
+
+# ---- knowledge: edit/delete semantics (teach stays append-only, untouched) ----
+
+
+def test_apply_knowledge_edit_retires_old_fact_and_new_fact_is_recalled(techne_db):
+    """The distinguishing knowledge behavior, and the one written first: an
+    edit is a REPLACE, not an append. Writing the same filename twice with
+    different content must retire the first version's entries -- a live
+    recall for the old fact misses and the new fact hits -- unlike teach,
+    which never retires anything."""
+    from techne.core import knowledge, search
+
+    filename = "chat-20260820-dog.md"
+    first = apply_knowledge("The dog is named Tsuru.\n", filename, techne_db)
+    assert first.stored and not first.error
+
+    second = apply_knowledge("The dog is named Kestrel.\n", filename, techne_db)
+    assert second.stored and not second.error
+    assert second.entry_ids != first.entry_ids
+
+    # The old entries are retired -- superseded, never hard-deleted.
+    for entry_id in first.entry_ids:
+        row = knowledge.get(techne_db, entry_id)
+        assert row is not None, "retired entries must never be hard-deleted"
+        assert row["superseded_by"] is not None
+
+    # A live recall misses the old fact and hits the new one -- the actual
+    # path daedalus.memory.techne.TechneMemoryStore.recall() uses.
+    old_hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    new_hits = search.search(techne_db, "Kestrel", table="knowledge", use_vectors=False)
+    assert old_hits == []
+    assert any("Kestrel" in h["content"] for h in new_hits)
+
+    # The default (live-only) listing agrees.
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+    assert any("Kestrel" in c for c in live_contents)
+
+    # The ledger now points filename at the new sha's entries; the stale
+    # sha row is gone so a filename never resolves to two ledger rows.
+    digest = hashlib.sha256(b"The dog is named Kestrel.\n").hexdigest()
+    state = techne_db.parent / "seed_state.db"
+    rows = sqlite3.connect(state).execute(
+        "SELECT sha256, filename, entry_ids FROM intake_state WHERE filename = ?", (filename,)
+    ).fetchall()
+    assert rows == [(digest, filename, json.dumps(second.entry_ids))]
+
+
+def test_apply_knowledge_first_write_matches_seeder_and_ledgers_the_sha(techne_db, tmp_path):
+    """Parity claim for apply_knowledge's FIRST write of a file (mirrors
+    test_teach_and_seeder_produce_identical_rows): identical content shape,
+    written through a different door, must still produce the seeder's exact
+    rows and ledger a sha the boot seeder would skip."""
+    seeder = _load_seeder()
+    note = "Preamble line.\n\n## First\nalpha\n\n## Second\nbeta\n"
+    filename = "chat-20260820-know.md"
+    result = apply_knowledge(note, filename, techne_db)
+    assert result.stored and not result.already_known and result.error is None
+    known_rows = sorted(
+        (r["content"], r["type"], r["source"]) for r in _rows(techne_db, result.source)
+    )
+
+    other_db = tmp_path / "other" / "techne.db"
+    other_db.parent.mkdir()
+    init_db(other_db).close()
+    intake = tmp_path / "intake"
+    intake.mkdir()
+    (intake / filename).write_text(note, encoding="utf-8")
+
+    def store_fn(db, content, type, tags, source):
+        return knowledge.store(
+            db, content, type=type, tags=tags, confidence="high", source=source
+        )
+
+    seeder.ingest_intake(
+        intake, other_db, other_db.parent / "seed_state.db", store_fn, knowledge.delete
+    )
+    digest = hashlib.sha256(note.encode("utf-8")).hexdigest()
+    source = f"intake:{filename}#{digest[:12]}"
+    seeded_rows = sorted((r["content"], r["type"], r["source"]) for r in _rows(other_db, source))
+    assert known_rows == seeded_rows and known_rows
+
+    ledger_row = sqlite3.connect(techne_db.parent / "seed_state.db").execute(
+        "SELECT sha256, filename FROM intake_state WHERE sha256 = ?", (digest,)
+    ).fetchone()
+    assert ledger_row == (digest, filename)
+
+
+def test_apply_knowledge_writes_intake_ledger_row(techne_db):
+    note = "A fact worth keeping.\n"
+    result = apply_knowledge(note, "chat-20260820-fact.md", techne_db)
+    state = techne_db.parent / "seed_state.db"
+    conn = sqlite3.connect(state)
+    row = conn.execute(
+        "SELECT sha256, filename, entry_ids FROM intake_state WHERE filename = ?",
+        ("chat-20260820-fact.md",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == hashlib.sha256(note.encode("utf-8")).hexdigest()
+    assert row[1] == "chat-20260820-fact.md"
+    assert json.loads(row[2]) == result.entry_ids
+
+
+def test_apply_knowledge_same_content_twice_is_already_known(techne_db):
+    note = "A fact worth keeping.\n"
+    first = apply_knowledge(note, "chat-20260820-fact.md", techne_db)
+    second = apply_knowledge(note, "chat-20260820-fact.md", techne_db)
+    assert first.stored and second.already_known and not second.stored
+    assert len(_rows(techne_db, first.source)) == len(first.entry_ids)
+
+
+def test_apply_knowledge_rejects_bad_filename_and_empty_note(techne_db):
+    assert apply_knowledge("x", "../evil.md", techne_db).error
+    assert apply_knowledge("x", "UPPER.md", techne_db).error
+    assert apply_knowledge("x", "", techne_db).error
+    assert apply_knowledge("   \n", "chat-20260820-ok.md", techne_db).error
+
+
+def test_apply_knowledge_delete_retires_entries_and_removes_ledger_row(techne_db):
+    from techne.core import knowledge, search
+
+    filename = "chat-20260820-dog.md"
+    note = "The dog is named Tsuru.\n"
+    written = apply_knowledge(note, filename, techne_db)
+    assert written.stored
+
+    deleted = apply_knowledge_delete(filename, techne_db)
+    assert deleted.stored and not deleted.error
+    assert sorted(deleted.entry_ids) == sorted(written.entry_ids)
+
+    # Every original entry is retired -- superseded, never hard-deleted.
+    for entry_id in written.entry_ids:
+        row = knowledge.get(techne_db, entry_id)
+        assert row is not None, "a delete must never hard-delete a knowledge row"
+        assert row["superseded_by"] is not None
+
+    # A live recall for the deleted fact misses entirely.
+    hits = search.search(techne_db, "Tsuru", table="knowledge", use_vectors=False)
+    assert hits == []
+    live_contents = [e["content"] for e in knowledge.list_entries(techne_db, limit=10_000_000)]
+    assert not any("Tsuru" in c for c in live_contents)
+
+    # The ledger row for this filename is gone -- a boot seeder that ever
+    # saw the same bytes again would treat them as new, not "already known".
+    state = techne_db.parent / "seed_state.db"
+    rows = sqlite3.connect(state).execute(
+        "SELECT * FROM intake_state WHERE filename = ?", (filename,)
+    ).fetchall()
+    assert rows == []
+
+
+def test_apply_knowledge_delete_unknown_filename_is_a_clean_error(techne_db):
+    result = apply_knowledge_delete("chat-20260820-never-taught.md", techne_db)
+    assert not result.stored
+    assert result.error
+
+
+def test_is_teach_task_ignores_the_knowledge_marker():
+    """is_teach_task stays an exact match on TEACH_MARKER -- the knowledge
+    lane is a distinct marker, not a teach variant."""
+    task = Task.from_text("hi")
+    task.metadata[SYSTEM_TASK_KEY] = KNOWLEDGE_MARKER
+    assert not is_teach_task(task)
