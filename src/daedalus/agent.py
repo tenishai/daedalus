@@ -262,6 +262,21 @@ class Agent:
                 )
             )
 
+        # The github sidecar (room PR broker, 2026-08-27 spec): composes
+        # ALONGSIDE whatever primary provider the elif chain above picked --
+        # deliberately not a `provider` value, so an agent keeps colleagues
+        # AND gains github.* the way builtin groups already stack.
+        if spec.github.broker_url:
+            from daedalus.tools.github import GitHubToolProvider
+
+            providers.append(
+                GitHubToolProvider(
+                    spec.github.broker_url,
+                    token_env=spec.github.token_env,
+                    self_name=spec.github.self,
+                )
+            )
+
         if not providers:
             return NoTools()
         if len(providers) == 1:
@@ -283,9 +298,10 @@ class Agent:
         # daedalus.tools.* at point of use rather than at module level (see
         # the tools_from_spec provider branches above), not a real cycle --
         # colleagues.py imports nothing from daedalus.agent.
-        from daedalus.tools.colleagues import current_context_id
+        from daedalus.tools.colleagues import consulted_colleagues, current_context_id
 
         current_context_id.set(task.context_id or task.id)
+        consulted_colleagues.set([])
         marker = task.metadata.get(SYSTEM_TASK_KEY)
         if marker is not None:
             return await self._dispatch_system_task(marker, task)
@@ -323,6 +339,20 @@ class Agent:
                     reason=ReasonCode.TOOL_BLOCKED,
                 )
             result.set_agent_text(post.text)
+            # Attribution law, runtime-enforced (2026-08-27 ruling): when
+            # this task consulted colleagues and the draft does not name
+            # every one of them, the record is appended deterministically.
+            # The standing colleagues.md instruction asks the model to
+            # attribute; this line is what makes the law hold when it
+            # doesn't. Appended AFTER post_draft enforcement so a hook's
+            # rewrite can't strip it.
+            consulted = consulted_colleagues.get() or []
+            unnamed = [c for c in consulted if c not in result.agent_text()]
+            if unnamed:
+                result.set_agent_text(
+                    result.agent_text()
+                    + "\n\n_(consulted: " + ", ".join(consulted) + ")_"
+                )
         return result
 
     async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
