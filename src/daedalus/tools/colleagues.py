@@ -28,6 +28,17 @@ current_context_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_context_id", default=None
 )
 
+# Colleagues successfully consulted while handling the CURRENT task, in
+# consultation order -- Agent.handle_task resets this per task and reads it
+# after the final draft to enforce the attribution law (a consulted
+# colleague must be NAMED in the reply; observed live 2026-08-27: the
+# standing instruction alone was skipped under a bare ask, so the runtime
+# appends the record itself when the model omits it). A contextvar for the
+# same reason current_context_id is one: concurrent tasks.
+consulted_colleagues: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "consulted_colleagues", default=None
+)
+
 
 def _text_parts_of(message: dict) -> str:
     """Join ALL text parts, in order — the same contract as
@@ -252,6 +263,9 @@ class ColleaguesToolProvider:
             return _UNREADABLE_REPLY
         if not text:
             return _UNREADABLE_REPLY
+        ledger = consulted_colleagues.get()
+        if ledger is not None and target not in ledger:
+            ledger.append(target)
         return text
 
     async def _remember(self, fact: str, learned_from: str) -> str:
