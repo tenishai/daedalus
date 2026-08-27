@@ -9,6 +9,7 @@ tool-result text — the provider never raises out to the agent loop.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import secrets
 from pathlib import Path
@@ -16,6 +17,16 @@ from pathlib import Path
 _NOT_CONFIGURED = "The colleague pass is not configured."
 _UNREADABLE_REPLY = "The colleague answered in a shape I could not read."
 _NO_MEMORY = "I have no memory store configured, so I cannot remember that."
+
+# The task context id currently being handled, set by Agent.handle_task.
+# The switchboard's DoomLoopGuardrail is default-on but groups hops by
+# contextId; without a threaded id each hop looks like a fresh conversation
+# and the guard never fires. A contextvar rather than provider state: tools
+# are invoked with arguments only, and an agent may handle tasks
+# concurrently.
+current_context_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_context_id", default=None
+)
 
 
 def _text_parts_of(message: dict) -> str:
@@ -223,6 +234,9 @@ class ColleaguesToolProvider:
                 "history": [],
             },
         }
+        context_id = current_context_id.get()
+        if context_id is not None:
+            envelope["task"]["contextId"] = context_id
         try:
             response = await client.post(
                 f"{self.url}/a2a/tasks", json=envelope, headers=headers, timeout=180.0
