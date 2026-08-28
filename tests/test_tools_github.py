@@ -6,7 +6,6 @@ the branch and footer, degrade politely on every failure."""
 
 import asyncio
 import base64
-import json
 
 import pytest
 
@@ -86,7 +85,8 @@ def test_no_token_env_degrades_politely(monkeypatch):
 
 
 def test_broker_404_means_no_grants(monkeypatch):
-    provider = _provider([("POST", "/broker/agents/ward/github-token", FakeResponse(404))], monkeypatch)
+    routes = [("POST", "/broker/agents/ward/github-token", FakeResponse(404))]
+    provider = _provider(routes, monkeypatch)
     out = _open(provider)
     assert "has not granted me any repositories" in out
 
