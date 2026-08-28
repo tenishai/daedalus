@@ -153,7 +153,10 @@ class GitHubToolProvider:
                         },
                         "limit": {
                             "type": "integer",
-                            "description": f"At most this many (default {_LIST_PRS_DEFAULT}, cap {_LIST_PRS_CAP})",
+                            "description": (
+                                f"At most this many (default "
+                                f"{_LIST_PRS_DEFAULT}, cap {_LIST_PRS_CAP})"
+                            ),
                         },
                     },
                     "required": ["repository"],
@@ -197,7 +200,10 @@ class GitHubToolProvider:
                         },
                         "limit": {
                             "type": "integer",
-                            "description": f"At most this many (default {_RELEASES_DEFAULT}, cap {_RELEASES_CAP})",
+                            "description": (
+                                f"At most this many (default "
+                                f"{_RELEASES_DEFAULT}, cap {_RELEASES_CAP})"
+                            ),
                         },
                     },
                     "required": ["repository"],
