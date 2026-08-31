@@ -760,7 +760,7 @@ def test_intake_txt_files_ingest_whole_or_sectioned(tmp_path):
 
 
 def test_intake_partial_store_failure_orphans_nothing_and_keeps_prior_state(tmp_path):
-    """Mid-file store failure leaves no orphaned rows and no intake_state row; rerun ingests cleanly."""
+    """Mid-file store failure leaves no orphans and no intake_state row; rerun ingests cleanly."""
     idir = tmp_path / "intake"
     idir.mkdir()
     # plain.txt (call 1, succeeds) -> sectioned.txt/Alpha (call 2, succeeds)
@@ -792,7 +792,8 @@ def test_intake_partial_store_failure_orphans_nothing_and_keeps_prior_state(tmp_
     # Rerun: sectioned.txt should now ingest cleanly
     fake2 = FakeStore()
     result = ingest_intake(idir, techne_db, state, fake2.store, fake2.delete)
-    assert result == {"ingested": 2, "skipped": 1}  # plain.txt skipped (already ledgered), sectioned ingests
+    # plain.txt skipped (already ledgered), sectioned ingests
+    assert result == {"ingested": 2, "skipped": 1}
 
 
 def test_intake_same_bytes_different_files_ingests_once_skips_second(tmp_path):
@@ -814,7 +815,8 @@ def test_intake_same_bytes_different_files_ingests_once_skips_second(tmp_path):
 
     # Verify ledger: file1 should have a row with the shared digest
     conn = sqlite3.connect(state)
-    rows = conn.execute("SELECT sha256, filename, entry_ids FROM intake_state ORDER BY filename").fetchall()
+    q = "SELECT sha256, filename, entry_ids FROM intake_state ORDER BY filename"
+    rows = conn.execute(q).fetchall()
     conn.close()
     assert len(rows) == 1  # Only one ledger row (for file1)
     assert rows[0][1] == "file1.md"
