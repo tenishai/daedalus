@@ -164,3 +164,34 @@ async def test_techne_store_round_trip(tmp_path, monkeypatch):
     await store.commit("spark5 exports PYTHONPATH globally; always env -u PYTHONPATH")
     recalled = await store.recall("PYTHONPATH venv problem")
     assert any("PYTHONPATH" in item for item in recalled)
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_techne_recall_returns_full_content_past_search_clip(tmp_path):
+    # techne's search() clips every returned row's content to 500 chars,
+    # unmarked -- a whole-file skill procedure read through that clip is a
+    # summary posing as the procedure (found live on clio, 2026-08-31).
+    # recall() must re-fetch the full row by id.
+    from techne.core.database import init_db
+
+    from daedalus.memory.techne import TechneMemoryStore
+
+    db_path = tmp_path / "techne.db"
+    init_db(db_path)
+    store = TechneMemoryStore(db_path=db_path, use_vectors=False)
+    procedure = "## Skill: long-procedure\n\nzephyr calibration steps.\n" + ("step\n" * 300)
+    assert len(procedure) > 500
+    await store.commit(procedure, kind="procedure")
+    recalled = await store.recall("zephyr calibration")
+    assert any(item == procedure for item in recalled), [len(i) for i in recalled]
+
+
+@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
+async def test_techne_store_defaults_to_vectors_on(tmp_path):
+    # The 0.16.1 wave flips the default: the runtime image bakes the
+    # backend in, and techne degrades to FTS cleanly when it is absent --
+    # so an agent constructed without an explicit knob wants vectors.
+    from daedalus.memory.techne import TechneMemoryStore
+
+    store = TechneMemoryStore(db_path=tmp_path / "techne.db")
+    assert store.use_vectors is True
