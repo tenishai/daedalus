@@ -38,22 +38,7 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,sla
 # crashlooped at seed time. Fail the BUILD, not the fleet.
 RUN python -c "import daedalus, techne; from techne.core.database import connect, like_escape; from techne.core import knowledge"
 
-# Semantic recall: bake the embedding model into the image so a pod never
-# reaches for the Hub (the seeder backfills with allow_download=False).
-# HF_HOME pins the cache somewhere deterministic and user-independent; the
-# model name mirrors techne's _DEFAULT_FASTEMBED_MODEL
-# (techne/core/embeddings.py) -- if techne changes its default, this line
-# must move with it or the bake warms the wrong cache.
-ENV HF_HOME=/opt/hf-cache
-RUN mkdir -p /opt/hf-cache \
-    && python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2')" \
-    && chmod -R a+rX /opt/hf-cache
-# Build proof for the vectors path: the backend must resolve, and the baked
-# model must load WITHOUT a download -- a cold cache here means the bake
-# above warmed the wrong location, which would otherwise surface only as
-# every pod silently serving FTS-only.
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
-RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_get_embedding_model(allow_download=False).embed(['build proof']))"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -64,6 +49,20 @@ RUN mkdir -p /techne && chown agent:agent /techne
 VOLUME /techne
 
 USER agent
+# Semantic recall: bake the embedding model into the image so a pod never
+# reaches for the Hub (the seeder backfills with allow_download=False).
+# Two things are deliberate here. The warm-up goes through techne's OWN
+# loader, because techne hands fastembed an explicit cache_dir -- warming
+# any other way (a bare TextEmbedding call was tried) lands the model
+# where techne never looks. And it runs AFTER `USER agent`, because that
+# cache_dir is Path.home()-relative -- warmed as root (also tried) it
+# lands in /root/.cache while every pod resolves /home/agent/.cache.
+RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_get_embedding_model().embed(['warm the cache']))"
+# Build proof: the baked model must load and embed WITHOUT a download -- a
+# cold cache here would otherwise surface only as every pod silently
+# serving FTS-only. A fresh interpreter, because the loader is a
+# process-singleton and the warm-up's instance would mask a cold cache.
+RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_get_embedding_model(allow_download=False).embed(['build proof']))"
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bundle"]
