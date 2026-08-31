@@ -22,18 +22,38 @@ COPY --from=techne / /src/techne
 COPY . /src/daedalus
 # google-cloud-aiplatform: litellm's vertex_ai/* routes import the vertexai
 # SDK at call time — the platform's default model provider, so baked in here.
-RUN pip wheel --wheel-dir /wheels /src/techne "/src/daedalus[a2a,slack]" "google-cloud-aiplatform>=1.38"
+# techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
+# closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
+# alongside everything else.
+RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "/src/daedalus[a2a,slack]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --create-home agent
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack]" techne google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack]" "techne[vectors]" google-cloud-aiplatform && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.
 RUN python -c "import daedalus, techne; from techne.core.database import connect, like_escape; from techne.core import knowledge"
+
+# Semantic recall: bake the embedding model into the image so a pod never
+# reaches for the Hub (the seeder backfills with allow_download=False).
+# HF_HOME pins the cache somewhere deterministic and user-independent; the
+# model name mirrors techne's _DEFAULT_FASTEMBED_MODEL
+# (techne/core/embeddings.py) -- if techne changes its default, this line
+# must move with it or the bake warms the wrong cache.
+ENV HF_HOME=/opt/hf-cache
+RUN mkdir -p /opt/hf-cache \
+    && python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2')" \
+    && chmod -R a+rX /opt/hf-cache
+# Build proof for the vectors path: the backend must resolve, and the baked
+# model must load WITHOUT a download -- a cold cache here means the bake
+# above warmed the wrong location, which would otherwise surface only as
+# every pod silently serving FTS-only.
+RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
+RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_get_embedding_model(allow_download=False).embed(['build proof']))"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

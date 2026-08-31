@@ -503,8 +503,17 @@ def main(argv: list[str]) -> int:
     init_db(techne_db).close()
 
     def store_fn(db_path, content, type, tags, source):
+        # provenance rides the same INSERT (techne#553, schema 25's
+        # written_by column): a seeded row is queryably distinct from a
+        # taught or agent-written one.
         return knowledge.store(
-            db_path, content, type=type, tags=tags, confidence="high", source=source
+            db_path,
+            content,
+            type=type,
+            tags=tags,
+            confidence="high",
+            source=source,
+            provenance={"written_by": "seeder"},
         )
 
     def _seed_sourced_entries(db_path):
@@ -610,6 +619,24 @@ def main(argv: list[str]) -> int:
             list_ids_fn=_ids_by_intake_source,
         )
         log.info("intake: ingested=%(ingested)s skipped=%(skipped)s", intake_result)
+
+    # Semantic recall (techne 0.16.1 wave): nothing in techne embeds on
+    # write, ever -- backfill is the ONE place vectors populate, so the
+    # seeder runs it after every sync. allow_download=False because a pod
+    # must never reach for the Hub at boot; the runtime image bakes the
+    # model in. Never load-bearing: a boot with no backend still seeds and
+    # serves FTS-only. Diagnose from the counts, not the exit -- a backfill
+    # that embedded nothing still returns cleanly, and the `orphans_swept`
+    # KEY being absent (not zero) is the sign the sweep never ran.
+    try:
+        from techne.core.search import backfill_vectors
+
+        counts = backfill_vectors(techne_db, allow_download=False)
+        log.info("vectors backfill: %s", counts)
+        if "orphans_swept" not in counts:
+            log.warning("vector sweep did not run -- embedding backend unavailable")
+    except Exception as exc:
+        log.warning("vectors backfill skipped: %s", exc)
     return 0
 
 
