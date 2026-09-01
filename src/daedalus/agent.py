@@ -353,7 +353,29 @@ class Agent:
                     result.agent_text()
                     + "\n\n_(consulted: " + ", ".join(consulted) + ")_"
                 )
+        if result.state is TaskState.COMPLETED:
+            await asyncio.to_thread(self._journal_conversation, result)
         return result
+
+    def _journal_conversation(self, task: Task) -> None:
+        """Append the completed conversation to the journal the learnings
+        summarizer reads (daily-learnings spec). Best-effort by contract:
+        the task already succeeded, and a journal failure must never turn
+        that success into a failure. System tasks never reach here --
+        handle_task dispatches them before the model path."""
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return
+        from daedalus.memory import journal
+
+        try:
+            journal.record(
+                journal.journal_path(Path(db_path)),
+                task.context_id or task.id,
+                [message.model_dump() for message in task.history],
+            )
+        except Exception as exc:
+            self._emit("journal_error", error=str(exc))
 
     async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
         """Route a system-task-marked task to its handler, pre-model. An
