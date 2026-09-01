@@ -11,6 +11,7 @@ from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
 from daedalus.enforcement import Enforcement
+from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
     DELETE_KEY,
     FILENAME_KEY,
@@ -388,6 +389,8 @@ class Agent:
             return await self._handle_knowledge(task)
         if marker == TOOL_MARKER:
             return await self._handle_tool(task)
+        if marker == LEARNINGS_MARKER:
+            return await self._handle_learnings(task)
         self._emit("system_task_refused", marker=marker)
         return task.reply(
             f"Unknown system task {marker!r}. Refusing rather than guessing.",
@@ -431,6 +434,55 @@ class Agent:
             self._revision_fires.add(fire)
             fire.add_done_callback(self._revision_fires.discard)
         return task.reply("Learned. I will remember that.")
+
+    async def _handle_learnings(self, task: Task) -> Task:
+        """Summarize the journal's last day into candidate memory snippets
+        (daily-learnings spec). Proposes only -- nothing is stored here;
+        the room's owner-approval flow rides the teach lane for that.
+        Replies JSON ({"candidates": [...]}) in the task's reply text,
+        which task_to_a2a carries verbatim for the room to parse."""
+        from daedalus.memory import journal, learnings
+
+        if not teach_authorized(task):
+            self._emit("learnings_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Only the room may ask me to summarize my day.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        empty = json.dumps({"candidates": []})
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return task.reply(empty)
+        conversations = await asyncio.to_thread(
+            journal.recent, journal.journal_path(Path(db_path))
+        )
+        if not conversations:
+            return task.reply(empty)
+        on_date = str(task.metadata.get("date", "")) or "today"
+        # "What you already know": probe techne with the day's own text so
+        # the model can skip re-proposing established knowledge.
+        probe = " ".join(
+            message.get("text", "")
+            for conv in conversations
+            for message in conv.get("history", [])
+        )[:500]
+        known = await self.memory.recall(probe, k=10)
+        messages = learnings.build_messages(
+            self.bundle.persona, conversations, known, on_date=on_date
+        )
+        try:
+            response = await self.llm.complete(messages)
+        except Exception as exc:
+            self._emit("learnings_error", error=str(exc))
+            return task.reply(
+                "My summarizer failed today.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        candidates = learnings.parse_candidates(response.text or "")
+        self._emit("learnings_proposed", count=len(candidates))
+        return task.reply(json.dumps({"candidates": candidates}))
 
     async def _handle_knowledge(self, task: Task) -> Task:
         """The operator knowledge lane: a knowledge FILE's edit or delete,
