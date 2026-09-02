@@ -2,6 +2,8 @@
 do not; a journal error never fails the task."""
 
 from daedalus.memory.journal import recent
+from daedalus.memory.learnings import LEARNINGS_MARKER
+from daedalus.memory.teach import SYSTEM_TASK_KEY
 from daedalus.task import Task, TaskState
 from tests.fakes import ScriptedLLM
 from tests.test_agent import make_agent
@@ -60,3 +62,23 @@ async def test_journal_failure_never_fails_the_task(tmp_path, monkeypatch):
     result = await agent.handle_task(Task.from_text("hi"))
 
     assert result.state is TaskState.COMPLETED
+
+
+async def test_system_task_never_journals(tmp_path):
+    """handle_task dispatches a system-task-marked Task before the model
+    path and returns directly from _dispatch_system_task -- it never
+    reaches the post-completion journaling hook, no matter how the system
+    task itself resolves. Here the learnings task is refused outright (no
+    VERIFIED_SUB_KEY), but the invariant under test is the journal, not
+    the refusal."""
+    agent = make_agent(
+        llm=ScriptedLLM("hello"), memory=FakeMemory(tmp_path / "techne.db")
+    )
+    task = Task.from_text("Summarize your conversations.")
+    task.metadata[SYSTEM_TASK_KEY] = LEARNINGS_MARKER
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.FAILED
+    assert recent(tmp_path / "journal.db") == []
+    assert not (tmp_path / "journal.db").exists()

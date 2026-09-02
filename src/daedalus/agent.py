@@ -355,18 +355,30 @@ class Agent:
                     + "\n\n_(consulted: " + ", ".join(consulted) + ")_"
                 )
         if result.state is TaskState.COMPLETED:
-            await asyncio.to_thread(self._journal_conversation, result)
+            try:
+                error = await asyncio.to_thread(self._journal_conversation, result)
+            except Exception as exc:  # belt and braces: journaling never fails the task
+                error = str(exc)
+            if error:
+                self._emit("journal_error", error=error)
         return result
 
-    def _journal_conversation(self, task: Task) -> None:
+    def _journal_conversation(self, task: Task) -> str | None:
         """Append the completed conversation to the journal the learnings
         summarizer reads (daily-learnings spec). Best-effort by contract:
         the task already succeeded, and a journal failure must never turn
         that success into a failure. System tasks never reach here --
-        handle_task dispatches them before the model path."""
+        handle_task dispatches them before the model path.
+
+        Runs under asyncio.to_thread -- i.e. on a worker thread, not the
+        event loop -- so it must never call self._emit itself:
+        EventBus.publish does asyncio.Queue.put_nowait, which is not
+        thread-safe and can raise under asyncio debug mode. The error is
+        returned as a string instead, for the (event-loop-side) call site
+        in handle_task to emit."""
         db_path = getattr(self.memory, "db_path", None)
         if db_path is None:
-            return
+            return None
         from daedalus.memory import journal
 
         try:
@@ -376,7 +388,8 @@ class Agent:
                 [message.model_dump() for message in task.history],
             )
         except Exception as exc:
-            self._emit("journal_error", error=str(exc))
+            return str(exc)
+        return None
 
     async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
         """Route a system-task-marked task to its handler, pre-model. An
@@ -454,9 +467,17 @@ class Agent:
         db_path = getattr(self.memory, "db_path", None)
         if db_path is None:
             return task.reply(empty)
-        conversations = await asyncio.to_thread(
-            journal.recent, journal.journal_path(Path(db_path))
-        )
+        try:
+            conversations = await asyncio.to_thread(
+                journal.recent, journal.journal_path(Path(db_path))
+            )
+        except Exception as exc:
+            self._emit("learnings_error", error=str(exc))
+            return task.reply(
+                "My journal is unreadable today.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
         if not conversations:
             return task.reply(empty)
         on_date = str(task.metadata.get("date", "")) or "today"

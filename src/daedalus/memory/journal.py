@@ -2,8 +2,8 @@
 reads. Checkpoints cannot serve this purpose -- a task's checkpoint row is
 dropped the moment the task completes (agent.py, _loop), and checkpoints
 carry neither timestamps in their payload nor a list API. This journal is
-the opposite trade: append-only rows written AT completion, kept for
-RETENTION_DAYS, pruned on every write.
+the opposite trade: one row per context_id, upserted AT completion, kept
+for RETENTION_DAYS, pruned on every write.
 
 It lives in journal.db beside the techne db on the agent's persistent
 volume (see journal_path), NOT in ~/.cache -- the journal must survive pod
@@ -45,6 +45,10 @@ def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute(_SCHEMA)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_created_at "
+        "ON conversations(created_at)"
+    )
     return conn
 
 
@@ -55,14 +59,22 @@ def record(
     *,
     now: datetime | None = None,
 ) -> None:
-    """Append one completed conversation. `history` is a list of
-    {"role": ..., "text": ...} dicts (Message.model_dump() shape). Rows
+    """Record one completed conversation, upserted per context_id.
+    `history` is a list of {"role": ..., "text": ...} dicts
+    (Message.model_dump() shape). Slack keeps one Task per thread, so
+    Task.history accumulates across turns -- each write's history is a
+    superset of the last one recorded under the same context_id. Without
+    the upsert an N-turn thread would leave N rows, each holding a bigger
+    copy of the same conversation (quadratic growth); the prior row for
+    this context_id is deleted before the new one is inserted, in the same
+    transaction, so exactly one row per context_id ever survives. Rows
     older than RETENTION_DAYS are pruned in the same write, so the journal
     is self-limiting without any separate sweeper."""
     moment = now or datetime.now(UTC)
     cutoff = (moment - timedelta(days=RETENTION_DAYS)).isoformat()
     conn = _connect(Path(path))
     try:
+        conn.execute("DELETE FROM conversations WHERE context_id = ?", (context_id,))
         conn.execute(
             "INSERT INTO conversations (context_id, history, created_at) "
             "VALUES (?, ?, ?)",

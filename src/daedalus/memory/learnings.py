@@ -26,6 +26,10 @@ KINDS = ("fact", "procedure")
 # first when over budget -- the freshest context is the most valuable.
 TRANSCRIPT_BUDGET_CHARS = 60_000
 
+# NOTE: the instructions body below must never contain the exact phrase
+# "already know" -- test_build_messages_includes_known_facts_block_only_
+# when_present distinguishes the known-facts block's header ("## What you
+# already know") from these instructions by that exact substring.
 _INSTRUCTIONS = """\
 Review your conversations from the last day, shown below. Propose up to
 {max_candidates} candidate memory snippets: durable facts or procedures you
@@ -83,7 +87,9 @@ def build_messages(
 def _render_transcript(conversations: list[dict]) -> str:
     """Newest-preserving render: sections are gathered newest-first until
     the budget is spent, then emitted oldest-first so the model reads in
-    chronological order. At least one section always survives."""
+    chronological order. At least one section always survives, but the
+    budget is a real cap -- even the newest section is clipped to whatever
+    of TRANSCRIPT_BUDGET_CHARS remains rather than appended unmeasured."""
     sections: list[str] = []
     spent = 0
     for conv in reversed(conversations):
@@ -91,11 +97,26 @@ def _render_transcript(conversations: list[dict]) -> str:
         for message in conv.get("history", []):
             lines.append(f"{message.get('role', '?')}: {message.get('text', '')}")
         section = "\n".join(lines)
-        if sections and spent + len(section) > TRANSCRIPT_BUDGET_CHARS:
+        remaining = TRANSCRIPT_BUDGET_CHARS - spent
+        if remaining <= 0:
             break
+        if len(section) > remaining:
+            if sections:
+                break
+            section = section[:remaining]
         sections.append(section)
         spent += len(section)
     return "\n\n".join(reversed(sections))
+
+
+def _string_field(item: dict, key: str) -> str:
+    """A candidate field, accepted only when the model actually gave a
+    string. `str(item.get(key, ""))` would turn a JSON null into the text
+    "None" and a list into "['a', 'b']" -- both silently pass through as
+    if they were real content. A non-string value reads as missing
+    instead, same as the field being absent."""
+    value = item.get(key, "")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def parse_candidates(text: str) -> list[dict]:
@@ -118,10 +139,10 @@ def parse_candidates(text: str) -> list[dict]:
     for item in raw[:MAX_CANDIDATES]:
         if not isinstance(item, dict):
             continue
-        content = str(item.get("content", "")).strip()
-        kind = str(item.get("kind", "")).strip()
-        source = str(item.get("source", "")).strip()
-        evidence = str(item.get("evidence", "")).strip()
+        content = _string_field(item, "content")
+        kind = _string_field(item, "kind")
+        source = _string_field(item, "source")
+        evidence = _string_field(item, "evidence")
         if not content or kind not in KINDS or not source:
             continue
         candidates.append(

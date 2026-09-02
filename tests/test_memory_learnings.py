@@ -6,6 +6,8 @@ import json
 from daedalus.memory.learnings import (
     CONTENT_MAX_CHARS,
     MAX_CANDIDATES,
+    TRANSCRIPT_BUDGET_CHARS,
+    _render_transcript,
     build_messages,
     parse_candidates,
 )
@@ -52,6 +54,21 @@ def test_build_messages_budget_drops_oldest_first():
     assert "c0" not in body  # oldest dropped
 
 
+def test_render_transcript_caps_even_the_lone_newest_section():
+    # A single conversation bigger than the whole budget used to be
+    # appended unmeasured (the `sections and ...` guard exempted the
+    # first/newest section from the cap entirely). The budget must be a
+    # real cap: the newest conversation is always included, but never
+    # longer than TRANSCRIPT_BUDGET_CHARS.
+    huge = "x" * (TRANSCRIPT_BUDGET_CHARS + 10_000)
+    convs = [{"context_id": "only", "history": [{"role": "user", "text": huge}]}]
+
+    transcript = _render_transcript(convs)
+
+    assert "only" in transcript
+    assert len(transcript) <= TRANSCRIPT_BUDGET_CHARS
+
+
 def test_parse_candidates_valid_json():
     reply = json.dumps(
         {
@@ -89,6 +106,7 @@ def test_parse_candidates_drops_invalid_and_clips_long():
                 {"content": "", "kind": "fact", "source": "s"},  # empty content
                 {"content": "c", "kind": "opinion", "source": "s"},  # bad kind
                 {"content": "c", "kind": "fact", "source": ""},  # no source
+                {"content": None, "kind": "fact", "source": "s"},  # non-string
                 {"content": "y" * 999, "kind": "fact", "source": "s"},  # clipped
             ]
         }

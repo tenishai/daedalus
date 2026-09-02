@@ -60,3 +60,24 @@ def test_record_prunes_past_retention(tmp_path):
 
 def test_recent_missing_file_reads_as_empty(tmp_path):
     assert recent(tmp_path / "journal.db", now=NOW) == []
+
+
+def test_record_upserts_per_context_id(tmp_path):
+    # Slack keeps one Task per thread, so Task.history accumulates across
+    # turns -- an N-turn thread recording the same context_id N times must
+    # leave exactly one row (the latest history), not N growing copies.
+    path = tmp_path / "journal.db"
+    short = [{"role": "user", "text": "turn one"}]
+    long = [
+        {"role": "user", "text": "turn one"},
+        {"role": "agent", "text": "ack"},
+        {"role": "user", "text": "turn two"},
+    ]
+    record(path, "slack:C1:171", short, now=NOW - timedelta(minutes=5))
+    record(path, "slack:C1:171", long, now=NOW)
+
+    rows = recent(path, now=NOW)
+
+    assert len(rows) == 1
+    assert rows[0]["context_id"] == "slack:C1:171"
+    assert rows[0]["history"] == long

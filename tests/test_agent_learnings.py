@@ -82,3 +82,24 @@ async def test_model_garbage_reads_as_empty_candidates(tmp_path):
 
     assert result.state is TaskState.COMPLETED
     assert json.loads(result.agent_text()) == {"candidates": []}
+
+
+async def test_unreadable_journal_fails_gracefully(tmp_path, monkeypatch):
+    """A corrupt journal file (sqlite3.DatabaseError) or a read-only volume
+    (OperationalError) must not propagate out of handle_task as an
+    unhandled exception -- it is a task outcome like any other tool
+    failure."""
+    db = tmp_path / "techne.db"
+    agent = make_agent(llm=ScriptedLLM(GOOD_REPLY), memory=FakeMemory(db))
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    import daedalus.memory.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "recent", boom)
+    result = await agent.handle_task(_learnings_task())
+
+    assert result.state is TaskState.FAILED
+    assert result.agent_text() == "My journal is unreadable today."
+    assert agent.llm.calls == []
