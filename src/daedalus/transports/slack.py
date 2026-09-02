@@ -24,7 +24,7 @@ import time
 from collections import OrderedDict
 
 from daedalus.protocols import DenyAll, Handler
-from daedalus.task import Message, ReasonCode, Task, TaskState
+from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
 
 _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
 _SEEN_CAP = 500
@@ -32,6 +32,12 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
+
+# Vision (wave 3): bounds for inbound Slack image attachments. Size is
+# checked against the event's own file metadata BEFORE any download.
+_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_IMAGE_CAP = 4
+_IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
 def to_mrkdwn(text: str) -> str:
@@ -181,6 +187,20 @@ class SlackApi:
         message = response.get("message", {}) if hasattr(response, "get") else {}
         return [r.get("name", "") for r in message.get("reactions", [])]
 
+    async def download_file(self, url: str) -> bytes:
+        """Fetch a Slack file's bytes. files.url_private requires the bot
+        token as a bearer header -- slack_sdk has no download helper, so
+        this is a raw authenticated GET (httpx, same as every other
+        outbound integration in this repo)."""
+        import httpx
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                url, headers={"Authorization": f"Bearer {self._web.token}"}
+            )
+            response.raise_for_status()
+            return response.content
+
 
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
@@ -270,6 +290,47 @@ class SlackTransport:
         finally:
             await socket.disconnect()
 
+    async def _gather_images(self, files: list[dict]) -> tuple[list[ImagePart], list[str]]:
+        """Filter, bound, and fetch the event's image attachments. Every
+        skip is a note the sender sees appended to their message text --
+        bounds are announced, never silent (wave 3 spec)."""
+        import base64
+
+        images: list[ImagePart] = []
+        notes: list[str] = []
+        skipped_over_cap = 0
+        for file in files:
+            name = file.get("name") or "file"
+            if file.get("mimetype") not in _IMAGE_MIMETYPES:
+                notes.append(f"(attached file {name} skipped -- not an image)")
+                continue
+            if (file.get("size") or 0) > _IMAGE_MAX_BYTES:
+                notes.append(f"(image {name} skipped -- exceeds 20 MB limit)")
+                continue
+            if len(images) >= _IMAGE_CAP:
+                skipped_over_cap += 1
+                continue
+            url = file.get("url_private")
+            if not url:
+                notes.append(f"(image {name} could not be fetched)")
+                continue
+            try:
+                raw = await self._api.download_file(url)
+            except Exception:
+                notes.append(f"(image {name} could not be fetched)")
+                continue
+            images.append(
+                ImagePart(
+                    data=base64.b64encode(raw).decode("ascii"),
+                    media_type=file["mimetype"],
+                )
+            )
+        if skipped_over_cap:
+            notes.append(
+                f"({skipped_over_cap} additional image(s) skipped -- max {_IMAGE_CAP} per message)"
+            )
+        return images, notes
+
     def _wire_approver(self, handler: Handler) -> None:
         """Humans are reachable here, so upgrade a fail-closed DenyAll default
         to reaction approvals — an explicitly chosen approver is respected."""
@@ -292,15 +353,21 @@ class SlackTransport:
             self._seen.popitem(last=False)
 
         text = _MENTION.sub("", event.get("text") or "").strip()
-        if not text:
+        images, notes = await self._gather_images(event.get("files") or [])
+        if notes:
+            text = "\n".join(filter(None, [text, *notes]))
+        if not text and not images:
             return
+        if not text:
+            # An image with no words is still an ask.
+            text = "(image)"
 
         thread = event.get("thread_ts") or ts
         task = self._threads.get(thread)
         if task is None:
             task = Task(context_id=f"slack:{self.channel}:{thread}")
             self._threads[thread] = task
-        task.history.append(Message(role="user", text=text))
+        task.history.append(Message(role="user", text=text, images=images or None))
         task.state = TaskState.SUBMITTED
 
         approver = getattr(handler, "approver", None)

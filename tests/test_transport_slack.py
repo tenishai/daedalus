@@ -43,6 +43,9 @@ class FakeApi:
         self.unreacts: list[tuple[str, str]] = []
         self._reactions_script = list(reactions_script or [])
         self._ts = 0
+        self.downloaded: list[str] = []
+        self.downloads_return: bytes = b""
+        self.downloads_raise: Exception | None = None
 
     async def post(self, channel, text, thread_ts=None):
         self.posts.append((channel, text, thread_ts))
@@ -61,12 +64,20 @@ class FakeApi:
     async def reactions(self, channel, ts):
         return self._reactions_script.pop(0) if self._reactions_script else []
 
+    async def download_file(self, url):
+        self.downloaded.append(url)
+        if self.downloads_raise is not None:
+            raise self.downloads_raise
+        return self.downloads_return
+
 
 class EchoHandler:
     def __init__(self):
         self.approver = DenyAll()
+        self.tasks: list[Task] = []
 
     async def handle_task(self, task: Task) -> Task:
+        self.tasks.append(task)
         return task.reply(f"echo: {task.user_text()}")
 
 
@@ -269,6 +280,93 @@ async def test_tool_blocked_task_gets_x_reaction_and_reply_text():
     await transport.handle_event(event("deploy", ts="200.0"), handler)
     assert ("200.0", "x") in api.reacts
     assert _reply_text(api) == "A rule stopped this task: blocked by z.py: nope."
+
+
+def _file(name="pic.png", mimetype="image/png", size=1024, url="https://files.example/pic"):
+    return {"name": name, "mimetype": mimetype, "size": size, "url_private": url}
+
+
+async def test_image_attachment_reaches_the_task_as_base64():
+    transport, api, handler = make()
+    api.downloads_return = b"hello"
+    await transport.handle_event(event("what is this?", ts="200.1", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.text == "what is this?"
+    assert message.images is not None
+    assert message.images[0].media_type == "image/png"
+    assert message.images[0].data == "aGVsbG8="  # base64("hello")
+    assert api.downloaded == ["https://files.example/pic"]
+
+
+async def test_image_only_message_still_reaches_the_agent():
+    transport, api, handler = make()
+    api.downloads_return = b"x"
+    await transport.handle_event(event("", ts="200.2", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.text == "(image)"
+    assert message.images is not None
+
+
+async def test_non_image_file_is_skipped_with_a_note():
+    transport, api, handler = make()
+    pdf = _file(name="report.pdf", mimetype="application/pdf")
+    await transport.handle_event(
+        event("see attached", ts="200.3", files=[pdf]),
+        handler,
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(attached file report.pdf skipped -- not an image)" in message.text
+    assert api.downloaded == []
+
+
+async def test_oversized_image_is_skipped_before_download():
+    transport, api, handler = make()
+    await transport.handle_event(
+        event("big one", ts="200.4", files=[_file(size=21 * 1024 * 1024)]), handler
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image pic.png skipped -- exceeds 20 MB limit)" in message.text
+    assert api.downloaded == []
+
+
+async def test_fifth_image_is_dropped_with_a_count_note():
+    transport, api, handler = make()
+    api.downloads_return = b"x"
+    files = [_file(name=f"p{i}.png", url=f"https://files.example/p{i}") for i in range(5)]
+    await transport.handle_event(event("album", ts="200.5", files=files), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is not None and len(message.images) == 4
+    assert "(1 additional image(s) skipped -- max 4 per message)" in message.text
+
+
+async def test_download_failure_skips_that_image_with_a_note():
+    transport, api, handler = make()
+    api.downloads_raise = RuntimeError("403")
+    await transport.handle_event(event("broken", ts="200.6", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image pic.png could not be fetched)" in message.text
+
+
+async def test_message_with_neither_text_nor_images_is_ignored():
+    transport, api, handler = make()
+    await transport.handle_event(
+        event("", ts="200.7", files=[_file(name="notes.txt", mimetype="text/plain")]), handler
+    )
+    # A skipped non-image with no text is still a contentless message... except
+    # the skip NOTE is content the sender should see. Ruling: notes alone DO
+    # form a message (the agent explains what it could not read), so the task
+    # exists and its text is the note.
+    message = handler.tasks[-1].history[0]
+    assert "(attached file notes.txt skipped -- not an image)" in message.text
 
 
 def test_serve_without_tokens_is_a_clean_error():
