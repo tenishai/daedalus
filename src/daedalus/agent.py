@@ -382,10 +382,22 @@ class Agent:
         from daedalus.memory import journal
 
         try:
+            entries = []
+            for message in task.history:
+                # The journal is the learnings summarizer's TEXT source: base64
+                # image bytes would balloon storage (megabytes per row) and mean
+                # nothing to the summarizer. Strip them; a marker keeps the fact
+                # that images were shared visible to the day's summary.
+                entry = message.model_dump(exclude={"images"})
+                if message.images:
+                    entry["text"] = (
+                        f"{entry['text']} [shared {len(message.images)} image(s)]".strip()
+                    )
+                entries.append(entry)
             journal.record(
                 journal.journal_path(Path(db_path)),
                 task.context_id or task.id,
-                [message.model_dump() for message in task.history],
+                entries,
             )
         except Exception as exc:
             return str(exc)
@@ -759,7 +771,23 @@ class Agent:
         messages = [{"role": "system", "content": system}]
         for message in task.history:
             role = "assistant" if message.role == "agent" else "user"
-            messages.append({"role": role, "content": message.text})
+            if message.images:
+                # Vision (wave 3): OpenAI-style content parts -- litellm
+                # translates per provider. Text part first, then every
+                # image as a base64 data URI.
+                parts: list[dict] = [{"type": "text", "text": message.text}]
+                for image in message.images:
+                    parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image.media_type};base64,{image.data}"
+                            },
+                        }
+                    )
+                messages.append({"role": role, "content": parts})
+            else:
+                messages.append({"role": role, "content": message.text})
         return messages
 
     @staticmethod

@@ -4,7 +4,7 @@ do not; a journal error never fails the task."""
 from daedalus.memory.journal import recent
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import SYSTEM_TASK_KEY
-from daedalus.task import Task, TaskState
+from daedalus.task import ImagePart, Task, TaskState
 from tests.fakes import ScriptedLLM
 from tests.test_agent import make_agent
 
@@ -82,3 +82,20 @@ async def test_system_task_never_journals(tmp_path):
     assert result.state is TaskState.FAILED
     assert recent(tmp_path / "journal.db") == []
     assert not (tmp_path / "journal.db").exists()
+
+
+async def test_journal_strips_image_bytes_and_leaves_a_marker(tmp_path):
+    agent = make_agent(
+        llm=ScriptedLLM("nice photo"), memory=FakeMemory(tmp_path / "techne.db")
+    )
+    task = Task.from_text("look at this")
+    task.history[0].images = [ImagePart(data="QUFB" * 1000, media_type="image/png")]
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.COMPLETED
+    rows = recent(tmp_path / "journal.db")
+    entry = rows[0]["history"][0]
+    assert "images" not in entry
+    assert "QUFB" not in str(rows[0]["history"])
+    assert entry["text"] == "look at this [shared 1 image(s)]"
