@@ -46,6 +46,22 @@ def _munge(name: str) -> str:
     return name.replace(".", "__")
 
 
+def _strip_image_parts(messages: list[dict]) -> list[dict]:
+    """Checkpoint copies of the LLM messages drop image data URIs -- replay
+    fidelity for images is not a promise this system makes (same trade the
+    journal already made), and a 4-image turn would otherwise re-serialize
+    ~100 MB per step."""
+    stripped = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            text = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
+            stripped.append({**message, "content": text})
+        else:
+            stripped.append(message)
+    return stripped
+
+
 _SALVAGE_CAP = 4
 
 
@@ -642,7 +658,11 @@ class Agent:
         last_attempt = ""
         for _ in range(self.bundle.spec.tools.max_steps):
             await self.checkpoints.save(
-                task.id, {"task": task.model_dump(), "messages": messages}
+                task.id,
+                {
+                    "task": task.model_dump(exclude={"history": {"__all__": {"images"}}}),
+                    "messages": _strip_image_parts(messages),
+                },
             )
             if budget.remaining() == 0:
                 # checkpoint intentionally kept: re-fund and resume()
