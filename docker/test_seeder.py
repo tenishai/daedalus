@@ -842,7 +842,7 @@ class FakeKnowledgeModule:
         self.next_id = 1
         self.entries = {}  # id -> dict(content, type, tags, confidence, source)
 
-    def store(self, db_path, content, type, tags, confidence, source):
+    def store(self, db_path, content, type, tags, confidence, source, provenance=None):
         i = self.next_id
         self.next_id += 1
         self.entries[i] = {
@@ -852,6 +852,7 @@ class FakeKnowledgeModule:
             "tags": tags,
             "confidence": confidence,
             "source": source,
+            "provenance": provenance,
         }
         return i
 
