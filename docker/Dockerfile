@@ -39,6 +39,11 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,sla
 RUN python -c "import daedalus, techne; from techne.core.database import connect, like_escape; from techne.core import knowledge"
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
+# Version floor: techne arrives as a named build context, so nothing else
+# pins it. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
+# drop every lexical hit -- the exact failure use_vectors=True was gated
+# on. A 0.16.0 checkout passes every other proof here and ships that bug.
+RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 16, 1), f'techne {techne.__version__} < 0.16.1: the #827 fusion bug ships with use_vectors=True'"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
