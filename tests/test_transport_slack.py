@@ -134,7 +134,7 @@ async def test_thread_continuity_one_task_per_thread():
     transport, api, handler = make()
     await transport.handle_event(event("first", ts="50.0"), handler)
     await transport.handle_event(event("second", ts="51.0", thread="50.0"), handler)
-    task = transport._threads["50.0"]
+    task = transport._threads[(CH, "50.0")]
     assert [m.text for m in task.history] == ["first", "echo: first", "second", "echo: second"]
     assert len(transport._threads) == 1
 
@@ -422,11 +422,11 @@ async def test_failed_turn_is_rolled_back_so_the_thread_never_bricks():
     handler = RaisesOnce()
     transport, api, _ = make(handler=handler)
     await transport.handle_event(event("bad image", ts="300.1"), handler)
-    task = transport._threads["300.1"]
+    task = transport._threads[(CH, "300.1")]
     assert task.history == []
 
     await transport.handle_event(event("plain text", ts="300.2", thread="300.1"), handler)
-    task = transport._threads["300.1"]
+    task = transport._threads[(CH, "300.1")]
     assert len(task.history) == 1
     assert task.history[0].text == "plain text"
 
@@ -811,3 +811,99 @@ async def test_gated_message_is_not_marked_seen():
         handler,
     )
     assert len(api.posts) == 1
+
+
+# --- one transport, many channels (2026-09-04, the second-channel outage) -----
+
+CH2 = "C0SECOND"
+
+
+def make_multi(api=None, handler=None):
+    api = api or FakeApi()
+    transport = SlackTransport(
+        CH, channels=[CH, CH2], bot_token="xoxb", app_token="xapp", api=api
+    )
+    transport.user_id = "UBOT"
+    return transport, api, handler or EchoHandler()
+
+
+async def test_second_channel_mention_is_answered_in_its_own_channel():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> audit please", ts="20.1", channel=CH2, channel_type="channel"),
+        handler,
+    )
+    # The placeholder, the reply, and both reactions all landed in CH2 --
+    # never the primary channel.
+    assert api.posts[0][0] == CH2
+    assert api.updates[-1][0] == CH2
+    assert "echo:" in api.updates[-1][2]
+
+
+async def test_unlisted_channel_is_still_dropped():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="21.1", channel="C0EVIL", channel_type="channel"),
+        handler,
+    )
+    assert not api.posts and not api.reacts
+
+
+async def test_dm_passes_without_being_listed():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("hello", ts="22.1", channel="D0DM", channel_type="im"), handler
+    )
+    assert api.posts[0][0] == "D0DM"
+    assert api.updates[-1][0] == "D0DM"
+
+
+async def test_same_thread_ts_in_two_channels_stay_separate_tasks():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> one", ts="30.5", channel=CH, channel_type="channel"), handler
+    )
+    await transport.handle_event(
+        event("<@UBOT> two", ts="30.5", channel=CH2, channel_type="channel"), handler
+    )
+    # Same ts, different channels: two tasks, two replies, no dedupe collision.
+    assert len(api.updates) == 2
+    assert {u[0] for u in api.updates} == {CH, CH2}
+    assert len(transport._threads) == 2
+
+
+def test_channels_default_and_dedupe():
+    lone = SlackTransport("C1", bot_token="x", app_token="y", api=FakeApi())
+    assert lone.channels == ["C1"]
+    multi = SlackTransport(
+        "C1", channels=["C1", "C1", "C2"], bot_token="x", app_token="y", api=FakeApi()
+    )
+    assert multi.channels == ["C1", "C2"]
+
+
+def test_runner_folds_every_slack_block_into_one_transport(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "transports:\n"
+        "- kind: slack\n  channel: C0MAIN\n"
+        "- kind: slack\n  channel: C0SECOND\n"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(
+        Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([])
+    )
+    transports = agent.transports()
+    slack = [t for t in transports if isinstance(t, SlackTransport)]
+    assert len(slack) == 1
+    assert slack[0].channels == ["C0MAIN", "C0SECOND"]
+    assert slack[0].channel == "C0MAIN"  # primary: approver + escalation home

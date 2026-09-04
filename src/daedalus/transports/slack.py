@@ -281,18 +281,27 @@ class SlackTransport:
         self,
         channel: str,
         *,
+        channels: list[str] | None = None,
         bot_token: str | None = None,
         app_token: str | None = None,
         escalation_route: str | None = None,
         api: SlackApi | None = None,
     ):
+        # `channel` is the PRIMARY channel (escalation posts land there);
+        # `channels` is the full allowlist this one transport serves. One
+        # transport, one socket, many channels -- Socket Mode load-balances
+        # each event to exactly ONE open connection per app, so a second
+        # transport on the same app token is not a second channel, it is a
+        # coin flip that silently loses half the events (2026-09-04, found
+        # live the day a second channel was added).
         self.channel = channel
+        self.channels = list(dict.fromkeys(channels or [channel]))
         self.bot_token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
         self.escalation_route = escalation_route
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
-        self._threads: dict[str, Task] = {}
+        self._threads: dict[tuple, Task] = {}  # (channel, thread_ts) -> Task
         # Own Slack user id (auth.test at serve time). None = unknown: the
         # tagged-only gate then trusts only app_mention delivery in channels.
         self.user_id: str | None = None
@@ -333,7 +342,7 @@ class SlackTransport:
 
         socket.socket_mode_request_listeners.append(listener)
         await socket.connect()
-        print(f"(slack listening in {self.channel})")
+        print(f"(slack listening in {', '.join(self.channels)})", flush=True)
         try:
             await asyncio.Event().wait()
         finally:
@@ -406,7 +415,14 @@ class SlackTransport:
             return
         if event.get("bot_id") or event.get("subtype"):
             return
-        if event.get("channel") != self.channel:
+        if (
+            event.get("channel") not in self.channels
+            and event.get("channel_type") not in {"im", "mpim"}
+        ):
+            # Not one of our channels. DMs and group DMs pass regardless --
+            # they are full-delivery by design (the tagged-only ruling was
+            # about channels), and Slack only delivers them to apps the
+            # user deliberately opened a conversation with.
             return
         if self._not_for_us_in_channel(event):
             # Tagged-only in channels: a message event that does not mention
@@ -429,12 +445,17 @@ class SlackTransport:
             # filtered out (every filtered attachment leaves a note, so
             # this branch is unreachable once files is non-empty).
             return
+        # Everything below answers where the event happened, never the
+        # primary channel: one transport serves every allowed channel
+        # (plus DMs), so the event's own channel is the only correct
+        # destination for reactions, the placeholder, and the reply.
+        channel = event.get("channel")
         # React immediately -- before any (possibly slow, sequential) image
         # downloads below -- so the sender sees SOMETHING within
         # milliseconds instead of after every attachment finishes fetching
         # (finding: a 4-image message left the sender staring at silence
         # for as long as the downloads took).
-        await self._api.react(self.channel, ts, "eyes")
+        await self._api.react(channel, ts, "eyes")
         images, notes = await self._gather_images(files)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
@@ -443,10 +464,10 @@ class SlackTransport:
             text = "(image)"
 
         thread = event.get("thread_ts") or ts
-        task = self._threads.get(thread)
+        task = self._threads.get((channel, thread))
         if task is None:
-            task = Task(context_id=f"slack:{self.channel}:{thread}")
-            self._threads[thread] = task
+            task = Task(context_id=f"slack:{channel}:{thread}")
+            self._threads[(channel, thread)] = task
         # Snapshotted so a handler exception below can roll the appended
         # turn back out -- otherwise a rejected/failing message (its image
         # included) stays in history forever and every later turn re-sends
@@ -457,7 +478,11 @@ class SlackTransport:
 
         approver = getattr(handler, "approver", None)
         if isinstance(approver, SlackReactionApprover):
+            # Point the approver at this event's thread AND channel (the
+            # prompt must appear where the human is). Same last-writer-wins
+            # behavior under concurrent tasks as thread_ts always had.
             approver.thread_ts = thread
+            approver.channel = channel
 
         # Thinking state (2026-08-27 operator feedback): a visible in-thread
         # placeholder the moment work starts, updated IN PLACE into the
@@ -466,33 +491,33 @@ class SlackTransport:
         # text. Placeholder failure is never load-bearing: None falls back
         # to exactly the old post-at-the-end behavior.
         try:
-            thinking_ts = await self._api.post(self.channel, _THINKING, thread_ts=thread)
+            thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
         except Exception:
             thinking_ts = None
         try:
             task = await handler.handle_task(task)
-            self._threads[thread] = task
+            self._threads[(channel, thread)] = task
             ok = task.state is TaskState.COMPLETED
             reply = task.agent_text() or "(no reply)"
         except Exception as exc:
             del task.history[history_len:]
             ok = False
             reply = f"error: {exc}"
-        await self._api.unreact(self.channel, ts, "eyes")
-        await self._api.react(self.channel, ts, "white_check_mark" if ok else "x")
+        await self._api.unreact(channel, ts, "eyes")
+        await self._api.react(channel, ts, "white_check_mark" if ok else "x")
         rendered = to_mrkdwn(reply)
         if thinking_ts is not None:
             try:
-                await self._api.update(self.channel, thinking_ts, rendered, thread_ts=thread)
+                await self._api.update(channel, thinking_ts, rendered, thread_ts=thread)
             except Exception:
                 # chat.update can fail independently (deleted placeholder,
                 # message too old): the reply must still land somewhere.
-                await self._api.post(self.channel, rendered, thread_ts=thread)
+                await self._api.post(channel, rendered, thread_ts=thread)
         else:
-            await self._api.post(self.channel, rendered, thread_ts=thread)
+            await self._api.post(channel, rendered, thread_ts=thread)
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
-            await self._escalate(task, thread)
+            await self._escalate(task, channel)
 
     def _not_for_us_in_channel(self, event: dict) -> bool:
         """The tagged-only rule, enforced runtime-side. True = drop.
@@ -516,15 +541,15 @@ class SlackTransport:
         mentioned = _MENTION_ID.findall(event.get("text") or "")
         return self.user_id is None or self.user_id not in mentioned
 
-    async def _escalate(self, task: Task, thread: str) -> None:
+    async def _escalate(self, task: Task, channel: str) -> None:
         route = self.escalation_route or ""
         if not route.startswith("slack:"):
             return
         target = route.removeprefix("slack:")
-        if target == self.channel:
+        if target == channel:
             return  # already visible in-thread
         await self._api.post(
             target,
             f":rotating_light: escalation from task `{task.id}` "
-            f"in <#{self.channel}>: {task.agent_text()}",
+            f"in <#{channel}>: {task.agent_text()}",
         )
