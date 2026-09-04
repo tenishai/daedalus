@@ -277,6 +277,32 @@ class Agent:
                 )
             )
 
+        # The slack-read sidecar (2026-09-04): same stacking rule. Reach is
+        # the bundle's channel allowlist; auth is the pod's own bot token.
+        if spec.slack_read.channels:
+            from daedalus.tools.slack_read import SlackReadToolProvider
+
+            providers.append(
+                SlackReadToolProvider(
+                    spec.slack_read.channels,
+                    token_env=spec.slack_read.token_env,
+                    scan_limit=spec.slack_read.scan_limit,
+                )
+            )
+
+        # The jira sidecar (room broker's issue-tracker read lane,
+        # 2026-09-04): the github custody model applied to reads.
+        if spec.jira.broker_url:
+            from daedalus.tools.jira import JiraToolProvider
+
+            providers.append(
+                JiraToolProvider(
+                    spec.jira.broker_url,
+                    token_env=spec.jira.token_env,
+                    self_name=spec.jira.self,
+                )
+            )
+
         if not providers:
             return NoTools()
         if len(providers) == 1:
