@@ -73,6 +73,48 @@
       "title": "CeilingSpec",
       "type": "object"
     },
+    "CloudTrailSpec": {
+      "additionalProperties": true,
+      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`. Absent role_arn = the block is off.",
+      "properties": {
+        "role_arn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role Arn"
+        },
+        "event_data_store": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Data Store"
+        },
+        "region": {
+          "default": "us-east-2",
+          "title": "Region",
+          "type": "string"
+        },
+        "group_prefix": {
+          "default": "engineering_",
+          "title": "Group Prefix",
+          "type": "string"
+        }
+      },
+      "title": "CloudTrailSpec",
+      "type": "object"
+    },
     "ColleaguesSpec": {
       "additionalProperties": true,
       "properties": {
@@ -347,6 +389,9 @@
         },
         "github": {
           "$ref": "#/$defs/GitHubSpec"
+        },
+        "cloudtrail": {
+          "$ref": "#/$defs/CloudTrailSpec"
         },
         "builtin": {
           "additionalProperties": {

@@ -118,12 +118,26 @@ class GitHubSpec(_WarnExtra):
     self: str | None = None  # this agent's own name, for the broker route
 
 
+class CloudTrailSpec(_WarnExtra):
+    """A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the
+    pod's own workload identity federates into an AWS role scoped to one
+    CloudTrail Lake event data store -- no stored credential anywhere, and
+    the scoping lives in AWS IAM, not here. Stacks alongside the primary
+    provider exactly like `github`. Absent role_arn = the block is off."""
+
+    role_arn: str | None = None  # AWS role trusting this workload's identity
+    event_data_store: str | None = None  # Lake event data store id
+    region: str = "us-east-2"  # where the lake lives
+    group_prefix: str = "engineering_"  # directory-group filter for the query
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
     liminal: LiminalSpec = Field(default_factory=LiminalSpec)
     colleagues: ColleaguesSpec = Field(default_factory=ColleaguesSpec)
     github: GitHubSpec = Field(default_factory=GitHubSpec)
+    cloudtrail: CloudTrailSpec = Field(default_factory=CloudTrailSpec)
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10

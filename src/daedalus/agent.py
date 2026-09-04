@@ -277,6 +277,21 @@ class Agent:
                 )
             )
 
+        # The cloudtrail sidecar (cloud-access integration path, 2026-09-03):
+        # same stacking rule as github -- a sidecar block, not a provider
+        # value. Identity is the pod's own; there is no token to wire.
+        if spec.cloudtrail.role_arn and spec.cloudtrail.event_data_store:
+            from daedalus.tools.cloudtrail import CloudTrailToolProvider
+
+            providers.append(
+                CloudTrailToolProvider(
+                    spec.cloudtrail.role_arn,
+                    spec.cloudtrail.event_data_store,
+                    region=spec.cloudtrail.region,
+                    group_prefix=spec.cloudtrail.group_prefix,
+                )
+            )
+
         if not providers:
             return NoTools()
         if len(providers) == 1:
