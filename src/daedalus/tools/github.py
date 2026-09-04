@@ -56,6 +56,8 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # Read-tool bounds. Each one is a ceiling the tool states out loud when it
 # clips, never a silent cut.
 _LIST_PRS_CAP = 50
+_SEARCH_PRS_DEFAULT = 5
+_SEARCH_PRS_CAP = 10
 _LIST_PRS_DEFAULT = 20
 _RELEASES_CAP = 20
 _RELEASES_DEFAULT = 10
@@ -263,6 +265,40 @@ class GitHubToolProvider:
                 },
             },
             {
+                "name": "github.search_prs",
+                "description": (
+                    "Search a repository's pull requests for an exact "
+                    "identifier (a ticket key, group name, or role id) and "
+                    "get back only the matching PRs -- far cheaper than "
+                    "listing pages of PRs when you already hold the "
+                    "identifier. Read-only."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "repository": {
+                            "type": "string",
+                            "description": 'The repository, as "owner/name"',
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "The identifier to search PR titles and "
+                                "bodies for, verbatim"
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                f"At most this many (default "
+                                f"{_SEARCH_PRS_DEFAULT}, cap {_SEARCH_PRS_CAP})"
+                            ),
+                        },
+                    },
+                    "required": ["repository", "text"],
+                },
+            },
+            {
                 "name": "github.get_pr",
                 "description": (
                     "One pull request in detail: title, author, state, "
@@ -359,6 +395,12 @@ class GitHubToolProvider:
                 payload.get("repository", ""),
                 payload.get("state", "open") or "open",
                 payload.get("base", "") or "",
+                payload.get("limit"),
+            )
+        if name == "github.search_prs":
+            return await self._search_prs(
+                payload.get("repository", ""),
+                payload.get("text", "") or "",
                 payload.get("limit"),
             )
         if name == "github.get_pr":
@@ -671,6 +713,52 @@ class GitHubToolProvider:
             return "\n".join(lines)
         except Exception as exc:
             return f"Listing PRs failed partway: {exc}"
+
+    async def _search_prs(self, repository: str, text: str, limit) -> str:
+        if not repository or not text or len(text.strip()) < 3:
+            return "I need a repository and at least a few characters to search for."
+        count = min(int(limit or _SEARCH_PRS_DEFAULT), _SEARCH_PRS_CAP)
+        token, error = await self._scoped(repository)
+        if error is not None:
+            return error
+        # The search API answers with ONLY the matching PRs -- the whole
+        # point over list_prs when the caller already holds an exact
+        # identifier. Quotes are stripped from the term so it cannot
+        # reshape the query; repo and type are pinned here.
+        term = text.replace('"', " ").strip()
+        query = f'repo:{repository} type:pr "{term}"'
+        try:
+            response = await self._github(
+                token,
+                "GET",
+                "/search/issues",
+                params={"q": query, "per_page": count},
+            )
+            if response.status_code != 200:
+                return (
+                    f"GitHub would not search PRs on {repository} "
+                    f"(HTTP {response.status_code})."
+                )
+            body = response.json()
+            items = body.get("items") or []
+            if not items:
+                return f"No pull requests on {repository} mention {term!r}."
+            lines = []
+            for item in items[:count]:
+                pull = item.get("pull_request") or {}
+                if pull.get("merged_at"):
+                    status = f"merged {pull['merged_at'][:10]}"
+                else:
+                    status = item.get("state", "?")
+                lines.append(
+                    f"#{item.get('number')} [{status}] {item.get('title', '')}"
+                )
+            total = body.get("total_count") or len(items)
+            if total > count:
+                lines.append(f"(only the first {count} of {total} shown)")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Searching PRs failed partway: {exc}"
 
     async def _get_pr(self, repository: str, number) -> str:
         if not repository or not isinstance(number, int):
