@@ -337,6 +337,7 @@ def test_read_tools_are_declared(monkeypatch):
         "github.open_pr",
         "github.push_branch",
         "github.list_prs",
+        "github.search_prs",
         "github.get_pr",
         "github.list_releases",
         "github.read_file",
@@ -513,3 +514,55 @@ def test_open_pr_refuses_default_branch_as_head(monkeypatch):
         )
     )
     assert "default branch" in out
+
+
+# --- search_prs: the exact-identifier PR leg ----------------------------------
+
+
+def test_search_prs_pins_repo_and_type_and_strips_quotes(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/search/issues", FakeResponse(200, {
+            "total_count": 1,
+            "items": [{
+                "number": 42,
+                "title": "[AREQ-1074] BigQuery access",
+                "state": "closed",
+                "pull_request": {"merged_at": "2026-05-09T00:00:00Z"},
+            }],
+        })),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.search_prs",
+            {"repository": "acme/tools", "text": '"AREQ-1074"'},
+        )
+    )
+    assert "#42 [merged 2026-05-09] [AREQ-1074] BigQuery access" in out
+    _, _, kwargs = provider._client.sent[-1]
+    assert kwargs["params"]["q"] == 'repo:acme/tools type:pr "AREQ-1074"'
+
+
+def test_search_prs_no_match_is_honest(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/search/issues", FakeResponse(200, {"total_count": 0, "items": []})),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.search_prs", {"repository": "acme/tools", "text": "AREQ-9999"}
+        )
+    )
+    assert "No pull requests" in out
+
+
+def test_search_prs_respects_the_repo_grant(monkeypatch):
+    provider = _provider([("POST", "/broker/", MINT_OK)], monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.search_prs", {"repository": "acme/other", "text": "AREQ-1"}
+        )
+    )
+    assert "not approved for acme/other" in out
