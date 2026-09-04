@@ -131,6 +131,30 @@ class CloudTrailSpec(_WarnExtra):
     group_prefix: str = "engineering_"  # directory-group filter for the query
 
 
+class SlackReadSpec(_WarnExtra):
+    """A read-only SIDECAR block (2026-09-04): the agent may read
+    conversation threads from exactly the channels listed here, using the
+    pod's own Slack bot token (the transport's env). Slack's channel
+    membership is the second wall -- history reads fail until a human
+    invites the bot. Absent channels = the block is off."""
+
+    channels: list[str] = Field(default_factory=list)  # channel IDs, e.g. C012ABC
+    token_env: str = "SLACK_BOT_TOKEN"  # same env the slack transport reads
+    scan_limit: int = 2000  # history-scan message budget per search
+
+
+class JiraSpec(_WarnExtra):
+    """The room broker's issue-tracker read lane (2026-09-04). Same custody
+    shape as `github`: the room holds the tracker credential, this block
+    only names where the broker lives and how the agent proves itself.
+    Absent broker_url = the block is off."""
+
+    broker_url: str | None = None  # the room's own base URL, in-cluster
+    token_env: str | None = None  # env var holding the agent's colleague JWT
+    # Same deliberate `self` naming as ColleaguesSpec above.
+    self: str | None = None  # this agent's own name, for the broker route
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
@@ -138,6 +162,8 @@ class ToolsSpec(_WarnExtra):
     colleagues: ColleaguesSpec = Field(default_factory=ColleaguesSpec)
     github: GitHubSpec = Field(default_factory=GitHubSpec)
     cloudtrail: CloudTrailSpec = Field(default_factory=CloudTrailSpec)
+    slack_read: SlackReadSpec = Field(default_factory=SlackReadSpec)
+    jira: JiraSpec = Field(default_factory=JiraSpec)
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
