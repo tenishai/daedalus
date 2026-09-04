@@ -87,7 +87,10 @@ class JiraToolProvider:
                     "Search the issue-tracker project the room's broker "
                     "allows for tickets whose text mentions a term (a "
                     "person's email or name works well), newest first. "
-                    "Read-only."
+                    "When you already know WHEN the change happened (e.g. "
+                    "from an audit-log event), pass created_after/"
+                    "created_before -- a scoped window beats scanning the "
+                    "whole board. Read-only."
                 ),
                 "parameters": {
                     "type": "object",
@@ -95,6 +98,20 @@ class JiraToolProvider:
                         "text": {
                             "type": "string",
                             "description": "The term to search ticket text for",
+                        },
+                        "created_after": {
+                            "type": "string",
+                            "description": (
+                                'Only tickets created on/after this date '
+                                '(ISO, e.g. "2026-07-03")'
+                            ),
+                        },
+                        "created_before": {
+                            "type": "string",
+                            "description": (
+                                'Only tickets created on/before this date '
+                                '(ISO, e.g. "2026-07-17")'
+                            ),
                         },
                         "limit": {
                             "type": "integer",
@@ -114,7 +131,10 @@ class JiraToolProvider:
             return await self._get_issue(payload.get("key", "") or "")
         if name == "jira.find_issues":
             return await self._find_issues(
-                payload.get("text", "") or "", payload.get("limit")
+                payload.get("text", "") or "",
+                payload.get("limit"),
+                payload.get("created_after", "") or "",
+                payload.get("created_before", "") or "",
             )
         raise LookupError(f"unknown tool {name!r}")
 
@@ -192,13 +212,18 @@ class JiraToolProvider:
             lines.extend(["", "comments: none"])
         return "\n".join(lines)
 
-    async def _find_issues(self, text: str, limit) -> str:
+    async def _find_issues(
+        self, text: str, limit, created_after: str = "", created_before: str = ""
+    ) -> str:
         if not text or len(text.strip()) < 3:
             return "I need at least a few characters of text to search for."
         count = min(int(limit or _SEARCH_DEFAULT), _SEARCH_CAP)
-        body, error = await self._broker_get(
-            "/jira/search", {"text": text.strip(), "limit": count}
-        )
+        params: dict = {"text": text.strip(), "limit": count}
+        if created_after:
+            params["created_after"] = created_after
+        if created_before:
+            params["created_before"] = created_before
+        body, error = await self._broker_get("/jira/search", params)
         if error is not None:
             return error
         issues = body.get("issues") or []

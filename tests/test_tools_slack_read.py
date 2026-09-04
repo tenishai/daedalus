@@ -121,17 +121,67 @@ def test_find_threads_surfaces_slack_error_verbatim(monkeypatch):
     assert "not_in_channel" in out
 
 
-def test_find_threads_respects_day_window(monkeypatch):
-    ancient = _msg(400 * 86400, "old request for jdoe@acme.io")
-    fake = FakeSlack(history_pages=[{"messages": [ancient]}])
+def test_day_window_is_enforced_api_side(monkeypatch):
+    fake = FakeSlack(history_pages=[{"messages": []}])
     provider = _provider(fake, monkeypatch)
     out = asyncio.run(
         provider.call("slack.find_threads", {"email": "jdoe@acme.io", "days": 30})
     )
+    method, params = fake.calls[0]
+    assert method == "conversations.history"
+    # The API's own oldest bound does the scoping -- no page-walking cutoff.
+    assert abs(float(params["oldest"]) - (NOW - 30 * 86400)) < 2
+    assert "latest" not in params
     assert "No threads mentioning jdoe@acme.io" in out
     assert "last 30 days" in out
-    # Aged out on page one: no second history page requested.
-    assert sum(1 for m, _ in fake.calls if m == "conversations.history") == 1
+
+
+def test_anchored_window_bounds_both_sides(monkeypatch):
+    root = _msg(200 * 86400, "access request for jdoe@acme.io")
+    fake = FakeSlack(
+        history_pages=[{"messages": [root]}],
+        replies={root["ts"]: [root]},
+        permalink="https://slack.example/p9",
+    )
+    provider = _provider(fake, monkeypatch)
+    from datetime import UTC, datetime
+
+    anchor = datetime.fromtimestamp(NOW - 200 * 86400, tz=UTC).strftime("%Y-%m-%d")
+    out = asyncio.run(
+        provider.call(
+            "slack.find_threads",
+            {"email": "jdoe@acme.io", "around": anchor, "window_days": 5},
+        )
+    )
+    _, params = fake.calls[0]
+    assert float(params["latest"]) - float(params["oldest"]) == 10 * 86400
+    # An anchored search finds the old thread the from-today scan never
+    # reaches -- the whole point of anchoring on a known event time.
+    assert "access request for jdoe@acme.io" in out
+    assert "https://slack.example/p9" in out
+
+
+def test_anchored_window_reports_its_reach_on_no_match(monkeypatch):
+    fake = FakeSlack(history_pages=[{"messages": []}])
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "slack.find_threads",
+            {"email": "jdoe@acme.io", "around": "2026-07-10", "window_days": 3},
+        )
+    )
+    assert "2026-07-10 +/- 3 days" in out
+
+
+def test_unreadable_anchor_date_is_refused_before_any_call(monkeypatch):
+    provider = _provider(FakeSlack(), monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "slack.find_threads", {"email": "jdoe@acme.io", "around": "last july"}
+        )
+    )
+    assert "could not read" in out
+    assert not provider._client.calls
 
 
 def test_find_threads_reports_scan_budget_when_exhausted(monkeypatch):

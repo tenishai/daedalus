@@ -192,3 +192,22 @@ def test_bundle_wiring_composes_the_sidecar(tmp_path):
 
     assert isinstance(agent.tools, P)
     assert agent.tools.self_name == "x"
+
+
+def test_find_issues_passes_the_created_window_through(monkeypatch):
+    provider = _provider(
+        [("/jira/search", _Resp(200, {"issues": [], "truncated": False}))], monkeypatch
+    )
+    asyncio.run(
+        provider.call(
+            "jira.find_issues",
+            {
+                "text": "jdoe@acme.io",
+                "created_after": "2026-07-03",
+                "created_before": "2026-07-17",
+            },
+        )
+    )
+    _, _, params = provider._client.sent[0]
+    assert params["created_after"] == "2026-07-03"
+    assert params["created_before"] == "2026-07-17"
