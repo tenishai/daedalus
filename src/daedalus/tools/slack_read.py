@@ -40,6 +40,8 @@ _FIND_DEFAULT = 3
 _FIND_CAP = 10
 _DAYS_DEFAULT = 90
 _DAYS_CAP = 730
+_WINDOW_DEFAULT = 7
+_WINDOW_CAP = 60
 _REPLIES_PER_THREAD = 100
 _THREAD_CHARS = 8_000
 _PAGE_SIZE = 200
@@ -101,10 +103,13 @@ class SlackReadToolProvider:
             {
                 "name": "slack.find_threads",
                 "description": (
-                    "Find recent threads in an allowed Slack channel that "
-                    "mention a person's email address, newest first. Returns "
-                    "each matching thread's full text and permalink. "
-                    f"Channels I may read: {allowed}."
+                    "Find threads in an allowed Slack channel that mention "
+                    "a person's email address, newest first. Returns each "
+                    "matching thread's full text and permalink. When you "
+                    "already know WHEN something happened (e.g. from an "
+                    "audit-log event), pass `around` -- an anchored window "
+                    "is far cheaper and more reliable than scanning back "
+                    f"from today. Channels I may read: {allowed}."
                 ),
                 "parameters": {
                     "type": "object",
@@ -120,11 +125,28 @@ class SlackReadToolProvider:
                                 "channel is allowed)"
                             ),
                         },
+                        "around": {
+                            "type": "string",
+                            "description": (
+                                'Anchor date (ISO, e.g. "2026-07-10"): search '
+                                "only the window around this date instead of "
+                                "back from today. Use the event timestamp "
+                                "you already hold."
+                            ),
+                        },
+                        "window_days": {
+                            "type": "integer",
+                            "description": (
+                                f"Half-width of the anchored window in days "
+                                f"(default {_WINDOW_DEFAULT}, cap {_WINDOW_CAP}; "
+                                "only meaningful with `around`)"
+                            ),
+                        },
                         "days": {
                             "type": "integer",
                             "description": (
-                                f"How far back to look (default {_DAYS_DEFAULT}, "
-                                f"cap {_DAYS_CAP})"
+                                f"Without `around`: how far back from today "
+                                f"(default {_DAYS_DEFAULT}, cap {_DAYS_CAP})"
                             ),
                         },
                         "limit": {
@@ -166,6 +188,8 @@ class SlackReadToolProvider:
                 payload.get("channel", "") or "",
                 payload.get("days"),
                 payload.get("limit"),
+                payload.get("around", "") or "",
+                payload.get("window_days"),
             )
         if name == "slack.read_thread":
             return await self._read_thread(
@@ -239,57 +263,75 @@ class SlackReadToolProvider:
         except Exception:
             return None
 
-    async def _find_threads(self, email: str, channel: str, days, limit) -> str:
+    async def _find_threads(
+        self, email: str, channel: str, days, limit, around: str = "", window_days=None
+    ) -> str:
         if not email or "@" not in email:
             return "I need a full email address to search for."
         channel_id, refusal = self._resolve_channel(channel)
         if refusal is not None:
             return refusal
-        window_days = min(int(days or _DAYS_DEFAULT), _DAYS_CAP)
         count = min(int(limit or _FIND_DEFAULT), _FIND_CAP)
-        cutoff = self._now() - window_days * 86400
+
+        # The window is enforced by the Slack API itself (history's
+        # oldest/latest bounds), never by walking pages until they age out
+        # -- an anchored lookup costs one or two pages no matter how busy
+        # the channel has been since. Anchored mode (`around`) is the
+        # efficient path when a caller already holds an event timestamp:
+        # audit-log first, then a tight window here.
+        if around:
+            try:
+                anchor = datetime.fromisoformat(around.replace("Z", "+00:00"))
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=UTC)
+            except ValueError:
+                return (
+                    f"I could not read {around!r} as a date -- use ISO form, "
+                    'e.g. "2026-07-10".'
+                )
+            half = min(int(window_days or _WINDOW_DEFAULT), _WINDOW_CAP) * 86400
+            oldest_bound = anchor.timestamp() - half
+            latest_bound = anchor.timestamp() + half
+            reach = f"{around} +/- {half // 86400} days"
+        else:
+            span = min(int(days or _DAYS_DEFAULT), _DAYS_CAP)
+            oldest_bound = self._now() - span * 86400
+            latest_bound = None
+            reach = f"the last {span} days"
 
         matches: list[dict] = []
         seen: set[str] = set()
         scanned = 0
         cursor: str | None = None
-        aged_out = False
         try:
             while scanned < self.scan_limit:
                 params: dict = {
                     "channel": channel_id,
                     "limit": min(_PAGE_SIZE, self.scan_limit - scanned),
+                    "oldest": f"{oldest_bound:.6f}",
                 }
+                if latest_bound is not None:
+                    params["latest"] = f"{latest_bound:.6f}"
                 if cursor:
                     params["cursor"] = cursor
                 page = await self._get("conversations.history", params)
                 messages = page.get("messages") or []
                 scanned += len(messages)
-                oldest = None
                 for m in messages:
-                    try:
-                        ts_f = float(m.get("ts") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if oldest is None or ts_f < oldest:
-                        oldest = ts_f
-                    if ts_f < cutoff:
-                        continue
                     thread_ts = m.get("thread_ts") or m.get("ts")
                     if not thread_ts or thread_ts in seen:
                         continue
                     if not _matches(m.get("text") or "", email):
                         continue
                     seen.add(thread_ts)
-                    matches.append({"thread_ts": thread_ts, "root_ts": ts_f})
+                    try:
+                        root_ts = float(m.get("ts") or 0)
+                    except (TypeError, ValueError):
+                        root_ts = 0.0
+                    matches.append({"thread_ts": thread_ts, "root_ts": root_ts})
                     if len(matches) >= count:
                         break
                 if len(matches) >= count:
-                    break
-                # history pages newest-first: once a whole page is older
-                # than the window, nothing further back can match either.
-                if oldest is not None and oldest < cutoff:
-                    aged_out = True
                     break
                 cursor = (page.get("response_metadata") or {}).get("next_cursor")
                 if not cursor:
@@ -298,13 +340,14 @@ class SlackReadToolProvider:
             return f"Could not read the channel history: {exc}"
 
         if not matches:
-            reach = (
-                f"the last {window_days} days"
-                if aged_out
-                else f"{scanned} messages (my scan budget)"
+            budget_note = (
+                f" (scan budget hit after {scanned} messages)"
+                if scanned >= self.scan_limit
+                else ""
             )
             return (
-                f"No threads mentioning {email} in {channel_id} within {reach}."
+                f"No threads mentioning {email} in {channel_id} within "
+                f"{reach}{budget_note}."
             )
 
         sections = []
