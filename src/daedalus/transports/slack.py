@@ -4,10 +4,14 @@ Carries the battle scars of two prior production Slack agents as
 requirements, not code:
 - dedupe on (channel, ts): Slack redelivers, and mentions arrive as both
   `message` and `app_mention`
-- addressing in shared channels: a message that mentions OTHER bots and not
-  this one is theirs, not ours -- without this, two agents in one channel
-  both answer a mention aimed at one of them. Messages with no mention (or
-  mentioning humans) keep the channel-inbox behavior.
+- tagged-only in channels, enforced runtime-side: the manifest stopped
+  subscribing to channel messages (2026-08-31 ruling: in channels, only an
+  explicit @-mention reaches the agent), but an app created from an OLDER
+  manifest still delivers them -- and then two agents in one channel both
+  answer a mention aimed at one. So the transport enforces the same rule
+  itself: in a channel or group, respond only when this bot is mentioned
+  (an app_mention event is proof by delivery -- Slack sends it only to the
+  mentioned app). DMs and group DMs keep full message delivery.
 - one Task per thread: thread_ts is the conversation
 - reaction lifecycle: eyes -> white_check_mark / x
 - replies stay in-thread
@@ -235,16 +239,6 @@ class SlackApi:
         except Exception:  # noqa: BLE001  identity is an optimization, not a gate
             return ""
 
-    async def is_bot_user(self, user_id: str) -> bool:
-        """Whether `user_id` is a bot/app user (users.info). Failures read
-        as False -- an unresolvable mention must not silence the agent."""
-        try:
-            response = await self._web.users_info(user=user_id)
-            user = response.get("user") or {}
-            return bool(user.get("is_bot"))
-        except Exception:  # noqa: BLE001  fail-open to the channel-inbox behavior
-            return False
-
 
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
@@ -299,10 +293,9 @@ class SlackTransport:
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
         self._threads: dict[str, Task] = {}
-        # Own Slack user id (auth.test at serve time; None = unknown, the
-        # addressing gate skips) and a bot-ness cache for mentioned ids.
+        # Own Slack user id (auth.test at serve time). None = unknown: the
+        # tagged-only gate then trusts only app_mention delivery in channels.
         self.user_id: str | None = None
-        self._bot_users: dict[str, bool] = {}
 
     async def serve(self, handler: Handler) -> None:
         if not (self.bot_token and self.app_token):
@@ -319,9 +312,9 @@ class SlackTransport:
             self.user_id = (await self._api.auth_test()) or None
             if self.user_id is None:
                 logger.warning(
-                    "slack: auth.test gave no user id -- the shared-channel "
-                    "addressing gate is disabled; mentions aimed at other "
-                    "agents will be answered too"
+                    "slack: auth.test gave no user id -- channel messages "
+                    "cannot be verified as ours and will be answered only "
+                    "via app_mention delivery"
                 )
         self._wire_approver(handler)
 
@@ -415,9 +408,10 @@ class SlackTransport:
             return
         if event.get("channel") != self.channel:
             return
-        if await self._addressed_to_another_agent(event.get("text") or ""):
-            # Shared channel, mention aimed at a different bot: theirs, not
-            # ours. Checked before the dedupe mark so nothing is consumed.
+        if self._not_for_us_in_channel(event):
+            # Tagged-only in channels: a message event that does not mention
+            # us is not ours to answer. Checked before the dedupe mark so an
+            # app_mention for the same ts is never consumed.
             return
         ts = event.get("ts")
         key = (event.get("channel"), ts)
@@ -500,27 +494,27 @@ class SlackTransport:
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, thread)
 
-    async def _addressed_to_another_agent(self, text: str) -> bool:
-        """True only when the message mentions at least one BOT user and this
-        bot is not among the mentions -- the two-agents-one-channel case
-        (a mention aimed at a colleague must not draw two answers). Messages
-        with no mentions, mentions of humans, or mentions including self keep
-        the channel-inbox behavior. Unknown self (auth.test failed) or an
-        unresolvable mention fails OPEN to answering, never to silence."""
-        if self.user_id is None or self._api is None:
+    def _not_for_us_in_channel(self, event: dict) -> bool:
+        """The tagged-only rule, enforced runtime-side. True = drop.
+
+        Applies only to plain `message` events in channels and private
+        groups (channel_type "channel"/"group"): those reach us solely
+        through a STALE app manifest (the current one does not subscribe to
+        them), and answering unaddressed ones is how two agents in one
+        channel both reply to a mention aimed at one. An `app_mention`
+        event always passes -- Slack delivers it only to the mentioned app,
+        which is stronger proof than anything we could compute. DMs and
+        group DMs ("im"/"mpim") always pass: messaging an agent directly IS
+        the ask. When self is unknown (auth.test failed) a channel message
+        cannot be verified as ours and is dropped -- the mentioned agent
+        still answers through its own app_mention, so the failure mode is
+        one correct answer, never two."""
+        if event.get("type") == "app_mention":
             return False
-        mentioned = _MENTION_ID.findall(text)
-        if not mentioned or self.user_id in mentioned:
+        if event.get("channel_type") not in {"channel", "group"}:
             return False
-        for user_id in mentioned:
-            if user_id not in self._bot_users:
-                try:
-                    self._bot_users[user_id] = await self._api.is_bot_user(user_id)
-                except Exception:  # noqa: BLE001  fail open, never to silence
-                    self._bot_users[user_id] = False
-            if self._bot_users[user_id]:
-                return True
-        return False
+        mentioned = _MENTION_ID.findall(event.get("text") or "")
+        return self.user_id is None or self.user_id not in mentioned
 
     async def _escalate(self, task: Task, thread: str) -> None:
         route = self.escalation_route or ""
