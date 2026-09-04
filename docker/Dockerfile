@@ -25,14 +25,14 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "/src/daedalus[a2a,slack]" "google-cloud-aiplatform>=1.38"
+RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "/src/daedalus[a2a,slack,aws]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --create-home agent
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack]" "techne[vectors]" google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack,aws]" "techne[vectors]" google-cloud-aiplatform && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.
