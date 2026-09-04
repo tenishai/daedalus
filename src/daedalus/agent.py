@@ -11,6 +11,7 @@ from pathlib import Path
 
 from daedalus.bundle import Bundle, BundleError
 from daedalus.enforcement import Enforcement
+from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
     DELETE_KEY,
     FILENAME_KEY,
@@ -43,6 +44,22 @@ from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 def _munge(name: str) -> str:
     """Canonical `server.tool` -> LLM-safe function name (models dislike dots)."""
     return name.replace(".", "__")
+
+
+def _strip_image_parts(messages: list[dict]) -> list[dict]:
+    """Checkpoint copies of the LLM messages drop image data URIs -- replay
+    fidelity for images is not a promise this system makes (same trade the
+    journal already made), and a 4-image turn would otherwise re-serialize
+    ~100 MB per step."""
+    stripped = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            text = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
+            stripped.append({**message, "content": text})
+        else:
+            stripped.append(message)
+    return stripped
 
 
 _SALVAGE_CAP = 4
@@ -353,7 +370,54 @@ class Agent:
                     result.agent_text()
                     + "\n\n_(consulted: " + ", ".join(consulted) + ")_"
                 )
+        if result.state is TaskState.COMPLETED:
+            try:
+                error = await asyncio.to_thread(self._journal_conversation, result)
+            except Exception as exc:  # belt and braces: journaling never fails the task
+                error = str(exc)
+            if error:
+                self._emit("journal_error", error=error)
         return result
+
+    def _journal_conversation(self, task: Task) -> str | None:
+        """Append the completed conversation to the journal the learnings
+        summarizer reads (daily-learnings spec). Best-effort by contract:
+        the task already succeeded, and a journal failure must never turn
+        that success into a failure. System tasks never reach here --
+        handle_task dispatches them before the model path.
+
+        Runs under asyncio.to_thread -- i.e. on a worker thread, not the
+        event loop -- so it must never call self._emit itself:
+        EventBus.publish does asyncio.Queue.put_nowait, which is not
+        thread-safe and can raise under asyncio debug mode. The error is
+        returned as a string instead, for the (event-loop-side) call site
+        in handle_task to emit."""
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return None
+        from daedalus.memory import journal
+
+        try:
+            entries = []
+            for message in task.history:
+                # The journal is the learnings summarizer's TEXT source: base64
+                # image bytes would balloon storage (megabytes per row) and mean
+                # nothing to the summarizer. Strip them; a marker keeps the fact
+                # that images were shared visible to the day's summary.
+                entry = message.model_dump(exclude={"images"})
+                if message.images:
+                    entry["text"] = (
+                        f"{entry['text']} [shared {len(message.images)} image(s)]".strip()
+                    )
+                entries.append(entry)
+            journal.record(
+                journal.journal_path(Path(db_path)),
+                task.context_id or task.id,
+                entries,
+            )
+        except Exception as exc:
+            return str(exc)
+        return None
 
     async def _dispatch_system_task(self, marker: str, task: Task) -> Task:
         """Route a system-task-marked task to its handler, pre-model. An
@@ -366,6 +430,8 @@ class Agent:
             return await self._handle_knowledge(task)
         if marker == TOOL_MARKER:
             return await self._handle_tool(task)
+        if marker == LEARNINGS_MARKER:
+            return await self._handle_learnings(task)
         self._emit("system_task_refused", marker=marker)
         return task.reply(
             f"Unknown system task {marker!r}. Refusing rather than guessing.",
@@ -409,6 +475,63 @@ class Agent:
             self._revision_fires.add(fire)
             fire.add_done_callback(self._revision_fires.discard)
         return task.reply("Learned. I will remember that.")
+
+    async def _handle_learnings(self, task: Task) -> Task:
+        """Summarize the journal's last day into candidate memory snippets
+        (daily-learnings spec). Proposes only -- nothing is stored here;
+        the room's owner-approval flow rides the teach lane for that.
+        Replies JSON ({"candidates": [...]}) in the task's reply text,
+        which task_to_a2a carries verbatim for the room to parse."""
+        from daedalus.memory import journal, learnings
+
+        if not teach_authorized(task):
+            self._emit("learnings_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+            return task.reply(
+                "Only the room may ask me to summarize my day.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        empty = json.dumps({"candidates": []})
+        db_path = getattr(self.memory, "db_path", None)
+        if db_path is None:
+            return task.reply(empty)
+        try:
+            conversations = await asyncio.to_thread(
+                journal.recent, journal.journal_path(Path(db_path))
+            )
+        except Exception as exc:
+            self._emit("learnings_error", error=str(exc))
+            return task.reply(
+                "My journal is unreadable today.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        if not conversations:
+            return task.reply(empty)
+        on_date = str(task.metadata.get("date", "")) or "today"
+        # "What you already know": probe techne with the day's own text so
+        # the model can skip re-proposing established knowledge.
+        probe = " ".join(
+            message.get("text", "")
+            for conv in conversations
+            for message in conv.get("history", [])
+        )[:500]
+        known = await self.memory.recall(probe, k=10)
+        messages = learnings.build_messages(
+            self.bundle.persona, conversations, known, on_date=on_date
+        )
+        try:
+            response = await self.llm.complete(messages)
+        except Exception as exc:
+            self._emit("learnings_error", error=str(exc))
+            return task.reply(
+                "My summarizer failed today.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
+        candidates = learnings.parse_candidates(response.text or "")
+        self._emit("learnings_proposed", count=len(candidates))
+        return task.reply(json.dumps({"candidates": candidates}))
 
     async def _handle_knowledge(self, task: Task) -> Task:
         """The operator knowledge lane: a knowledge FILE's edit or delete,
@@ -535,7 +658,11 @@ class Agent:
         last_attempt = ""
         for _ in range(self.bundle.spec.tools.max_steps):
             await self.checkpoints.save(
-                task.id, {"task": task.model_dump(), "messages": messages}
+                task.id,
+                {
+                    "task": task.model_dump(exclude={"history": {"__all__": {"images"}}}),
+                    "messages": _strip_image_parts(messages),
+                },
             )
             if budget.remaining() == 0:
                 # checkpoint intentionally kept: re-fund and resume()
@@ -664,7 +791,23 @@ class Agent:
         messages = [{"role": "system", "content": system}]
         for message in task.history:
             role = "assistant" if message.role == "agent" else "user"
-            messages.append({"role": role, "content": message.text})
+            if message.images:
+                # Vision (wave 3): OpenAI-style content parts -- litellm
+                # translates per provider. Text part first, then every
+                # image as a base64 data URI.
+                parts: list[dict] = [{"type": "text", "text": message.text}]
+                for image in message.images:
+                    parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image.media_type};base64,{image.data}"
+                            },
+                        }
+                    )
+                messages.append({"role": role, "content": parts})
+            else:
+                messages.append({"role": role, "content": message.text})
         return messages
 
     @staticmethod
