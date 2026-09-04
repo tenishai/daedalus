@@ -335,8 +335,181 @@ def test_read_tools_are_declared(monkeypatch):
     names = [t["name"] for t in asyncio.run(provider.tools())]
     assert names == [
         "github.open_pr",
+        "github.push_branch",
         "github.list_prs",
         "github.get_pr",
         "github.list_releases",
         "github.read_file",
     ]
+
+
+# --- exact branch names (2026-09-04, the release-work ruling) -----------------
+
+
+def _push(provider, repo="acme/tools", branch="release/2026/W36/01-minor", **kw):
+    return asyncio.run(
+        provider.call(
+            "github.push_branch", {"repository": repo, "branch": branch, **kw}
+        )
+    )
+
+
+def _release_routes(head_sha="base123"):
+    """The bare-branch-cut happy path: the exact branch doesn't exist yet,
+    the base (default) branch resolves, the ref create lands."""
+    return [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools/git/ref/heads/release", FakeResponse(404)),
+        ("GET", "/repos/acme/tools/git/ref/heads/main",
+         FakeResponse(200, {"object": {"sha": head_sha}})),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+        ("POST", "/repos/acme/tools/git/refs", FakeResponse(201)),
+    ]
+
+
+def test_push_branch_bare_cut_opens_no_pr(monkeypatch):
+    provider = _provider(_release_routes(), monkeypatch)
+    out = _push(provider)
+    assert "Pushed branch release/2026/W36/01-minor" in out
+    assert "No pull request was opened" in out
+    client = provider._client
+    ref_posts = [k for m, u, k in client.sent if m == "POST" and u.endswith("/git/refs")]
+    assert ref_posts[0]["json"] == {
+        "ref": "refs/heads/release/2026/W36/01-minor",
+        "sha": "base123",
+    }
+    assert not [u for m, u, k in client.sent if "/pulls" in u]
+    assert not [u for m, u, k in client.sent if m == "PUT"]
+
+
+def test_push_branch_with_files_commits_with_the_stamp(monkeypatch):
+    routes = _release_routes() + [
+        ("GET", "/repos/acme/tools/contents/", FakeResponse(404)),
+        ("PUT", "/repos/acme/tools/contents/", FakeResponse(201)),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = _push(
+        provider,
+        files=[{"path": "VERSION", "content": "3.234.0"}],
+        message="Cut the minor release",
+    )
+    assert "1 file committed" in out
+    put_calls = [k for m, u, k in provider._client.sent if m == "PUT"]
+    assert put_calls[0]["json"]["message"] == (
+        "Cut the minor release\n\n[ward, via the agent room]"
+    )
+    assert put_calls[0]["json"]["branch"] == "release/2026/W36/01-minor"
+
+
+def test_push_branch_refuses_an_existing_branch(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools/git/ref/heads/release",
+         FakeResponse(200, {"object": {"sha": "x"}})),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = _push(provider)
+    assert "already exists" in out
+    assert not [u for m, u, k in provider._client.sent if m == "POST" and u.endswith("/git/refs")]
+
+
+def test_push_branch_refuses_the_default_branch(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = _push(provider, branch="main")
+    assert "default branch" in out
+
+
+@pytest.mark.parametrize(
+    "bad", ["-lead", "has space", "a..b", "trail/", "x.lock", "a//b", ""]
+)
+def test_push_branch_refuses_names_git_would_fight_over(monkeypatch, bad):
+    provider = _provider([], monkeypatch)
+    out = _push(provider, branch=bad)
+    assert "branch name" in out
+    assert not provider._client.sent  # refused before any network call
+
+
+def test_push_branch_respects_the_repo_grant(monkeypatch):
+    provider = _provider([("POST", "/broker/", MINT_OK)], monkeypatch)
+    out = _push(provider, repo="acme/other")
+    assert "not approved for acme/other" in out
+
+
+def test_open_pr_exact_branch_skips_the_prefix(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools/git/ref/", FakeResponse(200, {"object": {"sha": "base123"}})),
+        ("GET", "/repos/acme/tools/contents/", FakeResponse(404)),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+        ("POST", "/repos/acme/tools/git/refs", FakeResponse(201)),
+        ("PUT", "/repos/acme/tools/contents/", FakeResponse(201)),
+        ("POST", "/repos/acme/tools/pulls", FakeResponse(201, {"html_url": "u"})),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.open_pr",
+            {
+                "repository": "acme/tools",
+                "title": "DE feature work",
+                "body": "b",
+                "files": [{"path": "f.md", "content": "c"}],
+                "branch": "feature/display-names",
+            },
+        )
+    )
+    assert "branch feature/display-names" in out
+    ref_posts = [k for m, u, k in provider._client.sent if u.endswith("/git/refs")]
+    assert ref_posts[0]["json"]["ref"] == "refs/heads/feature/display-names"
+    pr_calls = [k for m, u, k in provider._client.sent if u.endswith("/pulls")]
+    assert pr_calls[0]["json"]["head"] == "feature/display-names"
+    assert "Opened by agent **ward**" in pr_calls[0]["json"]["body"]  # footer stays
+
+
+def test_open_pr_exact_branch_conflict_reads_as_already_exists(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools/git/ref/", FakeResponse(200, {"object": {"sha": "base123"}})),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+        ("POST", "/repos/acme/tools/git/refs", FakeResponse(422)),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.open_pr",
+            {
+                "repository": "acme/tools",
+                "title": "t",
+                "body": "b",
+                "files": [{"path": "f", "content": "c"}],
+                "branch": "feature/x",
+            },
+        )
+    )
+    assert "already exists" in out
+
+
+def test_open_pr_refuses_default_branch_as_head(monkeypatch):
+    routes = [
+        ("POST", "/broker/", MINT_OK),
+        ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+    ]
+    provider = _provider(routes, monkeypatch)
+    out = asyncio.run(
+        provider.call(
+            "github.open_pr",
+            {
+                "repository": "acme/tools",
+                "title": "t",
+                "body": "b",
+                "files": [{"path": "f", "content": "c"}],
+                "branch": "main",
+            },
+        )
+    )
+    assert "default branch" in out

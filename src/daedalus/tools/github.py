@@ -17,10 +17,20 @@ asking a human to paste the state in. Every read is bounded and marks its
 own truncation honestly -- a silently clipped answer reads as complete,
 which is worse than no answer.
 
-Attribution is stamped, not optional: the head branch is always
+Attribution is stamped, not optional: by default the head branch is named
 kobo/<agent>/<slug> and the PR body always ends with a footer naming the
 agent and the room. The footer is a convention the provider enforces on
 itself, not a security boundary -- the broker's audit trail is the record.
+
+Exact branch names (2026-09-04, the release-work ruling): real pipelines
+key CI on branch patterns (release/*, feature/*, test-feature/*), which the
+kobo/ prefix can never match -- so `open_pr` accepts an exact `branch`
+name, and `push_branch` pushes a branch with no PR at all (a release cut
+IS a bare branch push; the push itself is the trigger). The name prefix
+was self-attribution, never a wall: the two walls stay exactly where they
+were (the broker's repo pins and GitHub's own enforcement). What this
+provider still refuses, in every path: touching a default branch, and
+force-pushing over any existing branch.
 
 Mirrors colleagues.py's soft-degrade idiom throughout: a missing token env,
 an unreachable broker, a refused mint, and every GitHub error all become
@@ -59,6 +69,26 @@ def _slug(title: str) -> str:
     plus a short random suffix so two same-titled PRs never collide."""
     base = _SLUG_RE.sub("-", title.lower()).strip("-")[:40].rstrip("-") or "change"
     return f"{base}-{secrets.token_hex(3)}"
+
+
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+
+
+def _branch_problem(name: str) -> str | None:
+    """None when `name` is a branch name this provider will push, a plain
+    refusal otherwise. Deliberately stricter than git's own ref rules --
+    the goal is names a human would also write, not the full ref grammar."""
+    if (
+        not _BRANCH_RE.fullmatch(name)
+        or ".." in name
+        or "//" in name
+        or name.endswith((".lock", "/", "."))
+    ):
+        return (
+            f"{name!r} is not a branch name I can push (letters, digits, "
+            "and . _ / - segments only; no leading dash, no '..')."
+        )
+    return None
 
 
 class GitHubToolProvider:
@@ -124,8 +154,78 @@ class GitHubToolProvider:
                                 "required": ["path", "content"],
                             },
                         },
+                        "branch": {
+                            "type": "string",
+                            "description": (
+                                "Exact head branch name (optional). Without "
+                                "it the branch is named kobo/<you>/<slug>. "
+                                "Use when CI keys on branch name patterns "
+                                "(e.g. feature/*)."
+                            ),
+                        },
                     },
                     "required": ["repository", "title", "body", "files"],
+                },
+            },
+            {
+                "name": "github.push_branch",
+                "description": (
+                    "Push a new branch with an EXACT name to a repository "
+                    "the room has approved for you -- no pull request. Use "
+                    "only when a workflow keys on the branch name itself "
+                    "(release cuts, CI branch patterns); otherwise prefer "
+                    "github.open_pr. The branch starts at the default "
+                    "branch's head (or `base`), optionally carrying one "
+                    "commit with the given files. Refuses the default "
+                    "branch and any branch that already exists -- never a "
+                    "force-push."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "repository": {
+                            "type": "string",
+                            "description": 'The repository, as "owner/name"',
+                        },
+                        "branch": {
+                            "type": "string",
+                            "description": (
+                                'The exact branch name to create, e.g. '
+                                '"release/2026/W36/01-minor"'
+                            ),
+                        },
+                        "files": {
+                            "type": "array",
+                            "description": (
+                                "Files to commit onto the new branch "
+                                "(optional -- omit for a bare branch cut at "
+                                "the base's head)"
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["path", "content"],
+                            },
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": (
+                                "Commit message when files are given "
+                                "(optional)"
+                            ),
+                        },
+                        "base": {
+                            "type": "string",
+                            "description": (
+                                "Branch to start from (default: the "
+                                "default branch)"
+                            ),
+                        },
+                    },
+                    "required": ["repository", "branch"],
                 },
             },
             {
@@ -244,6 +344,15 @@ class GitHubToolProvider:
                 payload.get("title", ""),
                 payload.get("body", ""),
                 payload.get("files", []) or [],
+                payload.get("branch", "") or "",
+            )
+        if name == "github.push_branch":
+            return await self._push_branch(
+                payload.get("repository", ""),
+                payload.get("branch", "") or "",
+                payload.get("files", []) or [],
+                payload.get("message", "") or "",
+                payload.get("base", "") or "",
             )
         if name == "github.list_prs":
             return await self._list_prs(
@@ -316,9 +425,15 @@ class GitHubToolProvider:
         }
         return await client.request(method, f"{_GITHUB_API}{path}", headers=headers, **kwargs)
 
-    async def _open_pr(self, repository: str, title: str, body: str, files: list) -> str:
+    async def _open_pr(
+        self, repository: str, title: str, body: str, files: list, branch_name: str = ""
+    ) -> str:
         if not repository or not title or not files:
             return "I need a repository, a title, and at least one file to open a PR."
+        if branch_name:
+            problem = _branch_problem(branch_name)
+            if problem is not None:
+                return problem
         token, error = await self._scoped(repository)
         if error is not None:
             return error
@@ -332,6 +447,11 @@ class GitHubToolProvider:
                     "added to the room's app installation yet."
                 )
             default_branch = repo_response.json()["default_branch"]
+            if branch_name == default_branch:
+                return (
+                    f"I will not use {repository}'s default branch "
+                    f"({default_branch}) as a PR head."
+                )
 
             ref_response = await self._github(
                 token, "GET", f"/repos/{repository}/git/ref/heads/{default_branch}"
@@ -340,13 +460,18 @@ class GitHubToolProvider:
                 return f"Could not read {repository}'s {default_branch} branch."
             base_sha = ref_response.json()["object"]["sha"]
 
-            branch = f"kobo/{self.self_name}/{_slug(title)}"
+            branch = branch_name or f"kobo/{self.self_name}/{_slug(title)}"
             create_ref = await self._github(
                 token,
                 "POST",
                 f"/repos/{repository}/git/refs",
                 json={"ref": f"refs/heads/{branch}", "sha": base_sha},
             )
+            if create_ref.status_code == 422 and branch_name:
+                return (
+                    f"Branch {branch!r} already exists on {repository}; I "
+                    "will not push over an existing branch."
+                )
             if create_ref.status_code != 201:
                 return f"Could not create a branch on {repository} (HTTP {create_ref.status_code})."
 
@@ -401,6 +526,109 @@ class GitHubToolProvider:
             return f"Opened: {url} (branch {branch}, against {default_branch})"
         except Exception as exc:
             return f"Opening the PR failed partway: {exc}"
+
+    async def _push_branch(
+        self, repository: str, branch: str, files: list, message: str, base: str
+    ) -> str:
+        if not repository or not branch:
+            return "I need a repository and a branch name."
+        problem = _branch_problem(branch)
+        if problem is not None:
+            return problem
+        token, error = await self._scoped(repository)
+        if error is not None:
+            return error
+
+        try:
+            repo_response = await self._github(token, "GET", f"/repos/{repository}")
+            if repo_response.status_code != 200:
+                return (
+                    f"GitHub would not show me {repository} "
+                    f"(HTTP {repo_response.status_code}) -- it may not be "
+                    "added to the room's app installation yet."
+                )
+            default_branch = repo_response.json()["default_branch"]
+            if branch == default_branch:
+                return (
+                    f"I will not push to {repository}'s default branch "
+                    f"({default_branch})."
+                )
+
+            existing = await self._github(
+                token, "GET", f"/repos/{repository}/git/ref/heads/{branch}"
+            )
+            if existing.status_code == 200:
+                return (
+                    f"Branch {branch!r} already exists on {repository}; I "
+                    "will not push over an existing branch."
+                )
+
+            base_ref = base or default_branch
+            ref_response = await self._github(
+                token, "GET", f"/repos/{repository}/git/ref/heads/{base_ref}"
+            )
+            if ref_response.status_code != 200:
+                return f"Could not read {repository}'s {base_ref} branch."
+            base_sha = ref_response.json()["object"]["sha"]
+
+            create_ref = await self._github(
+                token,
+                "POST",
+                f"/repos/{repository}/git/refs",
+                json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+            )
+            if create_ref.status_code != 201:
+                return (
+                    f"Could not create {branch!r} on {repository} "
+                    f"(HTTP {create_ref.status_code})."
+                )
+
+            for entry in files:
+                path = entry.get("path", "")
+                content = entry.get("content", "")
+                if not path:
+                    return (
+                        f"Branch {branch} was created at {base_sha[:7]}, but "
+                        "one of the files has no path -- nothing was "
+                        "committed onto it."
+                    )
+                # Same read-then-put dance as _open_pr: an existing file's
+                # update needs its current blob sha, a new file must not
+                # send one, and reads come from the new branch only.
+                existing_file = await self._github(
+                    token,
+                    "GET",
+                    f"/repos/{repository}/contents/{path}",
+                    params={"ref": branch},
+                )
+                commit_message = message or f"Changes on {branch}"
+                put_body = {
+                    "message": f"{commit_message}\n\n[{self.self_name}, via the agent room]",
+                    "content": base64.b64encode(content.encode()).decode(),
+                    "branch": branch,
+                }
+                if existing_file.status_code == 200:
+                    put_body["sha"] = existing_file.json().get("sha", "")
+                put_response = await self._github(
+                    token, "PUT", f"/repos/{repository}/contents/{path}", json=put_body
+                )
+                if put_response.status_code not in (200, 201):
+                    return (
+                        f"Branch {branch} was created at {base_sha[:7]}, but "
+                        f"writing {path} failed (HTTP {put_response.status_code})."
+                    )
+
+            committed = (
+                f" with {len(files)} file{'s' if len(files) != 1 else ''} committed"
+                if files
+                else ""
+            )
+            return (
+                f"Pushed branch {branch} on {repository} at {base_ref} head "
+                f"({base_sha[:7]}){committed}. No pull request was opened."
+            )
+        except Exception as exc:
+            return f"Pushing the branch failed partway: {exc}"
 
     async def _list_prs(self, repository: str, state: str, base: str, limit) -> str:
         if not repository:
