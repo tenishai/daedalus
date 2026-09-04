@@ -695,3 +695,106 @@ def test_update_failure_still_lands_the_reply_as_a_post():
 
     replies = [text for _, text, _ in api.posts if "thinking" not in text]
     assert any("echo" in text for text in replies)
+
+
+# ---- shared-channel addressing (two agents, one channel) -------------------
+#
+# A mention aimed at a DIFFERENT bot is theirs, not ours. Without the gate,
+# every agent in the channel answers every mention -- observed live with two
+# agents in one channel. The gate needs to know self (auth.test) and the
+# bot-ness of mentioned ids (users.info, cached); both fail OPEN to the old
+# channel-inbox behavior, never to silence.
+
+SELF_ID = "USELF"
+OTHER_BOT = "UBOTX"
+HUMAN = "UHUMAN"
+
+
+class AddressingApi(FakeApi):
+    def __init__(self, bots=(OTHER_BOT,), fail_lookup=False):
+        super().__init__()
+        self._bots = set(bots)
+        self._fail_lookup = fail_lookup
+        self.lookups: list[str] = []
+
+    async def auth_test(self):
+        return SELF_ID
+
+    async def is_bot_user(self, user_id):
+        self.lookups.append(user_id)
+        if self._fail_lookup:
+            raise RuntimeError("users.info down")
+        return user_id in self._bots
+
+
+def make_addressed(**api_kwargs):
+    api = AddressingApi(**api_kwargs)
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=api)
+    transport.user_id = SELF_ID
+    handler = EchoHandler()
+    return transport, api, handler
+
+
+async def test_mention_of_another_bot_is_ignored():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event(f"<@{OTHER_BOT}> what do you do?"), handler)
+    assert api.posts == []
+
+
+async def test_mention_of_self_is_answered():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event(f"<@{SELF_ID}> what do you do?"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_mention_of_self_alongside_another_bot_is_answered():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> <@{OTHER_BOT}> both of you?"), handler
+    )
+    assert len(api.posts) == 1
+
+
+async def test_mention_of_a_human_keeps_the_channel_inbox_behavior():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event(f"look at <@{HUMAN}>'s request"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_no_mentions_keeps_the_channel_inbox_behavior():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event("plain question"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_unknown_self_disables_the_gate():
+    transport, api, handler = make_addressed()
+    transport.user_id = None
+    await transport.handle_event(event(f"<@{OTHER_BOT}> hi"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_lookup_failure_fails_open_to_answering():
+    transport, api, handler = make_addressed(fail_lookup=True)
+    await transport.handle_event(event(f"<@{OTHER_BOT}> hi"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_botness_lookups_are_cached():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event(f"<@{OTHER_BOT}> one", ts="9.1"), handler)
+    await transport.handle_event(event(f"<@{OTHER_BOT}> two", ts="9.2"), handler)
+    assert api.lookups == [OTHER_BOT]
+
+
+async def test_gated_message_is_not_marked_seen():
+    """A message gated out must not consume its dedupe slot -- if the same ts
+    later arrives as an app_mention naming us (ordering quirks), it still
+    gets answered."""
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event(f"<@{OTHER_BOT}> hi", ts="4.2"), handler)
+    assert api.posts == []
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> hi", ts="4.2", type="app_mention"), handler
+    )
+    assert len(api.posts) == 1

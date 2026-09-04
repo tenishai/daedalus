@@ -4,6 +4,10 @@ Carries the battle scars of two prior production Slack agents as
 requirements, not code:
 - dedupe on (channel, ts): Slack redelivers, and mentions arrive as both
   `message` and `app_mention`
+- addressing in shared channels: a message that mentions OTHER bots and not
+  this one is theirs, not ours -- without this, two agents in one channel
+  both answer a mention aimed at one of them. Messages with no mention (or
+  mentioning humans) keep the channel-inbox behavior.
 - one Task per thread: thread_ts is the conversation
 - reaction lifecycle: eyes -> white_check_mark / x
 - replies stay in-thread
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -27,7 +32,10 @@ from daedalus.protocols import DenyAll, Handler
 from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
 
 _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
+_MENTION_ID = re.compile(r"<@([A-Z0-9]+)>")
 _SEEN_CAP = 500
+
+logger = logging.getLogger(__name__)
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
@@ -217,6 +225,26 @@ class SlackApi:
             response.raise_for_status()
             return response.content
 
+    async def auth_test(self) -> str:
+        """This bot's own Slack user id (auth.test), empty string on any
+        failure -- the transport treats an unknown self as "skip the
+        addressing gate", never as a reason not to serve."""
+        try:
+            response = await self._web.auth_test()
+            return response.get("user_id") or ""
+        except Exception:  # noqa: BLE001  identity is an optimization, not a gate
+            return ""
+
+    async def is_bot_user(self, user_id: str) -> bool:
+        """Whether `user_id` is a bot/app user (users.info). Failures read
+        as False -- an unresolvable mention must not silence the agent."""
+        try:
+            response = await self._web.users_info(user=user_id)
+            user = response.get("user") or {}
+            return bool(user.get("is_bot"))
+        except Exception:  # noqa: BLE001  fail-open to the channel-inbox behavior
+            return False
+
 
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
@@ -271,6 +299,10 @@ class SlackTransport:
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
         self._threads: dict[str, Task] = {}
+        # Own Slack user id (auth.test at serve time; None = unknown, the
+        # addressing gate skips) and a bot-ness cache for mentioned ids.
+        self.user_id: str | None = None
+        self._bot_users: dict[str, bool] = {}
 
     async def serve(self, handler: Handler) -> None:
         if not (self.bot_token and self.app_token):
@@ -283,6 +315,14 @@ class SlackTransport:
 
         if self._api is None:
             self._api = SlackApi(AsyncWebClient(token=self.bot_token))
+        if self.user_id is None:
+            self.user_id = (await self._api.auth_test()) or None
+            if self.user_id is None:
+                logger.warning(
+                    "slack: auth.test gave no user id -- the shared-channel "
+                    "addressing gate is disabled; mentions aimed at other "
+                    "agents will be answered too"
+                )
         self._wire_approver(handler)
 
         socket = SocketModeClient(
@@ -375,6 +415,10 @@ class SlackTransport:
             return
         if event.get("channel") != self.channel:
             return
+        if await self._addressed_to_another_agent(event.get("text") or ""):
+            # Shared channel, mention aimed at a different bot: theirs, not
+            # ours. Checked before the dedupe mark so nothing is consumed.
+            return
         ts = event.get("ts")
         key = (event.get("channel"), ts)
         if key in self._seen:
@@ -455,6 +499,28 @@ class SlackTransport:
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, thread)
+
+    async def _addressed_to_another_agent(self, text: str) -> bool:
+        """True only when the message mentions at least one BOT user and this
+        bot is not among the mentions -- the two-agents-one-channel case
+        (a mention aimed at a colleague must not draw two answers). Messages
+        with no mentions, mentions of humans, or mentions including self keep
+        the channel-inbox behavior. Unknown self (auth.test failed) or an
+        unresolvable mention fails OPEN to answering, never to silence."""
+        if self.user_id is None or self._api is None:
+            return False
+        mentioned = _MENTION_ID.findall(text)
+        if not mentioned or self.user_id in mentioned:
+            return False
+        for user_id in mentioned:
+            if user_id not in self._bot_users:
+                try:
+                    self._bot_users[user_id] = await self._api.is_bot_user(user_id)
+                except Exception:  # noqa: BLE001  fail open, never to silence
+                    self._bot_users[user_id] = False
+            if self._bot_users[user_id]:
+                return True
+        return False
 
     async def _escalate(self, task: Task, thread: str) -> None:
         route = self.escalation_route or ""
