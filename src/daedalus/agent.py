@@ -700,6 +700,7 @@ class Agent:
         from daedalus.transports.cli import CliTransport
 
         built: list[Transport] = []
+        slack_channels: list[str] = []
         for spec in self.bundle.spec.transports:
             if spec.kind == "cli":
                 built.append(CliTransport())
@@ -737,23 +738,33 @@ class Agent:
                         "transport 'slack' requires the slack extra — "
                         "pip install 'daedalus[slack]'"
                     ) from exc
-                from daedalus.transports.slack import SlackTransport
 
                 options = spec.options()
                 channel = options.get("channel")
                 if not channel:
                     raise BundleError("slack transport requires a 'channel' (channel ID)")
-                built.append(
-                    SlackTransport(
-                        str(channel),
-                        escalation_route=self.bundle.spec.approvals.escalation.route,
-                    )
-                )
+                # Collected, not built: every slack block folds into ONE
+                # transport below. Slack Socket Mode load-balances each
+                # event to exactly one open connection per app, so a
+                # transport per channel is not extra coverage -- it is a
+                # lottery where the wrong connection silently drops the
+                # event (2026-09-04, found live).
+                slack_channels.append(str(channel))
             else:
                 warnings.warn(
                     f"transport {spec.kind!r} is not available in this version; skipping",
                     stacklevel=2,
                 )
+        if slack_channels:
+            from daedalus.transports.slack import SlackTransport
+
+            built.append(
+                SlackTransport(
+                    slack_channels[0],
+                    channels=slack_channels,
+                    escalation_route=self.bundle.spec.approvals.escalation.route,
+                )
+            )
         return built
 
     async def aclose(self) -> None:
