@@ -54,13 +54,71 @@ _IMAGE_CAP = 4
 _IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_CELL = re.compile(r"^:?-{2,}:?$")
+_CELL_MAX = 26
+
+
+def _render_table(lines: list[str]) -> str:
+    """A run of markdown table rows -> one aligned monospace block. Slack
+    has no table rendering at all -- raw pipe rows arrive as soup -- but a
+    code fence keeps columns columns on every client. Separator rows are
+    dropped, bold sigils inside cells are stripped (they would show
+    literally in a fence), and long cells truncate with an ellipsis so a
+    wide table stays readable on a narrow pane."""
+    rows: list[list[str]] = []
+    for line in lines:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and all(_TABLE_SEP_CELL.fullmatch(c) for c in cells if c):
+            continue
+        cells = [_BOLD.sub(r"\1", c) for c in cells]
+        cells = [
+            c if len(c) <= _CELL_MAX else c[: _CELL_MAX - 1] + "\u2026" for c in cells
+        ]
+        rows.append(cells)
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    for r in rows:
+        r.extend([""] * (width - len(r)))
+    col = [max(len(r[i]) for r in rows) for i in range(width)]
+    rendered = "\n".join(
+        "  ".join(r[i].ljust(col[i]) for i in range(width)).rstrip() for r in rows
+    )
+    return f"```{rendered}```"
+
+
+def _tables_to_blocks(chunk: str) -> str:
+    """Replace each run of two-plus markdown table rows with its rendered
+    monospace block; everything else passes through byte-identical."""
+    out: list[str] = []
+    run: list[str] = []
+    for line in chunk.split("\n"):
+        if _TABLE_ROW.match(line):
+            run.append(line)
+            continue
+        if len(run) >= 2:
+            out.append(_render_table(run))
+        else:
+            out.extend(run)
+        run = []
+        out.append(line)
+    if len(run) >= 2:
+        out.append(_render_table(run))
+    else:
+        out.extend(run)
+    return "\n".join(out)
+
+
 def to_mrkdwn(text: str) -> str:
     """Light markdown -> Slack mrkdwn: **bold** -> *bold*, headers -> bold
-    lines. Fenced code blocks pass through untouched (finding #14: models
-    speak markdown; Slack renders mrkdwn and shows the raw sigils)."""
+    lines, table runs -> aligned monospace blocks. Fenced code blocks pass
+    through untouched (finding #14: models speak markdown; Slack renders
+    mrkdwn and shows the raw sigils)."""
     parts = text.split("```")
     for index in range(0, len(parts), 2):  # even indexes are outside fences
-        chunk = _BOLD.sub(r"*\1*", parts[index])
+        chunk = _tables_to_blocks(parts[index])
+        chunk = _BOLD.sub(r"*\1*", chunk)
         parts[index] = _HEADER.sub(r"*\1*", chunk)
     return "```".join(parts)
 
