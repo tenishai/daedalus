@@ -509,3 +509,51 @@ def test_update_failure_still_lands_the_reply_as_a_post():
 
     replies = [text for _, text, _ in api.posts if "thinking" not in text]
     assert any("echo" in text for text in replies)
+
+
+# --- markdown tables -> monospace blocks (2026-09-05) -------------------------
+
+
+def test_table_run_renders_as_aligned_monospace():
+    from daedalus.transports.slack import to_mrkdwn
+
+    text = (
+        "Here is the summary:\n"
+        "| Grant | Ticket | Status |\n"
+        "|-------|--------|--------|\n"
+        "| **BigQuery** | AREQ-1074 | Compliant |\n"
+        "| Product USA team | No ticket | Gap |\n"
+        "Done."
+    )
+    out = to_mrkdwn(text)
+    assert "```" in out
+    block = out.split("```")[1]
+    lines = block.strip().split("\n")
+    # Separator row dropped, bold sigils stripped, columns padded to align.
+    assert lines[0].startswith("Grant")
+    assert "----" not in block
+    assert "**" not in block
+    assert lines[1].startswith("BigQuery")
+    assert lines[0].index("Ticket") == lines[1].index("AREQ-1074")
+    assert "Here is the summary:" in out and "Done." in out
+
+
+def test_long_cells_truncate_with_ellipsis():
+    from daedalus.transports.slack import to_mrkdwn
+
+    text = (
+        "| Group | Actor |\n"
+        "| engineering_operations_search_personalization_global | user@example.com |\n"
+    )
+    out = to_mrkdwn(text)
+    assert "…" in out
+    assert "engineering_operations_search_personalization_global" not in out
+
+
+def test_single_pipe_line_and_fenced_tables_pass_through():
+    from daedalus.transports.slack import to_mrkdwn
+
+    lone = "a | b | c"
+    assert to_mrkdwn(lone) == lone
+    fenced = "```\n| raw | table |\n| kept | as-is |\n```"
+    assert to_mrkdwn(fenced) == fenced
