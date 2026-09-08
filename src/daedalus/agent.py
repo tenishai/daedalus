@@ -729,9 +729,13 @@ class Agent:
             )
             if budget.remaining() == 0:
                 # checkpoint intentionally kept: re-fund and resume()
+                # The reply is read by HUMANS on every surface (a Slack
+                # channel got the raw sentinel once, as an agent's entire
+                # answer); machines key on state/reason, never this text.
                 return task.reply(
-                    f"stopped: token budget exhausted "
-                    f"({self.bundle.spec.model.budget.per_task_tokens})",
+                    "I had to stop before finishing -- this task ran past "
+                    f"my token budget ({self.bundle.spec.model.budget.per_task_tokens}). "
+                    "A narrower ask may fit; my operator can raise the limit.",
                     state=TaskState.FAILED,
                     reason=ReasonCode.BUDGET_EXHAUSTED,
                 )
@@ -777,10 +781,14 @@ class Agent:
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
 
-        detail = f"; last attempt: {last_attempt}" if last_attempt else ""
+        detail = (
+            f" The last thing I tried: {last_attempt}." if last_attempt else ""
+        )
         return task.reply(
-            f"stopped: exceeded tools.max_steps "
-            f"({self.bundle.spec.tools.max_steps}){detail}",
+            "I had to stop before finishing -- this task needed more than "
+            f"the {self.bundle.spec.tools.max_steps} tool steps I'm allowed "
+            f"in one go.{detail} A narrower ask may fit; my operator can "
+            "raise the limit.",
             state=TaskState.FAILED,
             reason=ReasonCode.POLICY_VIOLATION,
         )
