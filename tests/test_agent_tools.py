@@ -160,7 +160,7 @@ async def test_runaway_tool_loop_hits_max_steps_and_fails_with_reason(tmp_path):
     assert task.reason_code is ReasonCode.POLICY_VIOLATION
     assert len(llm.calls) == 10  # ToolsSpec.max_steps default
     # finding #9: the failure says what was last tried, not just that it stopped
-    assert "last attempt: files.read -> the same thing again" in task.agent_text()
+    assert "The last thing I tried: files.read -> the same thing again" in task.agent_text()
 
 
 async def test_event_stream_traces_the_whole_tool_turn(tmp_path):
