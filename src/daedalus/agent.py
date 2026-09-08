@@ -335,6 +335,28 @@ class Agent:
                 )
             )
 
+        # The liminal sidecar (external-MCP arc): gateway tools stack
+        # beside the primary provider once the bundle names the gateway --
+        # the same composition rule as github. Skipped when liminal IS the
+        # primary above (never two clients to one gateway).
+        if spec.provider != "liminal" and spec.liminal.url:
+            try:
+                import liminal  # noqa: F401  — fail at load time, not mid-conversation
+            except ImportError as exc:
+                raise BundleError(
+                    "tools.liminal.url is set but liminal is not installed — "
+                    "pip install -e path/to/liminal"
+                ) from exc
+            from daedalus.tools.liminal import LiminalToolProvider
+
+            providers.append(
+                LiminalToolProvider(
+                    spec.liminal.url,
+                    token_env=spec.liminal.token_env,
+                    exchange_url=spec.liminal.exchange_url,
+                )
+            )
+
         if not providers:
             return NoTools()
         if len(providers) == 1:
