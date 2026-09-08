@@ -96,6 +96,11 @@ class TransportSpec(BaseModel):
 class LiminalSpec(_WarnExtra):
     url: str | None = None  # e.g. http://localhost:9100
     token_env: str | None = None  # env var holding the bearer token; unset = no auth
+    # The switchboard's token-exchange base URL (external-MCP arc, C1).
+    # When set, token_env holds the agent's STANDING colleague token, and
+    # the provider swaps it for a short-lived gateway-audience token
+    # before every use -- standing identity never dials the gateway.
+    exchange_url: str | None = None
 
 
 class ColleaguesSpec(_WarnExtra):

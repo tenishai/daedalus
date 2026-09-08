@@ -2,8 +2,10 @@
 #   FROM <ar>/daedalus-runtime:<tag>
 #   COPY bundle/ /bundle
 #
-# techne is not on PyPI; it is supplied as a named build context:
-#   docker build -f docker/Dockerfile --build-context techne=../techne -t daedalus-runtime .
+# techne and liminal are not on PyPI; they are supplied as named build contexts:
+#   docker build -f docker/Dockerfile \
+#     --build-context techne=../techne --build-context liminal=../liminal \
+#     -t daedalus-runtime .
 #
 # Build stage: wheels only. Both source trees (including techne's .git history,
 # which .dockerignore cannot reach since it's a separate named build context)
@@ -19,13 +21,14 @@
 FROM python:3.12-slim AS build
 
 COPY --from=techne / /src/techne
+COPY --from=liminal / /src/liminal
 COPY . /src/daedalus
 # google-cloud-aiplatform: litellm's vertex_ai/* routes import the vertexai
 # SDK at call time — the platform's default model provider, so baked in here.
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "/src/daedalus[a2a,slack]" "google-cloud-aiplatform>=1.38"
+RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "liminal @ file:///src/liminal" "/src/daedalus[a2a,slack]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
