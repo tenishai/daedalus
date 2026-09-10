@@ -21,18 +21,35 @@ def _rows(*cells):
 class FakeLake:
     """Scripted cloudtrail client: one query lifecycle plus pagination."""
 
-    def __init__(self, statuses=("FINISHED",), pages=None, fail_start=False):
+    def __init__(
+        self,
+        statuses=("FINISHED",),
+        pages=None,
+        fail_start=False,
+        lifecycle_pages=None,
+        fail_lifecycle=False,
+    ):
         self.statuses = list(statuses)
         self.pages = pages if pages is not None else [{"QueryResultRows": []}]
+        # None -> the lifecycle lane exists but has no events (the default
+        # keeps every membership-only test meaningful without edits).
+        self.lifecycle_pages = lifecycle_pages
         self.fail_start = fail_start
+        self.fail_lifecycle = fail_lifecycle
         self.started = []
         self.describes = 0
+        self._lane_by_qid = {}
 
     def start_query(self, QueryStatement):
         if self.fail_start:
             raise RuntimeError("lake said no")
+        is_lifecycle = "user.lifecycle" in QueryStatement
+        if self.fail_lifecycle and is_lifecycle:
+            raise RuntimeError("lifecycle lane said no")
         self.started.append(QueryStatement)
-        return {"QueryId": "q-1"}
+        qid = "q-%d" % len(self.started)
+        self._lane_by_qid[qid] = is_lifecycle
+        return {"QueryId": qid}
 
     def describe_query(self, EventDataStore, QueryId):
         assert EventDataStore == EDS
@@ -41,8 +58,12 @@ class FakeLake:
         return {"QueryStatus": status}
 
     def get_query_results(self, EventDataStore, QueryId, NextToken=None):
-        page = dict(self.pages[0 if NextToken is None else 1])
-        if NextToken is None and len(self.pages) > 1:
+        if self._lane_by_qid.get(QueryId):
+            source = self.lifecycle_pages or [{"QueryResultRows": []}]
+        else:
+            source = self.pages
+        page = dict(source[0 if NextToken is None else 1])
+        if NextToken is None and len(source) > 1:
             page["NextToken"] = "page-2"
         return page
 
@@ -115,11 +136,126 @@ def test_query_carries_email_prefix_store_and_limit():
     asyncio.run(
         provider.call("cloudtrail.query_provisioning", {"email": "a.b@example.com"})
     )
-    (statement,) = lake.started
-    assert "= 'a.b@example.com'" in statement
-    assert "LIKE 'platform_%'" in statement
-    assert f"FROM {EDS}" in statement
-    assert "LIMIT 200" in statement
+    membership, lifecycle = lake.started
+    assert "= 'a.b@example.com'" in membership
+    assert "LIKE 'platform_%'" in membership
+    assert f"FROM {EDS}" in membership
+    assert "LIMIT 200" in membership
+    assert "user.lifecycle" not in membership
+
+
+def test_lifecycle_query_targets_the_principal_without_group_filters():
+    # The blind spot this lane closes: deactivation removes every group
+    # membership WITHOUT per-group remove events, and the membership
+    # query's UserGroup join excludes lifecycle events structurally. The
+    # second statement must carry the five lifecycle event types, the
+    # email, the window -- and none of the group-shaped filters.
+    lake = FakeLake()
+    provider, _ = _provider(lake, group_prefix="platform_")
+    asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a.b@example.com"})
+    )
+    _membership, lifecycle = lake.started
+    for event in (
+        "user.lifecycle.activate",
+        "user.lifecycle.deactivate",
+        "user.lifecycle.delete.initiated",
+        "user.lifecycle.suspend",
+        "user.lifecycle.unsuspend",
+    ):
+        assert event in lifecycle
+    assert "= 'a.b@example.com'" in lifecycle
+    assert f"FROM {EDS}" in lifecycle
+    assert "LIMIT 200" in lifecycle
+    assert "UserGroup" not in lifecycle
+    assert "LIKE 'platform_%'" not in lifecycle
+
+
+def test_lifecycle_events_merge_into_the_timeline_newest_first():
+    lake = FakeLake(
+        pages=[
+            {
+                "QueryResultRows": _rows(
+                    (
+                        {"eventTime": "2026-04-08 18:52:01.000"},
+                        {"user": "a@example.com"},
+                        {"groupName": "engineering_team_x"},
+                        {"actor": "admin@example.com"},
+                        {"eventType": "group.user_membership.add"},
+                    )
+                )
+            }
+        ],
+        lifecycle_pages=[
+            {
+                "QueryResultRows": _rows(
+                    (
+                        {"eventTime": "2026-07-21 17:39:10.000"},
+                        {"user": "a@example.com"},
+                        {"actor": "offboarder@example.com"},
+                        {"eventType": "user.lifecycle.deactivate"},
+                    )
+                )
+            }
+        ],
+    )
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert reply.startswith("2 provisioning events for a@example.com")
+    assert "user.lifecycle.deactivate" in reply
+    assert "group.user_membership.add" in reply
+    # newest first across BOTH lanes: the July deactivation renders before
+    # the April group add
+    assert reply.index("user.lifecycle.deactivate") < reply.index(
+        "group.user_membership.add"
+    )
+    # the semantic the audit thread missed, taught at the point of use
+    assert "without per-group remove events" in reply
+
+
+def test_lifecycle_lane_failure_keeps_membership_rows_and_warns():
+    lake = FakeLake(
+        pages=[
+            {
+                "QueryResultRows": _rows(
+                    (
+                        {"eventTime": "2026-04-08 18:52:01.000"},
+                        {"user": "a@example.com"},
+                        {"groupName": "engineering_team_x"},
+                        {"actor": "admin@example.com"},
+                        {"eventType": "group.user_membership.add"},
+                    )
+                )
+            }
+        ],
+        fail_lifecycle=True,
+    )
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert "group.user_membership.add" in reply
+    assert "offboarding coverage is incomplete" in reply
+
+
+def test_empty_result_mentions_the_lifecycle_lane():
+    provider, _ = _provider(FakeLake())
+    reply = asyncio.run(
+        provider.call(
+            "cloudtrail.query_provisioning",
+            {"email": "a@example.com", "lookback_days": 30},
+        )
+    )
+    assert "account lifecycle events" in reply
+
+
+def test_description_teaches_the_deactivation_semantics():
+    provider, _ = _provider(FakeLake())
+    (spec,) = asyncio.run(provider.tools())
+    assert "lifecycle" in spec["description"]
+    assert "deactivation" in spec["description"]
 
 
 def test_quotes_in_email_shape_never_reach_the_query_unescaped():

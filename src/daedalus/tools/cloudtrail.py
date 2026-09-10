@@ -14,11 +14,17 @@ the `oaud` claim AWS's Google federation checks, which locally-minted
 gcloud tokens do NOT carry -- and boto3 exchanges it for role
 credentials, cached until shortly before expiry.
 
-The one tool queries an Okta system-log event data store for group
-membership add/remove events for a single email: the provisioning-history
-lane of an access audit ("user X was added to group Y on date Z by actor
-W"). The query is lifted from a production audit service; its shapes
-(event types, target extraction) follow Okta's system-log schema.
+The one tool queries an Okta system-log event data store for a single
+email's provisioning history -- TWO statements per call. The membership
+statement returns group add/remove events ("user X was added to group Y
+on date Z by actor W"); the lifecycle statement returns account events
+(deactivate, delete, suspend, unsuspend, activate) for the same person.
+The second statement exists because of a real audit miss: deactivating a
+user removes them from EVERY group without emitting per-group remove
+events, so a membership-only history reads as "still in the group" for a
+person who was offboarded months ago. The membership query is lifted from
+a production audit service; its shapes (event types, target extraction)
+follow Okta's system-log schema.
 """
 
 from __future__ import annotations
@@ -41,6 +47,24 @@ _QUERY_DEADLINE_S = 60.0
 _POLL_INTERVAL_S = 1.5
 _ROW_LIMIT = 200
 _CRED_EXPIRY_BUFFER_S = 120.0
+
+# Account-lifecycle event types. Deactivation (and suspension) strips every
+# group membership WITHOUT per-group group.user_membership.remove events --
+# the blind spot that once turned "no removal event" into a wrong "still in
+# the group" audit answer. Activate/unsuspend are included so a restore
+# after suspension is visible in the same timeline.
+_LIFECYCLE_EVENTS = (
+    "user.lifecycle.activate",
+    "user.lifecycle.deactivate",
+    "user.lifecycle.delete.initiated",
+    "user.lifecycle.suspend",
+    "user.lifecycle.unsuspend",
+)
+
+# The subset whose side effect is membership-wide removal/freeze.
+_ACCOUNT_WIDE_EVENTS = frozenset(
+    ("user.lifecycle.deactivate", "user.lifecycle.delete.initiated", "user.lifecycle.suspend")
+)
 
 
 def _metadata_token() -> str | None:
@@ -83,8 +107,12 @@ class CloudTrailToolProvider:
                 "name": "cloudtrail.query_provisioning",
                 "description": (
                     "Directory-group provisioning history for one person: "
-                    "dated group membership add/remove events from the "
-                    "org's identity-provider system log, newest first. "
+                    "dated group membership add/remove events PLUS account "
+                    "lifecycle events (deactivation, deletion, suspension) "
+                    "from the org's identity-provider system log, newest "
+                    "first. Deactivation removes ALL group memberships "
+                    "without per-group remove events, so the absence of a "
+                    "remove event is never proof of current membership. "
                     "Read-only. Default lookback is 5 years -- an "
                     "offboarded person's audit-relevant ADD may be years "
                     "older than the audit window."
@@ -125,36 +153,84 @@ class CloudTrailToolProvider:
         except (TypeError, ValueError):
             lookback = _DEFAULT_LOOKBACK_DAYS
         try:
-            rows = await asyncio.to_thread(self._query_sync, email, lookback)
+            rows, lifecycle_warning = await asyncio.to_thread(
+                self._query_sync, email, lookback
+            )
         except _LaneError as exc:
             return str(exc)
         except Exception as exc:  # noqa: BLE001  degrade politely, never raise into the loop
             return f"The provisioning-history query failed partway: {exc}"
         if not rows:
-            return (
+            text = (
                 f"No provisioning events for {email} in the last "
                 f"{lookback} days (searched groups matching "
-                f"'{self.group_prefix}*')."
+                f"'{self.group_prefix}*' and account lifecycle events)."
             )
+            if lifecycle_warning:
+                text += f"\n  warning: {lifecycle_warning}"
+            return text
         lines = [
             f"{len(rows)} provisioning events for {email} "
             f"(last {lookback} days, newest first):"
         ]
+        saw_account_wide = False
         for row in rows:
             actor = row.get("actor") or "?"
+            event_type = str(row.get("eventType", "?"))
+            if event_type.startswith("user.lifecycle."):
+                if event_type in _ACCOUNT_WIDE_EVENTS:
+                    saw_account_wide = True
+                lines.append(
+                    f"  {row.get('eventTime', '?')}  {event_type}  "
+                    f"[account lifecycle]  (actor: {actor})"
+                )
+            else:
+                lines.append(
+                    f"  {row.get('eventTime', '?')}  {event_type}  "
+                    f"{row.get('groupName', '?')}  (actor: {actor})"
+                )
+        if saw_account_wide:
             lines.append(
-                f"  {row.get('eventTime', '?')}  {row.get('eventType', '?')}  "
-                f"{row.get('groupName', '?')}  (actor: {actor})"
+                "  note: deactivation, deletion, or suspension removes ALL "
+                "group memberships without per-group remove events -- treat "
+                "that date as the removal date for every group then held."
             )
+        if lifecycle_warning:
+            lines.append(f"  warning: {lifecycle_warning}")
         return "\n".join(lines)
 
     # -- the synchronous lane (runs in a thread) ---------------------------
 
-    def _query_sync(self, email: str, lookback_days: int) -> list[dict]:
+    def _query_sync(self, email: str, lookback_days: int) -> tuple[list[dict], str | None]:
+        """Both lanes, one merged timeline. The membership lane is the
+        original contract and its failure fails the call; the lifecycle
+        lane is additive, so ITS failure degrades to a warning string --
+        an audit must never lose the membership answer because the newer
+        lane hiccuped, but it must also never silently lose offboarding
+        coverage (the warning is the honesty)."""
         client = self._lake_client()
-        query_id = client.start_query(
-            QueryStatement=self._build_query(email, lookback_days)
-        )["QueryId"]
+        rows = self._run_query(client, self._build_query(email, lookback_days))
+        lifecycle_warning = None
+        try:
+            lifecycle_rows = self._run_query(
+                client, self._build_lifecycle_query(email, lookback_days)
+            )
+        except Exception:  # noqa: BLE001  additive lane: degrade to a warning
+            lifecycle_rows = []
+            lifecycle_warning = (
+                "the account-lifecycle lane failed, so offboarding "
+                "coverage is incomplete this run -- a deactivation would "
+                "not appear above."
+            )
+        merged = sorted(
+            rows + lifecycle_rows,
+            key=lambda row: str(row.get("eventTime", "")),
+            reverse=True,
+        )
+        return merged, lifecycle_warning
+
+    def _run_query(self, client, statement: str) -> list[dict]:
+        query_id = client.start_query(QueryStatement=statement)["QueryId"]
         deadline = time.monotonic() + _QUERY_DEADLINE_S
         while True:
             status = client.describe_query(
@@ -264,6 +340,41 @@ WHERE
     AND json_extract_scalar(target_user.value, '$.alternateId') = '{safe_email}'
     AND json_extract_scalar(target_group.value, '$.type') = 'UserGroup'
     AND json_extract_scalar(target_group.value, '$.displayName') LIKE '{safe_prefix}%'
+    AND eventData.eventTime > '{cutoff}'
+ORDER BY eventData.eventTime DESC
+LIMIT {_ROW_LIMIT}
+""".strip()
+
+    def _build_lifecycle_query(self, email: str, lookback_days: int) -> str:
+        """Account-lifecycle events for the principal. Deliberately NO
+        group join, NO UserGroup filter, NO group-prefix LIKE: lifecycle
+        events target only the user, so the membership query's shape
+        excludes them structurally -- which is exactly how the blind spot
+        happened."""
+        cutoff = time.strftime(
+            "%Y-%m-%d 00:00:00.000",
+            time.gmtime(time.time() - lookback_days * 86400),
+        )
+        safe_email = email.replace("'", "''")
+        event_list = ",\n        ".join(f"'{event}'" for event in _LIFECYCLE_EVENTS)
+        return f"""
+SELECT
+    eventData.eventTime AS eventTime,
+    json_extract_scalar(target_user.value, '$.alternateId') AS user,
+    json_extract_scalar(
+        json_parse(element_at(eventData.additionaleventdata, 'actor')),
+        '$.alternateId'
+    ) AS actor,
+    element_at(eventData.additionaleventdata, 'eventType') AS eventType
+FROM {self.event_data_store}
+CROSS JOIN UNNEST(
+    CAST(json_parse(element_at(eventData.additionaleventdata, 'target')) AS array(json))
+) AS target_user(value)
+WHERE
+    element_at(eventData.additionaleventdata, 'eventType') IN (
+        {event_list}
+    )
+    AND json_extract_scalar(target_user.value, '$.alternateId') = '{safe_email}'
     AND eventData.eventTime > '{cutoff}'
 ORDER BY eventData.eventTime DESC
 LIMIT {_ROW_LIMIT}
