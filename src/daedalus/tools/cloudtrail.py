@@ -61,10 +61,19 @@ _LIFECYCLE_EVENTS = (
     "user.lifecycle.unsuspend",
 )
 
-# The subset whose side effect is membership-wide removal/freeze.
+# The subset whose side effect is membership-wide REMOVAL. Suspension is
+# deliberately NOT here: in Okta it freezes sign-in but RETAINS group
+# memberships (unsuspend restores the user intact), so calling it a
+# removal would be the incident's mistake with a different event name.
 _ACCOUNT_WIDE_EVENTS = frozenset(
-    ("user.lifecycle.deactivate", "user.lifecycle.delete.initiated", "user.lifecycle.suspend")
+    ("user.lifecycle.deactivate", "user.lifecycle.delete.initiated")
 )
+
+# Events that restore an account. What matters for a current-state answer
+# is the LATEST lifecycle event, never the mere presence of an earlier
+# deactivation -- asserting offboarding past a later restore would be the
+# original wrong answer with the sign flipped.
+_RESTORE_EVENTS = frozenset(("user.lifecycle.activate", "user.lifecycle.unsuspend"))
 
 
 def _metadata_token() -> str | None:
@@ -153,7 +162,7 @@ class CloudTrailToolProvider:
         except (TypeError, ValueError):
             lookback = _DEFAULT_LOOKBACK_DAYS
         try:
-            rows, lifecycle_warning = await asyncio.to_thread(
+            rows, lifecycle_warning, truncated = await asyncio.to_thread(
                 self._query_sync, email, lookback
             )
         except _LaneError as exc:
@@ -173,27 +182,61 @@ class CloudTrailToolProvider:
             f"{len(rows)} provisioning events for {email} "
             f"(last {lookback} days, newest first):"
         ]
-        saw_account_wide = False
+        latest_lifecycle = None  # rows are newest-first; first hit wins
+        any_off_event = False
         for row in rows:
             actor = row.get("actor") or "?"
+            when = row.get("eventTime") or "?"
             event_type = str(row.get("eventType", "?"))
             if event_type.startswith("user.lifecycle."):
-                if event_type in _ACCOUNT_WIDE_EVENTS:
-                    saw_account_wide = True
+                if latest_lifecycle is None:
+                    latest_lifecycle = (when, event_type)
+                if (
+                    event_type in _ACCOUNT_WIDE_EVENTS
+                    or event_type == "user.lifecycle.suspend"
+                ):
+                    any_off_event = True
                 lines.append(
-                    f"  {row.get('eventTime', '?')}  {event_type}  "
-                    f"[account lifecycle]  (actor: {actor})"
+                    f"  {when}  {event_type}  [account lifecycle]  (actor: {actor})"
                 )
             else:
                 lines.append(
-                    f"  {row.get('eventTime', '?')}  {event_type}  "
+                    f"  {when}  {event_type}  "
                     f"{row.get('groupName', '?')}  (actor: {actor})"
                 )
-        if saw_account_wide:
+        # The note keys on the LATEST lifecycle event: an earlier
+        # deactivation followed by a restore is not offboarding.
+        if latest_lifecycle is not None:
+            when, event_type = latest_lifecycle
+            if event_type in _ACCOUNT_WIDE_EVENTS:
+                lines.append(
+                    "  note: deactivation or deletion removes ALL group "
+                    "memberships without per-group remove events -- treat "
+                    f"{when} as the removal date for every group then held."
+                )
+            elif event_type == "user.lifecycle.suspend":
+                lines.append(
+                    "  note: suspension freezes sign-in but RETAINS group "
+                    "memberships -- it is not a removal; verify current "
+                    "state before any access claim."
+                )
+            elif event_type in _RESTORE_EVENTS and any_off_event:
+                lines.append(
+                    f"  note: the account was RESTORED on {when} after an "
+                    "earlier deactivation/suspension -- the earlier event "
+                    "is not a current-state answer; verify live membership "
+                    "before any access claim."
+                )
+        elif lifecycle_warning is None:
             lines.append(
-                "  note: deactivation, deletion, or suspension removes ALL "
-                "group memberships without per-group remove events -- treat "
-                "that date as the removal date for every group then held."
+                "  lifecycle lane: no account events in this window "
+                "(deactivation/deletion/suspension) -- offboarding "
+                "coverage is complete for the window."
+            )
+        for lane in truncated:
+            lines.append(
+                f"  note: the {lane} lane hit its {_ROW_LIMIT}-row cap -- "
+                "older events may be missing from this list."
             )
         if lifecycle_warning:
             lines.append(f"  warning: {lifecycle_warning}")
@@ -201,15 +244,19 @@ class CloudTrailToolProvider:
 
     # -- the synchronous lane (runs in a thread) ---------------------------
 
-    def _query_sync(self, email: str, lookback_days: int) -> tuple[list[dict], str | None]:
+    def _query_sync(
+        self, email: str, lookback_days: int
+    ) -> tuple[list[dict], str | None, list[str]]:
         """Both lanes, one merged timeline. The membership lane is the
         original contract and its failure fails the call; the lifecycle
         lane is additive, so ITS failure degrades to a warning string --
         an audit must never lose the membership answer because the newer
         lane hiccuped, but it must also never silently lose offboarding
-        coverage (the warning is the honesty)."""
+        coverage (the warning is the honesty). The third return names
+        lanes that hit the row cap, so truncation is never silent."""
         client = self._lake_client()
         rows = self._run_query(client, self._build_query(email, lookback_days))
+        truncated = ["membership"] if len(rows) >= _ROW_LIMIT else []
         lifecycle_warning = None
         try:
             lifecycle_rows = self._run_query(
@@ -222,12 +269,14 @@ class CloudTrailToolProvider:
                 "coverage is incomplete this run -- a deactivation would "
                 "not appear above."
             )
+        if len(lifecycle_rows) >= _ROW_LIMIT:
+            truncated.append("lifecycle")
         merged = sorted(
             rows + lifecycle_rows,
-            key=lambda row: str(row.get("eventTime", "")),
+            key=lambda row: str(row.get("eventTime") or ""),
             reverse=True,
         )
-        return merged, lifecycle_warning
+        return merged, lifecycle_warning, truncated
 
     def _run_query(self, client, statement: str) -> list[dict]:
         query_id = client.start_query(QueryStatement=statement)["QueryId"]

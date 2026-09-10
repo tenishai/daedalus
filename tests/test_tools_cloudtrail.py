@@ -240,6 +240,112 @@ def test_lifecycle_lane_failure_keeps_membership_rows_and_warns():
     assert "offboarding coverage is incomplete" in reply
 
 
+def _membership_row(when="2026-04-08 18:52:01.000"):
+    return (
+        {"eventTime": when},
+        {"user": "a@example.com"},
+        {"groupName": "engineering_team_x"},
+        {"actor": "admin@example.com"},
+        {"eventType": "group.user_membership.add"},
+    )
+
+
+def _lifecycle_row(event_type, when):
+    return (
+        {"eventTime": when},
+        {"user": "a@example.com"},
+        {"actor": "admin@example.com"},
+        {"eventType": event_type},
+    )
+
+
+def test_restore_after_deactivation_is_not_reported_as_offboarding():
+    # The incident sign-flipped: an earlier deactivation with a LATER
+    # activate must not read as "removal date for every group".
+    lake = FakeLake(
+        pages=[{"QueryResultRows": _rows(_membership_row())}],
+        lifecycle_pages=[
+            {
+                "QueryResultRows": _rows(
+                    _lifecycle_row("user.lifecycle.deactivate", "2026-06-01 10:00:00.000"),
+                    _lifecycle_row("user.lifecycle.activate", "2026-08-01 10:00:00.000"),
+                )
+            }
+        ],
+    )
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert "RESTORED on 2026-08-01" in reply
+    assert "removal date for every group" not in reply
+
+
+def test_suspension_is_reported_as_freeze_not_removal():
+    lake = FakeLake(
+        pages=[{"QueryResultRows": _rows(_membership_row())}],
+        lifecycle_pages=[
+            {
+                "QueryResultRows": _rows(
+                    _lifecycle_row("user.lifecycle.suspend", "2026-06-01 10:00:00.000")
+                )
+            }
+        ],
+    )
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert "RETAINS group memberships" in reply
+    assert "removal date for every group" not in reply
+
+
+def test_membership_only_reply_affirms_lifecycle_coverage():
+    # "lane ran clean, zero account events" must not look identical to
+    # the pre-fix tool that never ran the lane at all.
+    lake = FakeLake(pages=[{"QueryResultRows": _rows(_membership_row())}])
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert "coverage is complete for the window" in reply
+
+
+def test_null_event_time_sorts_last_not_first():
+    lake = FakeLake(
+        pages=[
+            {
+                "QueryResultRows": _rows(
+                    (
+                        {"eventTime": None},
+                        {"user": "a@example.com"},
+                        {"groupName": "engineering_y"},
+                        {"eventType": "group.user_membership.add"},
+                    ),
+                    _membership_row("2026-04-08 18:52:01.000"),
+                )
+            }
+        ]
+    )
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    lines = reply.splitlines()
+    assert "2026-04-08" in lines[1]  # dated row first
+    assert "engineering_y" in lines[2]  # null-timestamped row after it
+
+
+def test_row_cap_truncation_is_named_per_lane():
+    full_page = {"QueryResultRows": _rows(*[_membership_row() for _ in range(200)])}
+    lake = FakeLake(pages=[full_page])
+    provider, _ = _provider(lake)
+    reply = asyncio.run(
+        provider.call("cloudtrail.query_provisioning", {"email": "a@example.com"})
+    )
+    assert "membership lane hit its 200-row cap" in reply
+
+
 def test_empty_result_mentions_the_lifecycle_lane():
     provider, _ = _provider(FakeLake())
     reply = asyncio.run(
