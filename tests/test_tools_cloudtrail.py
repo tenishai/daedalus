@@ -238,6 +238,9 @@ def test_lifecycle_lane_failure_keeps_membership_rows_and_warns():
     )
     assert "group.user_membership.add" in reply
     assert "offboarding coverage is incomplete" in reply
+    # the guard the re-review's surviving mutant exposed: a FAILED lane
+    # must never also claim complete coverage in the same reply
+    assert "coverage is complete" not in reply
 
 
 def _membership_row(when="2026-04-08 18:52:01.000"):
