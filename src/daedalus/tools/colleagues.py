@@ -18,6 +18,10 @@ from pathlib import Path
 
 _NOT_CONFIGURED = "The colleague pass is not configured."
 _UNREADABLE_REPLY = "The colleague answered in a shape I could not read."
+#: Task states that mean the question was refused rather than answered.
+#: A guardrail refusal is one of these carrying explanatory text, which is
+#: exactly what makes it readable as an answer if nobody checks (#40 r2).
+_UNANSWERED_STATES = frozenset({"failed", "rejected", "canceled"})
 _NO_MEMORY = "I have no memory store configured, so I cannot remember that."
 
 # A colleague whose heartbeat is older than this is treated as unreachable
@@ -87,6 +91,24 @@ COLLEAGUE_DOWN_FOR_S = 300.0
 current_context_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_context_id", default=None
 )
+
+# How many delegation hops led to the task currently being handled, set by
+# Agent.handle_task from the inbound task's metadata (cabal#144). Threaded
+# outbound +1 so a chain that crosses agents keeps counting.
+#
+# WITHOUT THIS THE CROSS-AGENT CYCLE IS UNBOUNDED. cabal bounds depth in its
+# router, but a colleague call that carries no depth arrives at 0 however deep
+# the caller already was -- so ledger -> gemini-one -> ledger, the shape from
+# the 2026-09-10 incident, resets on every hop and the bound never fires. A
+# contextvar for the same reason current_context_id is one: tools are invoked
+# with arguments only, and an agent may handle tasks concurrently.
+current_delegation_depth: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "current_delegation_depth", default=0
+)
+
+#: cabal's metadata key. A CROSS-REPO STRING CONTRACT, named here so a grep
+#: for it finds both ends: cabal reads this in DelegationDepthGuardrail.
+DEPTH_KEY = "cabal_delegation_depth"
 
 # Colleagues successfully consulted while handling the CURRENT task, in
 # consultation order -- Agent.handle_task resets this per task and reads it
@@ -523,6 +545,21 @@ class ColleaguesToolProvider:
         context_id = current_context_id.get()
         if context_id is not None:
             envelope["task"]["contextId"] = context_id
+        # +1: THIS ASK IS A HOP, so the minimum value ever sent is 1 and the
+        # key is always present.
+        #
+        # AN EARLIER COMMENT JUSTIFIED THAT BY SAYING THE RECEIVER DISTINGUISHES
+        # zero from absent. It does not (#40 pre-pass): cabal reads
+        # `metadata.get(DEPTH_KEY, 0)`, so a missing key and an explicit 0
+        # collapse onto the same value through the same path. The real reason
+        # to always send is narrower and survives that: a receiver CAN only
+        # draw the distinction if the sender is unconditional about it, and we
+        # never send 0 anyway, so there is nothing to lose by being explicit
+        # and one contract to gain.
+        envelope["task"]["metadata"] = {
+            **envelope["task"].get("metadata", {}),
+            DEPTH_KEY: current_delegation_depth.get() + 1,
+        }
         try:
             response = await client.post(
                 f"{self.url}/a2a/tasks", json=envelope, headers=headers, timeout=180.0
@@ -553,6 +590,36 @@ class ColleaguesToolProvider:
             return _UNREADABLE_REPLY
         if not text:
             return _UNREADABLE_REPLY
+        # A REFUSAL ARRIVES AS HTTP 200 (#40 r2 Important). cabal turns a
+        # guardrail BLOCK into an annotated Task -- state="failed", the refusal
+        # as the single agent text part -- and `routes/tasks.py` returns it
+        # through a `response_model=Task` route. So the transport says 200, the
+        # TASK says failed, and reading only `status.message` turns a refusal
+        # into an answer.
+        #
+        # THE LEDGER IS WHY THIS IS NOT COSMETIC. Appending here credits the
+        # colleague, and the attribution law in agent.py fires deterministically
+        # after post-draft enforcement so the credit cannot be stripped -- the
+        # agent tells its caller it consulted someone who never saw the
+        # question, in the one mechanism whose stated purpose is truthful
+        # credit.
+        #
+        # THE READER GAP PRE-DATES THIS BRANCH and is LIVE TODAY through the
+        # doom-loop and budget guardrails, which produce the identical shape --
+        # that half needs no depth guard to matter and is why this fix is not
+        # merely forward-looking.
+        #
+        # WHAT THIS BRANCH OWNS is the depth door specifically, and stated in
+        # the right tense (#40 r2 pre-pass): cabal's DelegationDepthGuardrail is
+        # not on cabal main, so "before this branch, 0 < 8 always passed"
+        # describes a comparison that is not running anywhere yet. It becomes
+        # true when cabal#144 merges. What is true NOW is narrower -- sending a
+        # depth is what gives that guard anything to refuse, so this PR and
+        # cabal#144 together make a depth refusal reachable, and this reader
+        # must be ready before either lands.
+        state = (data.get("status") or {}).get("state")
+        if state in _UNANSWERED_STATES:
+            return f"{target} did not answer: {text}"
         ledger = consulted_colleagues.get()
         if ledger is not None and target not in ledger:
             ledger.append(target)
