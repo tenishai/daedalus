@@ -298,10 +298,49 @@ class Agent:
         # daedalus.tools.* at point of use rather than at module level (see
         # the tools_from_spec provider branches above), not a real cycle --
         # colleagues.py imports nothing from daedalus.agent.
-        from daedalus.tools.colleagues import consulted_colleagues, current_context_id
+        from daedalus.tools.colleagues import (
+            DEPTH_KEY,
+            consulted_colleagues,
+            current_context_id,
+            current_delegation_depth,
+        )
 
         current_context_id.set(task.context_id or task.id)
         consulted_colleagues.set([])
+        # cabal#144 — carry the inbound hop count so an outbound ask can send
+        # depth+1. An unreadable value is treated as the TOP of the chain
+        # rather than as an error: a malformed number must not be a way to
+        # claim a shallower depth than you have, and anything asking onward
+        # from here is still stamped 1 and bounded from there.
+        #
+        # OverflowError IS NOT REDUNDANT (#40 pre-pass). `int(float("inf"))`
+        # raises it rather than ValueError, and an infinity gets here: Task
+        # metadata has no value-type constraint, it rides through verbatim from
+        # the wire, and Starlette's Request.json() is json.loads, which accepts
+        # a bare `Infinity` token. Without this arm the exception escapes
+        # handle_task entirely and the transport turns it into an HTTP 500 --
+        # a crash, in the branch whose stated property is that garbage degrades.
+        # (`nan` lands on ValueError and always worked.) cabal's own parser had
+        # the identical gap; both ends are fixed.
+        try:
+            _inbound_depth = max(0, int(task.metadata.get(DEPTH_KEY, 0)))
+        except (TypeError, ValueError, OverflowError):
+            _inbound_depth = 0
+        current_delegation_depth.set(_inbound_depth)
+        # A BACKGROUND TASK SPAWNED BELOW THIS LINE INHERITS THE DEPTH, because
+        # asyncio.create_task copies the current context (#40 r1 Nit, filed as
+        # daedalus#42). _start_revision_pass does exactly that, and its own ask
+        # is a FRESH chain that would be stamped parent+1 and can be refused for
+        # the parent's depth. Left as-is: current_context_id inherits the same
+        # way, and the two call sites reachable from HERE -- _handle_teach and
+        # _handle_knowledge -- both sit behind teach_authorized, which requires
+        # a verified human subject. (There is a third, in serve(), and it is the
+        # safe one: it runs at startup outside any handle_task, so it inherits
+        # the contextvar's default rather than a chain's depth. Naming two of
+        # three was an incomplete enumeration in a comment about which sites are
+        # gated -- #40 r2 Nit.) No legitimate producer sends a depth key on such
+        # a task today; revisit if teach becomes reachable from an agent
+        # subject.
         marker = task.metadata.get(SYSTEM_TASK_KEY)
         if marker is not None:
             return await self._dispatch_system_task(marker, task)

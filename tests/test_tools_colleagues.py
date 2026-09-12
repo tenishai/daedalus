@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +16,7 @@ from daedalus.tools.colleagues import (
     COLLEAGUE_DOWN_FOR_S,
     COLLEAGUE_STALE_AFTER_S,
     ColleaguesToolProvider,
+    consulted_colleagues,
 )
 
 NOT_CONFIGURED = "The colleague pass is not configured."
@@ -282,10 +284,16 @@ async def test_ask_colleague_envelope_shape_is_pinned(monkeypatch):
         "parts": [{"kind": "text", "text": "did it clear?"}],
     }
     assert task["history"] == []
-    # full shape, id excluded, is exactly this — no extra keys smuggled in
+    # full shape, id excluded, is exactly this — no extra keys smuggled in.
+    #
+    # `metadata` joined the pinned shape with cabal#144: the hop count has to
+    # cross the A2A boundary or the cross-agent cycle is unbounded. This
+    # assertion is the reason that change could not land quietly, which is
+    # what an exact-shape pin is for — so it is UPDATED here, not loosened.
     task_without_id = {k: v for k, v in task.items() if k != "id"}
     assert task_without_id == {
         "kind": "task",
+        "metadata": {"cabal_delegation_depth": 1},
         "status": {
             "state": "submitted",
             "message": {
@@ -1170,3 +1178,195 @@ async def test_a_slow_failure_does_not_complete_a_forgotten_blip(monkeypatch):
         f"{COLLEAGUE_DOWN_FOR_S}s forget window: {third}"
     )
     assert third == "hi"
+
+
+# ---- cabal#144: depth must survive the A2A hop ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_ask_carries_the_hop_count_outbound(monkeypatch):
+    """WITHOUT THIS THE CROSS-AGENT CYCLE IS UNBOUNDED.
+
+    cabal bounds delegation depth in its router, but a colleague call carrying
+    no depth arrives at 0 however deep the caller already was. So
+    `ledger -> gemini-one -> ledger` -- the shape from the 2026-09-10 incident
+    -- resets on every hop and the bound never fires.
+    """
+    from daedalus.tools.colleagues import DEPTH_KEY, current_delegation_depth
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    good = FakeResponse(payload={
+        "status": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}
+    })
+    client = FakeHTTPClient(post_responses=[good])
+    current_delegation_depth.set(3)
+    try:
+        await make_provider(client)._ask_colleague("rin", "q")
+    finally:
+        current_delegation_depth.set(0)
+
+    _, body, _ = client.post_calls[0]
+    assert body["task"]["metadata"][DEPTH_KEY] == 4, (
+        "the ask itself is a hop, so it must be sent at parent+1"
+    )
+
+
+
+
+@pytest.mark.asyncio
+async def test_depth_is_sent_even_at_the_top_of_a_chain(monkeypatch):
+    """The key is always present, and the minimum ever sent is 1.
+
+    NOT because the receiver tells zero from absent — it does not, and this
+    docstring said otherwise while the commit containing it withdrew that claim
+    in two other files (#40 r1 Nit). cabal reads `metadata.get(DEPTH_KEY, 0)`,
+    so both collapse onto the same value through the same path.
+
+    The surviving reason is narrower and is what this pins: a receiver can only
+    ever draw that distinction if the sender is unconditional about it, and we
+    never send 0 anyway, so being explicit costs nothing and fixes one end of
+    the contract."""
+    from daedalus.tools.colleagues import DEPTH_KEY
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    good = FakeResponse(payload={
+        "status": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}
+    })
+    client = FakeHTTPClient(post_responses=[good])
+    await make_provider(client)._ask_colleague("rin", "q")
+    _, body, _ = client.post_calls[0]
+    assert body["task"]["metadata"][DEPTH_KEY] == 1
+
+
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_depth_reaches_the_outbound_envelope(monkeypatch):
+    """daedalus#40 r1 Important — THE SEAM, AND THE ONE LINE THE FEATURE RESTS ON.
+
+    `Agent.handle_task` doing `current_delegation_depth.set(_inbound_depth)` is
+    the sole join between the parser and the sender, and nothing crossed it.
+    Replacing it with `set(0)` — every inbound depth discarded, every outbound
+    ask stamped 1 however deep the chain already is, which is exactly the
+    `ledger -> gemini-one -> ledger` cycle this PR exists to close — left the
+    whole suite green.
+
+    THE TWO NEW TEST GROUPS EACH SIT ON ONE SIDE OF IT. The agent-side test
+    sets metadata and reads the contextvar, so under that mutant it reads 0 and
+    passes MORE easily; the colleague-side tests set the contextvar by hand and
+    never go through `handle_task`. The assertions ran and could not see.
+
+    Worth a test rather than a note because the regression is SILENT. A broken
+    contextId at least perturbs the switchboard's loop grouping; a broken depth
+    produces no error anywhere — the bound simply stops firing, and the chain
+    that returns through a remote peer is unbounded again.
+
+    Goes through a REAL `handle_task`, in the shape
+    test_agent.py::test_consulted_colleague_omitted_from_draft_gets_appended
+    already uses for `consulted_colleagues`.
+    """
+    from daedalus.agent import Agent
+    from daedalus.task import Task
+    from daedalus.tools.colleagues import DEPTH_KEY
+    from tests.fakes import ScriptedLLM
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[
+            FakeResponse(
+                payload={
+                    "status": {
+                        "message": {"parts": [{"kind": "text", "text": "hi"}]}
+                    }
+                }
+            )
+        ]
+    )
+    provider = make_provider(client)
+
+    class AskingLLM(ScriptedLLM):
+        async def complete(self, messages, tools=None):
+            await provider._ask_colleague("rin", "q")
+            return await super().complete(messages, tools)
+
+    agent = Agent.load(
+        Path(__file__).parent / "golden" / "greeter", llm=AskingLLM("done")
+    )
+    task = Task.from_text("hi")
+    task.metadata[DEPTH_KEY] = 3
+    await agent.handle_task(task)
+
+    _, body, _ = client.post_calls[0]
+    assert body["task"]["metadata"][DEPTH_KEY] == 4, (
+        "the inbound depth did not reach the outbound ask"
+    )
+
+
+
+
+@pytest.mark.asyncio
+async def test_a_refused_ask_is_not_credited_as_a_consultation(monkeypatch):
+    """daedalus#40 r2 Important — A REFUSAL ARRIVES AS HTTP 200.
+
+    cabal turns a guardrail BLOCK into an annotated Task — `state="failed"`,
+    the refusal as the single agent text part — and returns it through a
+    `response_model=Task` route. Reading only `status.message` turned that
+    refusal into an answer AND appended the target to the consultation ledger,
+    so the agent told its caller it had consulted a colleague who never saw the
+    question. The attribution law fires deterministically after post-draft
+    enforcement, so that credit cannot be stripped downstream.
+
+    THE READER GAP PRE-DATES THIS BRANCH — the doom-loop and budget guardrails
+    produce the identical shape. What this branch owns is the door: before it,
+    daedalus sent no depth key, cabal read the default 0, and the depth
+    guardrail could never refuse a daedalus-originated ask.
+
+    Uses cabal's real refusal shape rather than an invented one.
+    """
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    refusal = FakeResponse(payload={
+        "status": {
+            "state": "failed",
+            "message": {"parts": [{
+                "kind": "text",
+                "text": (
+                    "router guardrail blocked: Delegation depth 8 has reached "
+                    "the limit of 8."
+                ),
+            }]},
+        },
+        "metadata": {"cabal_reason_code": "POLICY_VIOLATION"},
+    })
+    client = FakeHTTPClient(post_responses=[refusal])
+    ledger: list[str] = []
+    consulted_colleagues.set(ledger)
+
+    out = await make_provider(client)._ask_colleague("rin", "q")
+
+    assert ledger == [], "a colleague that refused the ask was credited with answering it"
+    assert out.startswith("rin did not answer:"), out
+    assert "Delegation depth 8" in out, "the refusal's own explanation was dropped"
+
+
+
+
+@pytest.mark.asyncio
+async def test_an_answered_ask_is_still_credited(monkeypatch):
+    """The control. A `completed` reply must still reach the ledger — a state
+    check that rejects everything would pass the test above and break the
+    feature it guards."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    good = FakeResponse(payload={
+        "status": {
+            "state": "completed",
+            "message": {"parts": [{"kind": "text", "text": "the PSA range is X"}]},
+        },
+    })
+    client = FakeHTTPClient(post_responses=[good])
+    ledger: list[str] = []
+    consulted_colleagues.set(ledger)
+
+    out = await make_provider(client)._ask_colleague("rin", "q")
+
+    assert ledger == ["rin"]
+    assert out == "the PSA range is X"
