@@ -179,20 +179,19 @@ class SlackApi:
         except Exception:
             pass
 
-    async def reactions(self, channel: str, ts: str) -> list[str]:
-        response = await self._web.reactions_get(channel=channel, timestamp=ts)
-        message = response.get("message", {}) if hasattr(response, "get") else {}
-        return [r.get("name", "") for r in message.get("reactions", [])]
-
     async def reactions_with_users(self, channel: str, ts: str) -> list[tuple[str, list[str]]]:
         """Every reaction as (name, [user ids]) — WHO, not only WHAT (#46).
 
-        `reactions()` discards the `users` Slack already sends, so at the
-        point an approval decision was made the approver's identity was not
-        merely unchecked, it was unavailable. That forecloses an allowlist
-        AND leaves no attributable record of who authorised a tier-2 action.
-        Kept alongside rather than replacing it: `reactions()` has other
-        callers and a wider return type would change them all."""
+        REPLACES a `reactions()` that returned names and discarded the
+        `users` Slack already sends, so at the point an approval decision was
+        made the approver's identity was not merely unchecked, it was
+        unavailable. That forecloses an allowlist AND leaves no attributable
+        record of who authorised a tier-2 action.
+
+        The old method is deleted rather than kept beside this one. I first
+        kept it and wrote that it "has other callers"; it had none -- `approve()`
+        was the only one, and it calls this instead now. Dead code carrying a
+        false reason to exist is worse than no code (#54 r1)."""
         response = await self._web.reactions_get(channel=channel, timestamp=ts)
         message = response.get("message", {}) if hasattr(response, "get") else {}
         return [

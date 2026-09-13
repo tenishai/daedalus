@@ -59,9 +59,6 @@ class FakeApi:
     async def unreact(self, channel, ts, name):
         self.unreacts.append((ts, name))
 
-    async def reactions(self, channel, ts):
-        return self._reactions_script.pop(0) if self._reactions_script else []
-
     async def reactions_with_users(self, channel, ts):
         """The script entries stay plain names; each gets one anonymous
         reactor so existing scripts keep meaning what they meant. A script
