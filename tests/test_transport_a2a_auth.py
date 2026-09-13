@@ -233,16 +233,29 @@ async def test_a_REVOKED_key_stops_verifying_once_the_cache_expires(key, monkeyp
     Refresh is gated on a kid being ABSENT, so rotation works and revocation
     produces no signal at all: the kid is still cached, nothing asks again,
     and a key pulled from the JWKS goes on verifying for the life of the
-    process. Measured before the fix: still accepted after the endpoint began
-    serving an empty key set."""
+    process. Measured before the fix: still accepted after the endpoint
+    stopped serving the key."""
     fetch = CountingFetch(key)
     verifier = verifier_with(fetch)
     assert await verifier.verify(mint(key))
 
     # The operator pulls the compromised key and the endpoint serves its
-    # replacement. NOT an empty set: emptying it fails `import_key_set`
-    # outright, which is fail-closed but by a different door and would make
-    # this test pass without exercising the TTL at all.
+    # REPLACEMENT. Not an empty set, and the reason is not the one an earlier
+    # version of this comment gave.
+    #
+    # I wrote that an empty set "would make this test pass without exercising
+    # the TTL". That is backwards, and I had the measurement in front of me
+    # when I wrote it: an empty set makes `import_key_set` raise, `_keys()`
+    # re-raises it as `could not load JWKS ... No keys to import`, and the
+    # `match=` below does NOT match that -- so the test FAILS. It was a
+    # rationalisation, not a finding (#50 r1).
+    #
+    # The real reason to serve a replacement is that it models revocation
+    # rather than outage. An empty set proves only that an unreadable JWKS
+    # fails closed, which is a coarser and less interesting property; a
+    # healthy endpoint that no longer lists ONE key is what an operator
+    # actually does when a key is compromised, and it is the case where the
+    # cached set would otherwise still verify it.
     fetch.keys[:] = [make_key("k-replacement")]
 
     # Still accepted inside the TTL — that window is the deliberate cost.
