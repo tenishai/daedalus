@@ -5,6 +5,9 @@ a hook that will not even import must never let a reply through unlawfully.
 Real files under tmp_path exercise the real importlib.util path, not a mock.
 """
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
 from daedalus import enforcement
 from daedalus.enforcement import Enforcement, PostDraftResult, PreTaskResult
 from daedalus.task import ReasonCode
@@ -256,3 +259,139 @@ def test_reason_code_tool_blocked_is_703():
     # reserves 703 as the next open, non-contiguous slot). Using 703 here to
     # avoid silently aliasing TOOL_BLOCKED onto BUDGET_EXHAUSTED. See report.
     assert ReasonCode.TOOL_BLOCKED == 703
+
+
+async def test_a_hook_can_DENY_by_returning_blocked(tmp_path):
+    """#45: this return used to be discarded in silence.
+
+    `run_pre_task` read exactly one key -- `notices` -- and dropped the rest
+    without a word. A hook author writing the obvious thing got no error, no
+    warning, and no block: the task proceeded. In the module whose first line
+    calls itself the law layer, a returned denial that does nothing is the
+    worst available outcome, because the author believes they have denied.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "deny.py").write_text(
+        "def pre_task(message):\n"
+        "    if 'wire the money' in message:\n"
+        "        return {'blocked': True, 'reason': 'financial action'}\n"
+        "    return {}\n"
+    )
+    law = Enforcement.load(tools)
+
+    blocked = await law.run_pre_task("please wire the money to 123")
+    assert blocked.blocked is True
+    assert blocked.detail == "blocked by deny.py: financial action"
+
+    allowed = await law.run_pre_task("what time is standup?")
+    assert allowed.blocked is False
+
+
+async def test_a_denial_without_a_reason_still_denies_and_says_so(tmp_path):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "terse.py").write_text("def pre_task(message):\n    return {'blocked': True}\n")
+
+    result = await Enforcement.load(tools).run_pre_task("hi")
+
+    assert result.blocked is True
+    assert result.detail == "blocked by terse.py: no reason given"
+
+
+async def test_notices_from_an_earlier_hook_survive_a_later_denial(tmp_path):
+    """A denial ends the chain, but what ran before it still happened and the
+    caller is still entitled to hear about it."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "a_notice.py").write_text(
+        "def pre_task(message):\n    return {'notices': ['scanned']}\n"
+    )
+    (tools / "b_deny.py").write_text(
+        "def pre_task(message):\n    return {'blocked': True, 'reason': 'nope'}\n"
+    )
+
+    result = await Enforcement.load(tools).run_pre_task("hi")
+
+    assert result.blocked is True
+    assert result.notices == ["scanned"]
+
+
+async def test_an_unrecognised_key_is_named_in_the_log_and_does_not_block(tmp_path, caplog):
+    """Logged, not obeyed, and not refused either — #51 carries the argument
+    for refusing. Silence is how `blocked` went unnoticed for as long as it
+    did, so the key is at least named."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "future.py").write_text(
+        "def pre_task(message):\n    return {'notices': ['ok'], 'blocked_maybe': True}\n"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await Enforcement.load(tools).run_pre_task("hi")
+
+    assert result.blocked is False
+    assert result.notices == ["ok"]
+    assert "blocked_maybe" in caplog.text
+    assert "future.py" in caplog.text
+
+
+async def test_hooks_run_on_their_OWN_pool_not_the_shared_default_executor(tmp_path):
+    """#45: `asyncio.to_thread` uses the shared default executor.
+
+    `wait_for` cancels the await and cannot cancel the thread, so every
+    timed-out hook leaks a worker. On the shared pool, enough of them make
+    every `to_thread` call in the process queue behind hooks that will never
+    finish -- including callers with nothing to do with enforcement. Failing
+    closed is right; converting one slow hook into a whole-agent outage
+    through an unrelated shared resource is not.
+
+    ASSERTED BY THREAD NAME, NOT BY STARVATION. The obvious test -- wedge
+    several hooks, then show an ordinary `to_thread` still answers -- PASSES
+    AGAINST THE BUG, because the default executor is min(32, cpu+4) wide and
+    a handful of wedged hooks never exhausts it. Measured: that version went
+    green with the fix reverted. Exhausting 32 workers honestly would cost
+    ~66s of sleeping. The property is "hooks do not touch the shared pool",
+    and the thread they run on states it directly."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "named.py").write_text(
+        "import threading\n"
+        "def pre_task(message):\n"
+        "    return {'notices': [threading.current_thread().name]}\n"
+    )
+
+    result = await Enforcement.load(tools).run_pre_task("hi")
+
+    assert result.notices and result.notices[0].startswith("kobo-hook"), (
+        f"hook ran on {result.notices[0]!r} — not the dedicated pool"
+    )
+
+
+async def test_a_wedged_hook_fails_closed_every_time_and_does_not_leak_into_the_suite(
+    tmp_path, monkeypatch
+):
+    """A hook that hangs blocks, repeatedly, and its threads are contained.
+
+    ISOLATED POOL ON PURPOSE. The dedicated pool is a module global, and
+    wedging it here wedges it for every LATER test in the session -- which is
+    exactly what happened: `test_transport_a2a.py` began failing in the full
+    run while passing alone, because its hook queued behind threads this test
+    had abandoned. That is a real property of the design, not only of the
+    test: a bounded pool means enough wedged hooks degrade enforcement for
+    everyone, fail-closed. Containing it to enforcement is the point; leaking
+    it into an unrelated test file is not evidence of anything."""
+    monkeypatch.setattr(
+        enforcement, "_HOOK_POOL", ThreadPoolExecutor(max_workers=2, thread_name_prefix="t")
+    )
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "wedged.py").write_text(
+        "import time\ndef pre_task(message):\n    time.sleep(30)\n    return {}\n"
+    )
+    law = Enforcement.load(tools)
+
+    for _ in range(3):
+        result = await law.run_pre_task("hi")
+        assert result.blocked is True
+        assert "timed out" in result.detail
