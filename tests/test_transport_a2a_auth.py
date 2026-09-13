@@ -186,6 +186,105 @@ async def test_unknown_kid_after_refresh_fails_closed(key):
     assert fetch.calls == 2  # initial + one rotation refresh, no more
 
 
+def _kid_only_token(kid: str) -> str:
+    """A token with a WELL-FORMED header naming `kid` and nothing valid after.
+
+    This is what an attacker sends, and what the pre-#44 code called "not
+    garbage": `_header_kid` needs only a base64-decodable JSON header with a
+    string kid -- no signature, no authentication -- so each one reached the
+    kid lookup and, missing, triggered a JWKS fetch."""
+    import base64 as _b64
+    import json as _json
+
+    header = _b64.urlsafe_b64encode(
+        _json.dumps({"alg": "RS256", "kid": kid}).encode()
+    ).rstrip(b"=").decode()
+    return f"{header}.eyJhIjoxfQ.not-a-real-signature"
+
+
+async def test_a_flood_of_unknown_kids_does_not_become_a_flood_of_FETCHES(key):
+    """#44: the amplification the old docstring said could not happen.
+
+    `test_garbage_token_never_touches_the_jwks` above is true and tests the
+    EASY half -- an unparseable token. It passed while this was wide open,
+    which is how the claim looked verified. Measured before the fix: 20
+    unauthenticated requests with random kids produced 20 outbound GETs to
+    the cabal's JWKS endpoint, from a surface that is reachable before auth
+    by construction."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm the cache
+    warm = fetch.calls
+
+    for i in range(20):
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"attacker-{i}"))
+
+    # One refresh for the first miss; the rest are refused from memory.
+    assert fetch.calls - warm == 1, (
+        f"{fetch.calls - warm} fetches for 20 unauthenticated requests — "
+        "an unknown kid is still an outbound fetch trigger"
+    )
+
+
+async def test_a_REVOKED_key_stops_verifying_once_the_cache_expires(key, monkeypatch):
+    """#44, and the serious half.
+
+    Refresh is gated on a kid being ABSENT, so rotation works and revocation
+    produces no signal at all: the kid is still cached, nothing asks again,
+    and a key pulled from the JWKS goes on verifying for the life of the
+    process. Measured before the fix: still accepted after the endpoint began
+    serving an empty key set."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    # The operator pulls the compromised key and the endpoint serves its
+    # replacement. NOT an empty set: emptying it fails `import_key_set`
+    # outright, which is fail-closed but by a different door and would make
+    # this test pass without exercising the TTL at all.
+    fetch.keys[:] = [make_key("k-replacement")]
+
+    # Still accepted inside the TTL — that window is the deliberate cost.
+    assert await verifier.verify(mint(key))
+
+    monkeypatch.setattr("daedalus.transports.a2a_auth.KEYS_TTL_SECONDS", 0.0)
+    with pytest.raises(AuthError, match="unknown signing key"):
+        await verifier.verify(mint(key))
+
+
+async def test_the_cooldown_expires_so_a_ROTATION_during_a_flood_still_works(
+    key, monkeypatch
+):
+    """The fix must not invent an availability bug.
+
+    The cooldown refuses an unknown kid without fetching — so a genuinely new
+    key that arrives while it is running is refused too. That is the cost, and
+    it has to be bounded: once the cooldown expires the rotation must land."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    with pytest.raises(AuthError):
+        await verifier.verify(_kid_only_token("k2"))  # probed before it exists
+
+    rotated = make_key("k2")
+    fetch.keys.append(rotated)  # now the cabal really does rotate to k2
+    monkeypatch.setattr("daedalus.transports.a2a_auth.REFRESH_COOLDOWN_SECONDS", 0.0)
+    claims = await verifier.verify(mint(rotated, kid="k2"))
+    assert claims["sub"] == "rook:1"
+
+
+async def test_the_ttl_does_not_refetch_on_every_verification(key):
+    """A TTL that expired instantly would turn every request into a JWKS GET,
+    which is the amplification this file also exists to prevent."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    for _ in range(10):
+        assert await verifier.verify(mint(key))
+    assert fetch.calls == 1
+
+
 def test_gets_stay_open_when_auth_is_configured(client):
     """Auth gates dispatch. The card is a public document (cabal serves its
     agents' cards openly too); the events door is the kaminos-auth item."""
