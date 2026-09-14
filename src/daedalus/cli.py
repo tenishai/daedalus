@@ -67,6 +67,28 @@ def _short(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+#: The six operator-gate events, named exactly rather than matched by suffix.
+#:
+#: A SUFFIX TEST WAS TOO LOOSE AND SWALLOWED TWO STRANGERS (#49 r2 pre-pass).
+#: `kind.endswith(("_allowed", "_refused"))` also caught
+#: `system_task_refused` (carries `marker`) and a SECOND, pre-existing
+#: `tool_refused` at agent.py:557 (carries `error`) -- neither is an operator
+#: gate and neither has a `sub`, so both rendered as `for sub=None`. A looser
+#: match placed after exact-match arms inherits everything they did not claim.
+#:
+#: THE `sub` TEST IS NOT BELT-AND-BRACES. `tool_refused` is emitted from TWO
+#: call sites with different payloads -- the operator gate's (agent.py:171)
+#: and the tool-execution failure at :557 -- so the NAME alone cannot tell
+#: them apart. That collision is pre-existing and out of scope here; keying on
+#: the field that only one of them carries is what makes this branch correct
+#: without renaming an event the kaminos pane already consumes.
+_OPERATOR_GATE_EVENTS = frozenset(
+    f"{lane}_{decision}"
+    for lane in ("teach", "knowledge", "tool")
+    for decision in ("allowed", "refused")
+)
+
+
 def _print_event(event: dict) -> None:
     kind = event["type"]
     if kind == "tools_offered":
@@ -86,6 +108,17 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [budget] -{event['spent']} tokens, {event['remaining']} remaining")
     elif kind == "truncated":
         click.echo(f"  [truncated] reply cut by max_tokens ({event['max_tokens']})")
+    elif kind in _OPERATOR_GATE_EVENTS and "sub" in event:
+        # THE OPERATOR GATE, RENDERED, because otherwise it is not observable
+        # at all (#49 r2). `docker/entrypoint.sh` runs with -v, so this
+        # function is live in every pod -- but it was a closed if/elif chain
+        # that printed NOTHING for teach/knowledge/tool allowed-or-refused.
+        # The sub survived only in a 100-event in-memory ring and a live SSE
+        # attachment, so daedalus#47's step 1 ("read the logs and enumerate
+        # what real callers present") had nothing to read. The one line that
+        # makes that plan executable belongs in this diff, not in the issue.
+        lane, _, decision = kind.rpartition("_")
+        click.echo(f"  [{lane}] {decision} for sub={event['sub']}")
 
 
 @main.command()
