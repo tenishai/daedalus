@@ -414,4 +414,63 @@ async def test_a_wedged_hook_fails_closed_every_time_and_does_not_leak_into_the_
             assert "timed out" in result.detail
     finally:
         release.set()
+        # `wait=True` IS LOAD-BEARING; do not "simplify" it to wait=False.
+        # It is what drags a future regression back INSIDE the window pytest
+        # measures. The original defect hid in interpreter finalization, after
+        # the timing was printed; with this, removing `release.set()` makes the
+        # suite take 62s reported rather than 62s invisible (#52 r2).
+        pool.shutdown(wait=True)
+
+
+async def test_a_SLOW_but_finite_hook_is_not_counted_as_a_wedge(
+    tmp_path, monkeypatch, caplog
+):
+    """#52 r2: the counter measured timeouts and the message called them wedges.
+
+    A timeout fires on ANY call over the bound, including one whose thread
+    finishes a moment later and returns to the pool. Measured with a 0.4s hook
+    against a 0.2s bound: five calls, ONE thread reused throughout, and the
+    line read "12 of 4 hook workers now wedged" — a number past its own
+    denominator, describing a fatal state, on a pool that then answered a
+    healthy hook instantly.
+
+    The failure mode was the false positive, which is the expensive direction
+    for a diagnostic read during an incident. The message now says what it
+    counts, and this pins that the pool is genuinely still alive afterwards.
+    """
+    monkeypatch.setattr(enforcement, "HOOK_TIMEOUT_S", 0.2)
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="t")
+    monkeypatch.setattr(enforcement, "_HOOK_POOL", pool)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "slow.py").write_text(
+        "import time\ndef pre_task(message):\n    time.sleep(0.4)\n    return {}\n"
+    )
+    law = Enforcement.load(tools)
+
+    before = enforcement._TIMEOUTS
+    try:
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                assert (await law.run_pre_task("hi")).blocked is True
+
+        # It IS five timeouts — that is what the counter now claims to count,
+        # and asserting the number is what keeps the rename honest rather than
+        # cosmetic.
+        assert enforcement._TIMEOUTS - before == 5
+
+        assert "wedged" not in caplog.text, (
+            "a slow-but-finite hook was reported as a wedge"
+        )
+        assert "timeouts since boot" in caplog.text
+
+        # THE POINT: the pool is not exhausted, because nothing was consumed.
+        healthy = tmp_path / "healthy"
+        healthy.mkdir()
+        (healthy / "fast.py").write_text(
+            "def pre_task(message):\n    return {'notices': ['ok']}\n"
+        )
+        result = await Enforcement.load(healthy).run_pre_task("hi")
+        assert result.blocked is False and result.notices == ["ok"]
+    finally:
         pool.shutdown(wait=True)

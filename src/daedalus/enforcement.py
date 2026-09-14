@@ -68,35 +68,60 @@ _PRE_TASK_KEYS = frozenset({"notices", "blocked", "reason"})
 #:
 #: Four occurrences is a generous allowance for a thing that should happen
 #: zero times; a hook that wedges is already a bug.
+#:
+#: Confirmed by execution rather than by argument (#52 r2): against a fresh
+#: 4-wide pool, live threads climbed 1 -> 2 -> 3 -> 4 across four wedged hooks
+#: and stopped; a completely healthy, instant hook from an unrelated
+#: Enforcement instance then returned `blocked=True ... timed out` on each of
+#: three further attempts, at 2.00s apiece.
 HOOK_POOL_WORKERS = 4
 _HOOK_POOL = ThreadPoolExecutor(
     max_workers=HOOK_POOL_WORKERS, thread_name_prefix="kobo-hook"
 )
 
-#: How many hook threads have wedged and never come back.
+#: How many hook calls have exceeded HOOK_TIMEOUT_S since boot.
 #:
-#: RATCHETS, NEVER DECREMENTS, because neither does the thing it counts. This
-#: exists so "is four the right number" is answerable from real traffic rather
-#: than from argument (#52 r1) -- the same move as the unknown-key log, and
-#: the reason that decision is defensible rather than merely convenient.
-_WEDGED = 0
+#: TIMEOUTS, NOT WEDGES, and the distinction is this module's own (#52 r2). A
+#: timeout fires on ANY call over the bound, including one whose thread
+#: finishes a moment later and returns to the pool -- a SLOW hook, which the
+#: header above names as a category distinct from a wedged one. An earlier
+#: version called this `_WEDGED` and logged "(%d of %d hook workers now
+#: wedged)". Measured with a 0.4s hook against a 0.2s bound: five calls, ONE
+#: thread reused throughout, counter 7 -> 12, and the line read "12 of 4 hook
+#: workers now wedged" on a pool that then answered a healthy hook instantly.
+#:
+#: A number past its own denominator, describing a fatal state, on a pool with
+#: nothing wrong with it. The failure mode was the FALSE POSITIVE, which is
+#: the expensive direction for a diagnostic an operator reads during an
+#: incident -- and it poisoned the dataset gathered to answer "is four right",
+#: since real traffic is exactly where intermittently-slow hooks live.
+#:
+#: Counting the wedges specifically needs the underlying `concurrent.futures.
+#: Future` at the timeout site, so a done-callback can mark a recovered
+#: thread. That trades the ratchet for accuracy and is the right trade when
+#: someone wants the number; timeouts-since-boot is the honest signal until
+#: then.
+_TIMEOUTS = 0
 PreTaskResult = namedtuple("PreTaskResult", "blocked notices detail")
 PostDraftResult = namedtuple("PostDraftResult", "blocked text detail")
 
 log = logging.getLogger(__name__)
 
 
-def _wedged() -> int:
-    """Record a hook thread that timed out and will never be returned.
+def _timed_out() -> int:
+    """Record a hook call that exceeded the bound, and return the new total.
 
     A COUNT, NOT THE POOL'S WIDTH. The log used to report
     `_HOOK_POOL._max_workers` -- a private attribute, and a constant: it said
-    "the pool has 4 workers" identically on the first wedge and on the fatal
-    fourth. At the moment a reader needs that line, the number they want is
-    how many are already gone (#52 r1 nit)."""
-    global _WEDGED
-    _WEDGED += 1
-    return _WEDGED
+    "the pool has 4 workers" identically on the first timeout and on the
+    fatal fourth. At the moment a reader needs that line, the number they want
+    is how many have happened (#52 r1 nit).
+
+    The caller USES this return rather than re-reading the global, which is
+    what the signature already promised (#52 r2 nit)."""
+    global _TIMEOUTS
+    _TIMEOUTS += 1
+    return _TIMEOUTS
 
 
 async def _call_hook(hook, argument):
@@ -200,14 +225,12 @@ class Enforcement:
             try:
                 result = await _call_hook(hook, message)
             except TimeoutError:
-                _wedged()
                 log.warning(
                     "pre_task hook %s exceeded %.1fs and was abandoned; its thread "
-                    "runs to completion (%d of %d hook workers now wedged)",
+                    "runs to completion (%d hook timeouts since boot)",
                     filename,
                     HOOK_TIMEOUT_S,
-                    _WEDGED,
-                    HOOK_POOL_WORKERS,
+                    _timed_out(),
                 )
                 return PreTaskResult(True, notices, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error
@@ -245,14 +268,12 @@ class Enforcement:
             try:
                 result = await _call_hook(hook, text)
             except TimeoutError:
-                _wedged()
                 log.warning(
                     "post_draft hook %s exceeded %.1fs and was abandoned; its thread "
-                    "runs to completion (%d of %d hook workers now wedged)",
+                    "runs to completion (%d hook timeouts since boot)",
                     filename,
                     HOOK_TIMEOUT_S,
-                    _WEDGED,
-                    HOOK_POOL_WORKERS,
+                    _timed_out(),
                 )
                 return PostDraftResult(True, text, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error
