@@ -150,11 +150,25 @@ class JwtVerifier:
         #:
         #: `_fetched_at` is stamped on every ATTEMPT -- that is the r1 fix and
         #: it is right for the TTL -- so it cannot answer "how old is the data
-        #: we are serving". Reporting `_age` in the stale-set warning meant
-        #: that during a sustained outage each failure restamped, and every log
-        #: line after the first said "60s old" regardless of the real age: at
-        #: t=120 with the last success at t=0, it claimed 60 when the answer
-        #: was 120, and the understatement grows without bound.
+        #: we are serving".
+        #:
+        #: THE OLD CODE CAPTURED `stale_for = self._age` ON THE LINE ABOVE THE
+        #: STAMP, and logged that variable from inside the `except`. So it
+        #: reported the gap between the last two ATTEMPTS, not the age of the
+        #: data: during a sustained outage each failure restamped, and every
+        #: line said one TTL regardless of the real age. Measured against that
+        #: exact tree, last success t=0, endpoint down:
+        #:
+        #:     t=60   "60s old"    true
+        #:     t=120  "60s old"    the data was 120s old
+        #:     t=180  "60s old"    the data was 180s old
+        #:
+        #: WHERE THE CAPTURE HAPPENS IS THE WHOLE MECHANISM, and an earlier
+        #: version of this comment said only "reporting `_age` in the warning"
+        #: -- which reads as evaluated AT the log line, where it would have been
+        #: ~0 rather than 60. A reviewer took exactly that reading and reached a
+        #: wrong conclusion from a true premise (#50 r3). The imprecision was
+        #: mine; the numbers above are measured.
         #:
         #: That is the same renews-per-attempt mechanism this module documents
         #: two screens down, biting the diagnostic added to make the trade
