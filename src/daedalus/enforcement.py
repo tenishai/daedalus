@@ -55,11 +55,48 @@ _PRE_TASK_KEYS = frozenset({"notices", "blocked", "reason"})
 #: the whole way down is correct, but one slow hook should not be able to
 #: convert itself into a whole-agent outage through an unrelated shared
 #: resource.
-_HOOK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kobo-hook")
+#:
+#: FOUR IS A LIFETIME BUDGET, NOT A CONCURRENCY ONE, and the difference is the
+#: steady state this pool actually produces (#52 r1). A wedged thread never
+#: returns, so the count only ratchets: four hooks that have EVER wedged over
+#: the life of the process, not four at once. At the fourth, the agent stops
+#: answering -- on purpose, fail-closed -- and STAYS STOPPED until restart.
+#: That is the intended outcome and it is better than what it replaced, where
+#: a 32-wide per-loop pool both took longer to exhaust and reset itself, which
+#: is what made it a slow silent poisoning of unrelated callers rather than a
+#: visible stop. "Contained" is a thinner word for it than it deserves.
+#:
+#: Four occurrences is a generous allowance for a thing that should happen
+#: zero times; a hook that wedges is already a bug.
+HOOK_POOL_WORKERS = 4
+_HOOK_POOL = ThreadPoolExecutor(
+    max_workers=HOOK_POOL_WORKERS, thread_name_prefix="kobo-hook"
+)
+
+#: How many hook threads have wedged and never come back.
+#:
+#: RATCHETS, NEVER DECREMENTS, because neither does the thing it counts. This
+#: exists so "is four the right number" is answerable from real traffic rather
+#: than from argument (#52 r1) -- the same move as the unknown-key log, and
+#: the reason that decision is defensible rather than merely convenient.
+_WEDGED = 0
 PreTaskResult = namedtuple("PreTaskResult", "blocked notices detail")
 PostDraftResult = namedtuple("PostDraftResult", "blocked text detail")
 
 log = logging.getLogger(__name__)
+
+
+def _wedged() -> int:
+    """Record a hook thread that timed out and will never be returned.
+
+    A COUNT, NOT THE POOL'S WIDTH. The log used to report
+    `_HOOK_POOL._max_workers` -- a private attribute, and a constant: it said
+    "the pool has 4 workers" identically on the first wedge and on the fatal
+    fourth. At the moment a reader needs that line, the number they want is
+    how many are already gone (#52 r1 nit)."""
+    global _WEDGED
+    _WEDGED += 1
+    return _WEDGED
 
 
 async def _call_hook(hook, argument):
@@ -163,12 +200,14 @@ class Enforcement:
             try:
                 result = await _call_hook(hook, message)
             except TimeoutError:
+                _wedged()
                 log.warning(
                     "pre_task hook %s exceeded %.1fs and was abandoned; its thread "
-                    "runs to completion and the pool has %d workers",
+                    "runs to completion (%d of %d hook workers now wedged)",
                     filename,
                     HOOK_TIMEOUT_S,
-                    _HOOK_POOL._max_workers,
+                    _WEDGED,
+                    HOOK_POOL_WORKERS,
                 )
                 return PreTaskResult(True, notices, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error
@@ -206,12 +245,14 @@ class Enforcement:
             try:
                 result = await _call_hook(hook, text)
             except TimeoutError:
+                _wedged()
                 log.warning(
                     "post_draft hook %s exceeded %.1fs and was abandoned; its thread "
-                    "runs to completion and the pool has %d workers",
+                    "runs to completion (%d of %d hook workers now wedged)",
                     filename,
                     HOOK_TIMEOUT_S,
-                    _HOOK_POOL._max_workers,
+                    _WEDGED,
+                    HOOK_POOL_WORKERS,
                 )
                 return PostDraftResult(True, text, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error

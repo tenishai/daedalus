@@ -6,6 +6,7 @@ Real files under tmp_path exercise the real importlib.util path, not a mock.
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from daedalus import enforcement
@@ -381,17 +382,36 @@ async def test_a_wedged_hook_fails_closed_every_time_and_does_not_leak_into_the_
     test: a bounded pool means enough wedged hooks degrade enforcement for
     everyone, fail-closed. Containing it to enforcement is the point; leaking
     it into an unrelated test file is not evidence of anything."""
-    monkeypatch.setattr(
-        enforcement, "_HOOK_POOL", ThreadPoolExecutor(max_workers=2, thread_name_prefix="t")
-    )
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="t")
+    monkeypatch.setattr(enforcement, "_HOOK_POOL", pool)
     tools = tmp_path / "tools"
     tools.mkdir()
+    # RELEASED ON THE WAY OUT, NOT LEFT SLEEPING. An isolated pool fixes the
+    # cross-test poisoning, and the first version of this test stopped there:
+    # the pool was never shut down and its `time.sleep(30)` threads were never
+    # released. They are non-daemon and registered in
+    # `concurrent.futures.thread._threads_queues`, so `_python_exit` joins them
+    # during interpreter finalization -- AFTER pytest prints its timing.
+    # Measured (#52 r1): pytest reported 6.14s, process wall clock 32.44s, a
+    # 26.30s gap; the control's gap was 0.32s, and dropping the sleep to 4s
+    # moved the gap to 2.29s, so it is causal rather than correlated.
+    #
+    # Every full-suite run paid that silently, in a test whose NAME asserts
+    # the containment it did not hold. That is the third instance in this file
+    # of a test asserting a property it does not check -- which is the trap
+    # that made the first two versions of it wrong.
+    release = threading.Event()
     (tools / "wedged.py").write_text(
-        "import time\ndef pre_task(message):\n    time.sleep(30)\n    return {}\n"
+        "def pre_task(message):\n    RELEASE.wait(60)\n    return {}\n"
     )
     law = Enforcement.load(tools)
+    law._modules[0][1].RELEASE = release
 
-    for _ in range(3):
-        result = await law.run_pre_task("hi")
-        assert result.blocked is True
-        assert "timed out" in result.detail
+    try:
+        for _ in range(3):
+            result = await law.run_pre_task("hi")
+            assert result.blocked is True
+            assert "timed out" in result.detail
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
