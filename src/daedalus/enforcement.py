@@ -7,6 +7,13 @@ an exception, a timeout, or a load failure never lets an unlawful reply
 through. When locked, blocking every task is the Agent layer's responsibility;
 this module only reports its locked state.
 
+A pre_task hook denies in either of two ways: by RAISING, or by returning
+`{"blocked": True, "reason": "..."}`. The second used to be read as an
+ordinary result and discarded (#45), so raising was the only mechanism and
+nothing said so -- a hook author who returned a denial was not denying and
+was not told. Unrecognised keys are logged and ignored; #51 argues for
+refusing them instead.
+
 Boot-only loading, image tools first (arc3d Task 5): `load` also accepts an
 `overlay_dir` -- the persistent, fast-lane-delivered tool directory on the
 agent's own volume (daedalus.agent.Agent._tool_overlay_dir). Image tools
@@ -23,13 +30,110 @@ import asyncio
 import importlib.util
 import logging
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HOOK_TIMEOUT_S = 2.0
+
+#: Keys a `pre_task` hook may return. Anything else is logged, not obeyed.
+#:
+#: `blocked` USED TO BE SILENTLY DISCARDED (#45). This function read exactly
+#: one key -- `notices` -- and dropped the rest without a word, so a hook
+#: author writing the obvious `{"blocked": True, "reason": ...}` got no error,
+#: no warning, and no block: the task proceeded. In a module whose first line
+#: calls itself the law layer, a returned denial that does nothing is the
+#: worst available outcome, because the author believes they have denied.
+_PRE_TASK_KEYS = frozenset({"notices", "blocked", "reason"})
+
+#: Hooks run on their own pool so a wedged one cannot starve the process.
+#:
+#: `asyncio.to_thread` USES THE SHARED DEFAULT EXECUTOR, bounded at
+#: min(32, cpu+4). `wait_for` cancels the AWAIT and cannot cancel the thread,
+#: so a hook that hangs leaks one worker per task. Leak enough and every
+#: `to_thread` call in the process queues behind them -- including callers
+#: with nothing to do with enforcement -- and the agent stops. Failing closed
+#: the whole way down is correct, but one slow hook should not be able to
+#: convert itself into a whole-agent outage through an unrelated shared
+#: resource.
+#:
+#: FOUR IS A LIFETIME BUDGET, NOT A CONCURRENCY ONE, and the difference is the
+#: steady state this pool actually produces (#52 r1). A wedged thread never
+#: returns, so the count only ratchets: four hooks that have EVER wedged over
+#: the life of the process, not four at once. At the fourth, the agent stops
+#: answering -- on purpose, fail-closed -- and STAYS STOPPED until restart.
+#: That is the intended outcome and it is better than what it replaced, where
+#: a 32-wide per-loop pool both took longer to exhaust and reset itself, which
+#: is what made it a slow silent poisoning of unrelated callers rather than a
+#: visible stop. "Contained" is a thinner word for it than it deserves.
+#:
+#: Four occurrences is a generous allowance for a thing that should happen
+#: zero times; a hook that wedges is already a bug.
+#:
+#: Confirmed by execution rather than by argument (#52 r2): against a fresh
+#: 4-wide pool, live threads climbed 1 -> 2 -> 3 -> 4 across four wedged hooks
+#: and stopped; a completely healthy, instant hook from an unrelated
+#: Enforcement instance then returned `blocked=True ... timed out` on each of
+#: three further attempts, at 2.00s apiece.
+HOOK_POOL_WORKERS = 4
+_HOOK_POOL = ThreadPoolExecutor(
+    max_workers=HOOK_POOL_WORKERS, thread_name_prefix="kobo-hook"
+)
+
+#: How many hook calls have exceeded HOOK_TIMEOUT_S since boot.
+#:
+#: TIMEOUTS, NOT WEDGES, and the distinction is this module's own (#52 r2). A
+#: timeout fires on ANY call over the bound, including one whose thread
+#: finishes a moment later and returns to the pool -- a SLOW hook, which the
+#: header above names as a category distinct from a wedged one. An earlier
+#: version called this `_WEDGED` and logged "(%d of %d hook workers now
+#: wedged)". Measured with a 0.4s hook against a 0.2s bound: five calls, ONE
+#: thread reused throughout, counter 7 -> 12, and the line read "12 of 4 hook
+#: workers now wedged" on a pool that then answered a healthy hook instantly.
+#:
+#: A number past its own denominator, describing a fatal state, on a pool with
+#: nothing wrong with it. The failure mode was the FALSE POSITIVE, which is
+#: the expensive direction for a diagnostic an operator reads during an
+#: incident -- and it poisoned the dataset gathered to answer "is four right",
+#: since real traffic is exactly where intermittently-slow hooks live.
+#:
+#: Counting the wedges specifically needs the underlying `concurrent.futures.
+#: Future` at the timeout site, so a done-callback can mark a recovered
+#: thread. That trades the ratchet for accuracy and is the right trade when
+#: someone wants the number; timeouts-since-boot is the honest signal until
+#: then.
+_TIMEOUTS = 0
 PreTaskResult = namedtuple("PreTaskResult", "blocked notices detail")
 PostDraftResult = namedtuple("PostDraftResult", "blocked text detail")
 
 log = logging.getLogger(__name__)
+
+
+def _timed_out() -> int:
+    """Record a hook call that exceeded the bound, and return the new total.
+
+    A COUNT, NOT THE POOL'S WIDTH. The log used to report
+    `_HOOK_POOL._max_workers` -- a private attribute, and a constant: it said
+    "the pool has 4 workers" identically on the first timeout and on the
+    fatal fourth. At the moment a reader needs that line, the number they want
+    is how many have happened (#52 r1 nit).
+
+    The caller USES this return rather than re-reading the global, which is
+    what the signature already promised (#52 r2 nit)."""
+    global _TIMEOUTS
+    _TIMEOUTS += 1
+    return _TIMEOUTS
+
+
+async def _call_hook(hook, argument):
+    """Run `hook(argument)` on the hook pool under HOOK_TIMEOUT_S.
+
+    The thread is NOT cancelled on timeout -- nothing can cancel a running
+    thread in Python -- so the hook body runs to completion on a pool that
+    exists to contain exactly that."""
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(_HOOK_POOL, hook, argument), HOOK_TIMEOUT_S
+    )
 
 
 def _first_line(exc: Exception) -> str:
@@ -119,8 +223,15 @@ class Enforcement:
             if not callable(hook):
                 continue
             try:
-                result = await asyncio.wait_for(asyncio.to_thread(hook, message), HOOK_TIMEOUT_S)
+                result = await _call_hook(hook, message)
             except TimeoutError:
+                log.warning(
+                    "pre_task hook %s exceeded %.1fs and was abandoned; its thread "
+                    "runs to completion (%d hook timeouts since boot)",
+                    filename,
+                    HOOK_TIMEOUT_S,
+                    _timed_out(),
+                )
                 return PreTaskResult(True, notices, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error
                 return PreTaskResult(True, notices, f"blocked by {filename}: {_first_line(exc)}")
@@ -128,7 +239,24 @@ class Enforcement:
                 return PreTaskResult(
                     True, notices, f"blocked by {filename}: returned an unexpected shape"
                 )
+            # LOGGED, NOT OBEYED, AND NOT REFUSED EITHER (#45, and #51 carries
+            # the argument for refusing). A hook returning a key this module
+            # does not know is telling us something, and silence is how
+            # `blocked` went unnoticed in the first place. Blocking on it
+            # instead would fail closed on a kobo tool that merely returned an
+            # extra field, which is a fleet outage to fix a spelling mistake.
+            unknown = set(result) - _PRE_TASK_KEYS
+            if unknown:
+                log.warning(
+                    "pre_task hook %s returned unrecognised key(s) %s; ignored. "
+                    "A pre_task hook may return notices, blocked and reason.",
+                    filename,
+                    ", ".join(sorted(unknown)),
+                )
             notices.extend(result.get("notices", []))
+            if result.get("blocked"):
+                reason = result.get("reason") or "no reason given"
+                return PreTaskResult(True, notices, f"blocked by {filename}: {reason}")
         return PreTaskResult(False, notices, "")
 
     async def run_post_draft(self, draft: str) -> PostDraftResult:
@@ -138,8 +266,15 @@ class Enforcement:
             if not callable(hook):
                 continue
             try:
-                result = await asyncio.wait_for(asyncio.to_thread(hook, text), HOOK_TIMEOUT_S)
+                result = await _call_hook(hook, text)
             except TimeoutError:
+                log.warning(
+                    "post_draft hook %s exceeded %.1fs and was abandoned; its thread "
+                    "runs to completion (%d hook timeouts since boot)",
+                    filename,
+                    HOOK_TIMEOUT_S,
+                    _timed_out(),
+                )
                 return PostDraftResult(True, text, f"blocked by {filename}: timed out")
             except Exception as exc:  # noqa: BLE001  fail closed on any hook error
                 return PostDraftResult(True, text, f"blocked by {filename}: {_first_line(exc)}")
