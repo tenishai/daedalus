@@ -208,8 +208,15 @@ class SlackReactionApprover:
     hardening before any production use" -- and the agents shipped, so the
     condition that sentence set was passed without the hardening.
 
-    Pass `approvers` (Slack user ids) to require one of them; leave it unset
-    and behaviour is exactly as before, any reactor counts. That default is
+    Pass `approvers` (Slack user ids) to require one of them for APPROVAL --
+    a denial is never filtered, because raising the bar to authorise must not
+    lower the bar to stop. NOTHING WIRES `approvers` FROM CONFIG YET (#53), so
+    in a real deployment this control is presently unreachable: the code below
+    is the mechanism, not the hardening. Saying otherwise is how the docstring
+    this replaces came to promise a hardening that never arrived.
+
+    Leave it unset and behaviour is exactly as before, any reactor counts.
+    That default is
     deliberate and it is NOT the safe one: refusing every approval on an
     agent whose operator has not yet listed themselves would take tier-2
     tools offline in a running room, unannounced. #53 carries the inversion,
@@ -246,36 +253,54 @@ class SlackReactionApprover:
         # in-thread so the plan sits next to the work it gates (finding #15)
         ts = await self.api.post(self.channel, text, thread_ts=self.thread_ts)
         deadline = time.monotonic() + self.timeout
+        ignored = False
         while time.monotonic() < deadline:
             reactions = await self.api.reactions_with_users(self.channel, ts)
-            deny = self._who(reactions, self.DENY)
+            # DENY IS NEVER FILTERED BY THE ALLOWLIST, and that asymmetry is the
+            # whole point of the list (#54 r1). An allowlist answers "who may
+            # AUTHORISE this", and applying it to the veto answers a different
+            # question nobody asked: it makes a stranger's :x: DISAPPEAR.
+            # Measured before this fix, with approvers={U-operator} and one poll
+            # holding a stranger's :x: beside the operator's tick, approve()
+            # returned True -- the veto discarded. That is strictly weaker than
+            # the behaviour this PR replaced, where any :x: stopped the action.
+            # Raising the bar to authorise must never lower the bar to stop.
+            deny = self._reactors(reactions, self.DENY)
             if deny:
                 log.info("tier-2 %s DENIED by %s", action, ", ".join(sorted(deny)))
                 return False
-            approve = self._who(reactions, self.APPROVE)
+            saw = self._reactors(reactions, self.APPROVE)
+            approve = saw if self.approvers is None else saw & self.approvers
             if approve:
                 log.info("tier-2 %s APPROVED by %s", action, ", ".join(sorted(approve)))
                 return True
+            ignored = ignored or bool(saw)
             await asyncio.sleep(self.poll)
-        log.info("tier-2 %s denied: no reaction within %.0fs", action, self.timeout)
+        # "NO REACTION" WOULD BE A LIE WHEN THERE WAS ONE. An off-list tick runs
+        # the loop to the deadline, and reporting that as silence puts a false
+        # statement into the one artefact this class exists to produce.
+        if ignored:
+            log.info(
+                "tier-2 %s denied: only off-list approvals within %.0fs", action, self.timeout
+            )
+        else:
+            log.info("tier-2 %s denied: no reaction within %.0fs", action, self.timeout)
         return False  # silence is denial
 
-    def _who(self, reactions, wanted: set[str]) -> set[str]:
-        """The users whose reaction counts, for `wanted`.
+    def _reactors(self, reactions, wanted: set[str]) -> set[str]:
+        """Every user whose reaction is in `wanted`. UNFILTERED, deliberately —
+        the caller decides whether the allowlist applies, and it applies to
+        approval only.
 
-        DENY IS CHECKED FIRST BY THE CALLER and that ordering is deliberate,
-        but it only settles a tie WITHIN one poll: a tick where both are
-        present denies. Across polls the first to appear still wins, which is
-        the narrow race #53 also covers."""
-        users = {
+        Deny is read before approve, which settles a tie WITHIN one poll: a
+        tick holding both denies. Across polls the first to appear still wins,
+        which is the narrow race #53 covers."""
+        return {
             user
             for name, reactors in reactions
             if name in wanted
             for user in reactors
         }
-        if self.approvers is None:
-            return users
-        return users & self.approvers
 
 
 class SlackTransport:

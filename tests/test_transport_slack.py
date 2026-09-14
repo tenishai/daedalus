@@ -586,3 +586,54 @@ async def test_a_silent_timeout_is_recorded_as_a_denial_with_its_reason(caplog):
         assert await approver.approve("deploy", {"plan": "x"}) is False
 
     assert "no reaction" in caplog.text
+
+
+async def test_an_OFF_LIST_veto_still_stops_the_action():
+    """#54 r1: the allowlist must gate APPROVAL only.
+
+    `_who` applied `users & self.approvers` to whatever set it was handed, and
+    `approve()` handed it DENY too — so a stranger's :x: was discarded.
+    Measured before the fix, with this exact arrangement: approve() returned
+    True, the veto dropped. That is strictly WEAKER than the behaviour this PR
+    replaced, where any :x: stopped the action.
+
+    Raising the bar to authorise must never lower the bar to stop.
+    """
+    api = FakeApi(
+        reactions_script=[
+            [("x", ["U-stranger"]), ("white_check_mark", ["U-operator"])],
+        ]
+    )
+    approver = SlackReactionApprover(
+        api, CH, timeout=5, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
+
+
+async def test_an_off_list_veto_is_named_in_the_log_as_the_denier(caplog):
+    api = FakeApi(reactions_script=[[("x", ["U-stranger"])]])
+    approver = SlackReactionApprover(
+        api, CH, timeout=5, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is False
+
+    assert "DENIED" in caplog.text
+    assert "U-stranger" in caplog.text
+
+
+async def test_a_timeout_after_an_OFF_LIST_tick_does_not_claim_there_was_no_reaction(caplog):
+    """There was a reaction. Reporting silence puts a false statement into the
+    one artefact this class exists to produce (#54 r1)."""
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U-stranger"])]] * 4)
+    approver = SlackReactionApprover(
+        api, CH, timeout=0.05, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is False
+
+    assert "off-list" in caplog.text
+    assert "no reaction" not in caplog.text
