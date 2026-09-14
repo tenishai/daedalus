@@ -150,6 +150,27 @@ class Agent:
         self._reask_cooldowns: dict[int, float] = {}
         self._revision_fires: set[asyncio.Task] = set()
 
+    def _operator_gate(self, task: Task, lane: str) -> bool:
+        """The shared gate on the three operator-only lanes, and the ONE place
+        that records which sub reached them.
+
+        EMITS ON BOTH OUTCOMES, and the allow event is the point (#47). The
+        refusal events already existed; refusals alone cannot tell you what
+        your LEGITIMATE callers present, and that is exactly the question
+        blocking the inversion of this gate from a blocklist to an
+        `operator:` allowlist. kobo's sub is a property of one env var in one
+        cluster (`CABAL_OPERATOR_TOKEN`, propagated through cabal's re-mint),
+        so no amount of reading either repo settles it -- it has to be read
+        off a running agent. `<lane>_allowed` is how.
+
+        The refusal event names are unchanged on purpose: the kaminos trace
+        pane consumes this stream, and renaming a signal to add a sibling is
+        how you break a consumer for no reason."""
+        sub = task.metadata.get(VERIFIED_SUB_KEY)
+        allowed = teach_authorized(task)
+        self._emit(f"{lane}_allowed" if allowed else f"{lane}_refused", sub=sub)
+        return allowed
+
     def _emit(self, event_type: str, **fields) -> None:
         """The runtime's trace stream: --verbose renders it in the terminal;
         the kaminos trace pane consumes the same events over SSE (/events
@@ -418,8 +439,7 @@ class Agent:
         locked check on purpose: memory writes are operator-gated by the
         transport-stamped sub, not law-gated -- a broken orchestrator file
         must not also brick teaching."""
-        if not teach_authorized(task):
-            self._emit("teach_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "teach"):
             return task.reply(
                 "Teaching is operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,
@@ -456,8 +476,7 @@ class Agent:
         operator-grade, so teach_authorized is reused verbatim rather than
         reimplemented. DELETE_KEY in metadata routes to
         apply_knowledge_delete; its absence is a write (apply_knowledge)."""
-        if not teach_authorized(task):
-            self._emit("knowledge_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "knowledge"):
             return task.reply(
                 "Knowledge writes are operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,
@@ -513,8 +532,7 @@ class Agent:
         Enforcement.load) only re-runs at process boot, so a tool delivered
         here is inert in this process no matter what -- the reply says so
         plainly rather than implying anything more."""
-        if not teach_authorized(task):
-            self._emit("tool_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "tool"):
             return task.reply(
                 "Tool writes are operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,

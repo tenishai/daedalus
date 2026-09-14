@@ -86,3 +86,40 @@ def test_run_on_a_non_bundle_is_a_clean_error(tmp_path):
     result = CliRunner().invoke(main, ["run", str(tmp_path), "-m", "hi"])
     assert result.exit_code != 0
     assert "agent.yaml" in result.output
+
+
+def test_the_gate_renderer_ignores_events_that_merely_LOOK_like_it():
+    """#49 r2 pre-pass: a suffix match swallowed two strangers.
+
+    `kind.endswith(("_allowed", "_refused"))` sits after the exact-match arms
+    in `_print_event`, so it inherited everything they did not claim —
+    `system_task_refused` (carries `marker`) and a SECOND, pre-existing
+    `tool_refused` at agent.py:557 (carries `error`). Neither is an operator
+    gate and neither has a `sub`, so both rendered as `for sub=None`: a
+    confident-looking line about an authorization decision that never happened.
+
+    `tool_refused` is the reason the `sub` test is load-bearing rather than
+    defensive — two call sites share that name with different payloads, so the
+    name alone cannot tell them apart.
+    """
+    from click.testing import CliRunner
+
+    from daedalus.cli import _print_event
+
+    def rendered(event: dict) -> str:
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, _):
+            _print_event(event)
+            return out.getvalue().decode()
+
+    assert "teach" in rendered({"type": "teach_allowed", "sub": "service:room"})
+    assert "persona:scout" in rendered({"type": "tool_refused", "sub": "persona:scout"})
+
+    assert rendered({"type": "system_task_refused", "marker": "bogus"}) == ""
+    assert rendered({"type": "tool_refused", "error": "boom"}) == ""
+
+
+# Lives here, NOT in test_agent_teach.py where it was first written: that
+# module is behind a techne `importorskip`, so a CLI rendering test placed
+# there would never run in CI at all (daedalus#48). Nothing about this test
+# needs techne.

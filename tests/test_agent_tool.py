@@ -185,11 +185,44 @@ async def test_tool_filename_colliding_with_an_image_tool_is_refused_at_write(tm
 # ---- authorization: operator-only, same gate as teach/knowledge ------------
 
 
-async def test_tool_refused_for_colleague_sub(tmp_path):
+async def test_tool_refused_for_a_prefixed_agent_sub(tmp_path):
     home = tmp_path / "home"
     agent = _tool_agent(tmp_path / "bundle", home)
 
     result = await agent.handle_task(_tool_task(sub="agent:ward"))
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.POLICY_VIOLATION
+    overlay = home / "tools-overlay"
+    assert not overlay.exists() or list(overlay.iterdir()) == []
+
+
+async def test_tool_refused_for_a_PERSONA_sub_which_is_what_cabal_MINTS(tmp_path):
+    """THE #43 REGRESSION, PINNED WHERE CI CAN SEE IT (#49 r3).
+
+    Every other test of this fix lives behind a techne `importorskip`, so
+    reverting `_NON_OPERATOR_SUBS` to `("agent:",)` — the exact regression this
+    PR exists to prevent — leaves CI green. With techne supplied the same
+    mutant fails tests in two gated modules, `test_agent_teach.py` and
+    `test_memory_teach.py`, and CI executes neither.
+
+    THE COUNT IS DELIBERATELY ABSENT. An earlier version said "fails four
+    tests, and all four are in the one module that skips" — made false by an
+    edit in this very commit, which added a `persona:` assertion to a second
+    gated module and took it to five across two. A number in a docstring about
+    test coverage is a measurement with no invalidation, and this branch has
+    had one wrong three times.
+
+    That is daedalus#48 as a cause, disclosed in this PR's body; the finding
+    here is narrower and about this diff. `teach_authorized` needs nothing to
+    test — a pure function over `task.metadata`, string comparisons only — so
+    the security-critical assertion belongs in a module CI actually executes,
+    and this one does.
+    """
+    home = tmp_path / "home"
+    agent = _tool_agent(tmp_path / "bundle", home)
+
+    result = await agent.handle_task(_tool_task(sub="persona:scout"))
 
     assert result.state is TaskState.FAILED
     assert result.reason_code is ReasonCode.POLICY_VIOLATION
