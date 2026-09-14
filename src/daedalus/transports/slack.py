@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -31,6 +32,8 @@ _SEEN_CAP = 500
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
+log = logging.getLogger(__name__)
+
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
 
 
@@ -176,27 +179,69 @@ class SlackApi:
         except Exception:
             pass
 
-    async def reactions(self, channel: str, ts: str) -> list[str]:
+    async def reactions_with_users(self, channel: str, ts: str) -> list[tuple[str, list[str]]]:
+        """Every reaction as (name, [user ids]) — WHO, not only WHAT (#46).
+
+        REPLACES a `reactions()` that returned names and discarded the
+        `users` Slack already sends, so at the point an approval decision was
+        made the approver's identity was not merely unchecked, it was
+        unavailable. That forecloses an allowlist AND leaves no attributable
+        record of who authorised a tier-2 action.
+
+        The old method is deleted rather than kept beside this one. I first
+        kept it and wrote that it "has other callers"; it had none -- `approve()`
+        was the only one, and it calls this instead now. Dead code carrying a
+        false reason to exist is worse than no code (#54 r1)."""
         response = await self._web.reactions_get(channel=channel, timestamp=ts)
         message = response.get("message", {}) if hasattr(response, "get") else {}
-        return [r.get("name", "") for r in message.get("reactions", [])]
+        return [
+            (r.get("name", ""), list(r.get("users", []) or []))
+            for r in message.get("reactions", [])
+        ]
 
 
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
 
-    Any user reaction counts for now; an approver allowlist is a planned
-    hardening before any production use.
+    WHO APPROVED IS NOW RECORDED, AND OPTIONALLY CHECKED (#46). This said
+    "any user reaction counts for now; an approver allowlist is a planned
+    hardening before any production use" -- and the agents shipped, so the
+    condition that sentence set was passed without the hardening.
+
+    Pass `approvers` (Slack user ids) to require one of them for APPROVAL --
+    a denial is never filtered, because raising the bar to authorise must not
+    lower the bar to stop. NOTHING WIRES `approvers` FROM CONFIG YET (#53), so
+    in a real deployment this control is presently unreachable: the code below
+    is the mechanism, not the hardening. Saying otherwise is how the docstring
+    this replaces came to promise a hardening that never arrived.
+
+    Leave it unset and behaviour is exactly as before, any reactor counts.
+    That default is
+    deliberate and it is NOT the safe one: refusing every approval on an
+    agent whose operator has not yet listed themselves would take tier-2
+    tools offline in a running room, unannounced. #53 carries the inversion,
+    and the log line below is what makes it answerable -- every decision now
+    names its approver, so an operator can read off the real list before
+    committing to one.
     """
 
     APPROVE = {"white_check_mark", "heavy_check_mark", "+1", "thumbsup"}
     DENY = {"x", "no_entry", "-1", "thumbsdown"}
 
-    def __init__(self, api: SlackApi, channel: str, *, timeout: float = 300.0, poll: float = 2.0):
+    def __init__(
+        self,
+        api: SlackApi,
+        channel: str,
+        *,
+        timeout: float = 300.0,
+        poll: float = 2.0,
+        approvers: frozenset[str] | None = None,
+    ):
         self.api = api
         self.channel = channel
         self.timeout = timeout
         self.poll = poll
+        self.approvers = approvers
         self.thread_ts: str | None = None  # set per-event by the transport
 
     async def approve(self, action: str, plan: dict) -> bool:
@@ -208,14 +253,54 @@ class SlackReactionApprover:
         # in-thread so the plan sits next to the work it gates (finding #15)
         ts = await self.api.post(self.channel, text, thread_ts=self.thread_ts)
         deadline = time.monotonic() + self.timeout
+        ignored = False
         while time.monotonic() < deadline:
-            names = set(await self.api.reactions(self.channel, ts))
-            if names & self.DENY:
+            reactions = await self.api.reactions_with_users(self.channel, ts)
+            # DENY IS NEVER FILTERED BY THE ALLOWLIST, and that asymmetry is the
+            # whole point of the list (#54 r1). An allowlist answers "who may
+            # AUTHORISE this", and applying it to the veto answers a different
+            # question nobody asked: it makes a stranger's :x: DISAPPEAR.
+            # Measured before this fix, with approvers={U-operator} and one poll
+            # holding a stranger's :x: beside the operator's tick, approve()
+            # returned True -- the veto discarded. That is strictly weaker than
+            # the behaviour this PR replaced, where any :x: stopped the action.
+            # Raising the bar to authorise must never lower the bar to stop.
+            deny = self._reactors(reactions, self.DENY)
+            if deny:
+                log.info("tier-2 %s DENIED by %s", action, ", ".join(sorted(deny)))
                 return False
-            if names & self.APPROVE:
+            saw = self._reactors(reactions, self.APPROVE)
+            approve = saw if self.approvers is None else saw & self.approvers
+            if approve:
+                log.info("tier-2 %s APPROVED by %s", action, ", ".join(sorted(approve)))
                 return True
+            ignored = ignored or bool(saw)
             await asyncio.sleep(self.poll)
+        # "NO REACTION" WOULD BE A LIE WHEN THERE WAS ONE. An off-list tick runs
+        # the loop to the deadline, and reporting that as silence puts a false
+        # statement into the one artefact this class exists to produce.
+        if ignored:
+            log.info(
+                "tier-2 %s denied: only off-list approvals within %.0fs", action, self.timeout
+            )
+        else:
+            log.info("tier-2 %s denied: no reaction within %.0fs", action, self.timeout)
         return False  # silence is denial
+
+    def _reactors(self, reactions, wanted: set[str]) -> set[str]:
+        """Every user whose reaction is in `wanted`. UNFILTERED, deliberately —
+        the caller decides whether the allowlist applies, and it applies to
+        approval only.
+
+        Deny is read before approve, which settles a tie WITHIN one poll: a
+        tick holding both denies. Across polls the first to appear still wins,
+        which is the narrow race #53 covers."""
+        return {
+            user
+            for name, reactors in reactions
+            if name in wanted
+            for user in reactors
+        }
 
 
 class SlackTransport:
