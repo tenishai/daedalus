@@ -52,8 +52,12 @@ LEEWAY_SECONDS = 30
 #: revoked when its PRIVATE half is compromised, and whoever holds that mints
 #: fresh tokens at will -- so token expiry gives no bound at all, and this TTL
 #: is the ENTIRE exposure window for unlimited forgery. The cost of shortening
-#: it is one extra GET per process per interval: a negligible number
-#: multiplied by five. Lopsided enough to take without a measurement.
+#: it is FIVE TIMES THE PERIODIC FETCH RATE -- under steady traffic with no
+#: unknown kids, one refetch per TTL becomes five per 300s, so four extra GETs
+#: per five minutes per process. Lopsided enough to take without a
+#: measurement. (An earlier version said "one extra GET per interval,
+#: multiplied by five", which double-counts: multiplying an extra of one by
+#: five asserts five extra, and the real figure is four.)
 KEYS_TTL_SECONDS = 60.0
 
 #: The minimum gap between two JWKS fetches, however many unknown kids arrive
