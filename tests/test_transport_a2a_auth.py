@@ -5,6 +5,7 @@ garbage tokens, and key rotation all must fail closed (or rotate cleanly).
 """
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -18,7 +19,12 @@ from joserfc.jwk import OctKey, RSAKey  # noqa: E402
 
 from daedalus.task import VERIFIED_SUB_KEY, Task  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app  # noqa: E402
-from daedalus.transports.a2a_auth import KEYS_TTL_SECONDS, AuthError, JwtVerifier  # noqa: E402
+from daedalus.transports.a2a_auth import (  # noqa: E402
+    KEYS_TTL_SECONDS,
+    REFRESH_COOLDOWN_SECONDS,
+    AuthError,
+    JwtVerifier,
+)  # noqa: E402
 
 ISSUER = "cabal-core"
 AUDIENCE = "scout-svc"
@@ -284,7 +290,7 @@ async def test_the_cooldown_expires_so_a_ROTATION_during_a_flood_still_works(
 
     rotated = make_key("k2")
     fetch.keys.append(rotated)  # now the cabal really does rotate to k2
-    monkeypatch.setattr("daedalus.transports.a2a_auth.REFRESH_COOLDOWN_SECONDS", 0.0)
+    _cool_down(verifier)
     claims = await verifier.verify(mint(rotated, kid="k2"))
     assert claims["sub"] == "rook:1"
 
@@ -297,6 +303,19 @@ async def test_the_ttl_does_not_refetch_on_every_verification(key):
     for _ in range(10):
         assert await verifier.verify(mint(key))
     assert fetch.calls == 1
+
+
+def _cool_down(verifier) -> None:
+    """Age the cooldown out, ONCE — the `_age_out` principle, other constant.
+
+    NOT by pinning REFRESH_COOLDOWN_SECONDS to 0, which DELETES the mechanism
+    rather than ageing past it. That is the same mistake `_age_out` exists to
+    prevent wearing the other constant's name, and it shipped here: the
+    rotation-during-a-flood test pinned the constant to zero, so a mutant that
+    turned the fixed cooldown into a SLIDING window -- restamping
+    `_refreshed_at` on every refusal, which a sustained flood then holds open
+    forever -- passed all 25 tests (#50 r2 nit)."""
+    verifier._refreshed_at -= REFRESH_COOLDOWN_SECONDS * 10
 
 
 def _age_out(verifier) -> None:
@@ -562,3 +581,96 @@ def test_verifier_claims_without_sub_leave_key_absent():
     )
     assert response.status_code == 200
     assert VERIFIED_SUB_KEY not in handler.received.metadata
+
+
+async def test_the_cooldown_does_not_SLIDE_under_a_sustained_flood(key, monkeypatch):
+    """#50 r2 nit: a mutant turning the fixed cooldown into a sliding window
+    passed all 25 tests, because the only test exercising the cooldown's
+    EXPIRY had pinned the constant to zero — deleting the mechanism rather
+    than ageing past it, which is the mistake `_age_out` exists to prevent.
+
+    THE FLOOD HAS TO CONTINUE WHILE THE ROTATION IS TRIED, and my first
+    version of this test got that wrong: it flooded, stopped, then tried the
+    rotation, and the correct code refused it too — legitimately, because
+    under 10s had passed since the last real refresh. Stopping the flood makes
+    both implementations converge, so it discriminates nothing.
+
+    Interleaved, they diverge. Correct: every ~10s one attempt gets a refresh
+    and finds the rotated key. Sliding: every refusal restamps, so a flood at
+    any interval under the cooldown holds the window open and the rotation is
+    never picked up.
+
+    The blast radius is capped at KEYS_TTL_SECONDS -- the TTL refetch picks up
+    a rotated key independently -- so this costs rotation latency rather than
+    indefinite refusal. That is why it is a nit, and why the window below stays
+    inside one TTL: past it the TTL would mask the mutant.
+    """
+    now = [1_000.0]
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: now[0])
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm; stamps _fetched_at at 1000
+
+    # THE ROTATION MUST ARRIVE AFTER THE FIRST REFRESH, and my first version
+    # of this test appended it before the flood started. The first flood token
+    # is always ALLOWED a refresh (`_since_refresh` is -inf), so that refresh
+    # picked up k2 immediately and the cooldown was never consulted — the test
+    # passed under the mutant and under the fix alike. Third time in this file
+    # a test of mine passed for a reason unrelated to its name.
+    rotated = make_key("k2")
+    for i in range(3):
+        now[0] += 1.0
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"pre-{i}"))
+    fetch.keys.append(rotated)  # the cabal rotates, with a warm cache lacking k2
+
+    accepted_at = None
+    for i in range(40):
+        now[0] += 1.0
+        if now[0] - 1_000.0 >= KEYS_TTL_SECONDS:
+            break  # past here the TTL would refetch anyway and mask the mutant
+        # the flood never repeats a kid, so a per-kid memory would not help
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"flood-{i}"))
+        try:
+            claims = await verifier.verify(mint(rotated, kid="k2"))
+        except AuthError:
+            continue
+        assert claims["sub"] == "rook:1"
+        accepted_at = now[0] - 1_000.0
+        break
+
+    assert accepted_at is not None, (
+        "a rotation was never picked up during a sustained flood — the "
+        "cooldown slid instead of expiring"
+    )
+    assert accepted_at <= REFRESH_COOLDOWN_SECONDS * 2, (
+        f"the rotation took {accepted_at}s against a {REFRESH_COOLDOWN_SECONDS}s cooldown"
+    )
+
+
+async def test_serving_a_STALE_key_set_says_so(key, caplog):
+    """#50 r2: "not invisibly" was a property the module did not have.
+
+    The `except` swallowed the failure with no log, no counter and no readable
+    state, so from the agent's side auth simply kept succeeding on a stale set
+    for as long as the endpoint stayed down. The comment claiming the trade was
+    visible is what made it sound like housekeeping.
+
+    Choosing to keep serving a stale set is exactly the decision that wants a
+    record, so the record is pinned here — a downgrade to debug leaves the
+    clause false again and nothing else would notice.
+    """
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    fetch.down = True
+    _age_out(verifier)
+
+    with caplog.at_level(logging.WARNING):
+        assert await verifier.verify(mint(key))
+
+    assert "still serving the cached key set" in caplog.text
+    assert verifier.jwks_url in caplog.text
+    assert "Revocations cannot reach this verifier" in caplog.text

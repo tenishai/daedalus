@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 
 from joserfc import jwt
 from joserfc.jwk import KeySet
+
+log = logging.getLogger(__name__)
 
 LEEWAY_SECONDS = 30
 
@@ -120,7 +123,14 @@ class JwtVerifier:
     covering both.
 
     The refetch an unknown kid triggers is reachable by an unauthenticated
-    caller, so it is also rate-limited."""
+    caller, so it is rate-limited ON A WARM VERIFIER. The cold leg --
+    `_key_set is None`, before any fetch has succeeded -- is bounded by
+    nothing: the stamp does not clear it, so it stays true for the whole of an
+    in-flight fetch and every concurrent arrival enters and fetches. Measured
+    on a cold process: 20 concurrent verifies produce 20 GETs, against 1 once
+    warm. Pre-existing rather than introduced here, and #55 carries it; stated
+    rather than left for a reader to discover, because the sentence this
+    replaces claimed the whole class."""
 
     def __init__(
         self,
@@ -193,11 +203,25 @@ class JwtVerifier:
             # stamped BEFORE its await and `_fetched_at` was stamped after.
             #
             # The cost is that a failed refresh extends the cached set's trust
-            # by one TTL. That is the standard serve-stale trade and the right
-            # one: a revocation you cannot fetch is undeliverable anyway. The
-            # accepted limit is that someone who can hold the JWKS endpoint
-            # unreachable can hold a revoked key alive -- not invisibly, and
-            # the alternative hands them a total outage instead.
+            # by another TTL -- AND RENEWS THAT EXTENSION ON EVERY ATTEMPT, so
+            # holding the endpoint down holds the extension open indefinitely,
+            # not once (#50 r2). The stamp above is outside the `try`, which is
+            # what makes the fix work and also what makes the extension renew.
+            #
+            # That is the standard serve-stale trade and the right one: a
+            # revocation you cannot fetch is undeliverable anyway. The accepted
+            # limit is that someone who can hold the JWKS endpoint unreachable
+            # can hold a revoked key alive, and the alternative hands them a
+            # total outage instead.
+            #
+            # An earlier version of this paragraph added "not invisibly", which
+            # was a property this module did not have: the except swallowed the
+            # failure with no log, no counter and no readable state, so from
+            # the agent's side auth simply kept succeeding on a stale set. That
+            # clause is the one that made the trade sound like housekeeping.
+            # It is true now because of the warning below, not because it was
+            # asserted.
+            stale_for = self._age
             self._fetched_at = time.monotonic()
             try:
                 self._key_set = KeySet.import_key_set(await self._fetch())
@@ -207,6 +231,18 @@ class JwtVerifier:
                     raise AuthError(
                         f"could not load JWKS from {self.jwks_url}: {exc}"
                     ) from exc
+                # CHOOSING TO KEEP SERVING A STALE SET IS EXACTLY THE DECISION
+                # THAT WANTS A RECORD. Without this the agent shows green auth
+                # throughout an outage it cannot see, and the comment above
+                # claimed a visibility the code did not provide.
+                log.warning(
+                    "JWKS refresh from %s failed (%s); still serving the cached "
+                    "key set, now %.0fs old. Revocations cannot reach this "
+                    "verifier until the endpoint recovers.",
+                    self.jwks_url,
+                    exc,
+                    stale_for,
+                )
         return self._key_set
 
     async def verify_header(self, authorization: str | None) -> dict:
