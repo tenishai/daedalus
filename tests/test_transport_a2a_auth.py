@@ -674,3 +674,36 @@ async def test_serving_a_STALE_key_set_says_so(key, caplog):
     assert "still serving the cached key set" in caplog.text
     assert verifier.jwks_url in caplog.text
     assert "Revocations cannot reach this verifier" in caplog.text
+
+
+async def test_the_stale_age_GROWS_across_a_sustained_outage(key, monkeypatch, caplog):
+    """#50 r3 pre-pass: the age reported was time-since-last-ATTEMPT.
+
+    `_fetched_at` is stamped on every attempt — the r1 fix, correct for the
+    TTL — so it cannot answer "how old is the data we are serving". Each
+    failure restamped, and every line after the first said one TTL regardless
+    of the true age: at t=120 with the last success at t=0 it claimed 60 when
+    the answer was 120, understating without bound.
+
+    That is the renews-per-attempt mechanism this module documents, biting the
+    diagnostic added to make the trade visible — a log built for exactly the
+    scenario it under-reported. `_loaded_at` tracks the last SUCCESS.
+    """
+    now = [1_000.0]
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: now[0])
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # success at t=1000
+    fetch.down = True
+
+    ages = []
+    for t in (1_060.0, 1_120.0, 1_180.0):
+        now[0] = t
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert await verifier.verify(mint(key))
+        ages.append(caplog.text)
+
+    assert "60s old" in ages[0]
+    assert "120s old" in ages[1], "the age reset — it is measuring attempts, not staleness"
+    assert "180s old" in ages[2]

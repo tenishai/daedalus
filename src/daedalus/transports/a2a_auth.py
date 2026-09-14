@@ -145,6 +145,21 @@ class JwtVerifier:
         self._fetch = fetch or self._http_fetch
         self._key_set: KeySet | None = None
         self._fetched_at: float = 0.0
+        #: When a fetch last SUCCEEDED, as distinct from when one was last
+        #: attempted (#50 r3 pre-pass).
+        #:
+        #: `_fetched_at` is stamped on every ATTEMPT -- that is the r1 fix and
+        #: it is right for the TTL -- so it cannot answer "how old is the data
+        #: we are serving". Reporting `_age` in the stale-set warning meant
+        #: that during a sustained outage each failure restamped, and every log
+        #: line after the first said "60s old" regardless of the real age: at
+        #: t=120 with the last success at t=0, it claimed 60 when the answer
+        #: was 120, and the understatement grows without bound.
+        #:
+        #: That is the same renews-per-attempt mechanism this module documents
+        #: two screens down, biting the diagnostic added to make the trade
+        #: visible -- a log built for exactly the scenario it under-reports.
+        self._loaded_at: float = 0.0
         # -inf, NOT 0.0, because `time.monotonic()`'s reference point is
         # UNDEFINED and is uptime on Linux (#50 r1 nit). A process starting
         # within REFRESH_COOLDOWN_SECONDS of that epoch would refuse its first
@@ -221,10 +236,10 @@ class JwtVerifier:
             # clause is the one that made the trade sound like housekeeping.
             # It is true now because of the warning below, not because it was
             # asserted.
-            stale_for = self._age
             self._fetched_at = time.monotonic()
             try:
                 self._key_set = KeySet.import_key_set(await self._fetch())
+                self._loaded_at = self._fetched_at
             except Exception as exc:
                 if self._key_set is None:
                     # Cold start: there is nothing to serve stale.
@@ -241,7 +256,7 @@ class JwtVerifier:
                     "verifier until the endpoint recovers.",
                     self.jwks_url,
                     exc,
-                    stale_for,
+                    time.monotonic() - self._loaded_at,
                 )
         return self._key_set
 
