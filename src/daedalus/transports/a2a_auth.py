@@ -20,10 +20,12 @@ JWKS cache at all — `verify` there is handed keys. Everything below about
 TTLs, refetching and cooldowns exists only here, so "mirrors cabal's own" is
 true of the claim checks and says nothing about the part that had the bugs.
 
-One known divergence in the claim checks, fail-closed and shared with cabal:
-`aud` is compared as a string, so a list-valued audience is rejected even
-though RFC 7519 permits one. cabal mints `aud` as a str, so the two agree
-today; this would bite the first time the config points at another issuer.
+One known divergence in the claim checks: `aud` is compared as a string, so a
+list-valued audience is rejected even though RFC 7519 permits one. joserfc's
+`decode` does not check `aud` at all without a claims registry, so that manual
+comparison IS the whole check. cabal mints `aud` as a str, so nothing in the
+integration presents a list today; this would bite the first time the config
+points at another issuer.
 """
 
 from __future__ import annotations
@@ -44,10 +46,15 @@ LEEWAY_SECONDS = 30
 #: a kid being ABSENT, so rotation works -- a new kid is unknown and forces a
 #: fetch -- while revocation is the exact opposite shape and produces no
 #: signal at all. Pull a compromised key from the JWKS and this verifier goes
-#: on accepting tokens signed by it for the life of the process. Five minutes
-#: is the window an operator lives with between pulling a key and it ceasing
-#: to work.
-KEYS_TTL_SECONDS = 300.0
+#: on accepting tokens signed by it for the life of the process.
+#:
+#: SIXTY SECONDS, BECAUSE `exp` BOUNDS NOTHING HERE (#50 r1). A signing key is
+#: revoked when its PRIVATE half is compromised, and whoever holds that mints
+#: fresh tokens at will -- so token expiry gives no bound at all, and this TTL
+#: is the ENTIRE exposure window for unlimited forgery. The cost of shortening
+#: it is one extra GET per process per interval: a negligible number
+#: multiplied by five. Lopsided enough to take without a measurement.
+KEYS_TTL_SECONDS = 60.0
 
 #: The minimum gap between two JWKS fetches, however many unknown kids arrive
 #: in between (#44).
@@ -58,6 +65,15 @@ KEYS_TTL_SECONDS = 300.0
 #: signature, no authentication -- so a token with a random kid is "not
 #: garbage" by this code's own test and cost one outbound GET each. Measured
 #: before this: 20 such requests produced 20 fetches.
+#:
+#: THE OVERCLAIM WAS IN THE PARENTHETICAL, NOT IN THE TEST. `test_garbage_
+#: token_never_touches_the_jwks` does exactly what its name says -- it sends
+#: `not-a-jwt-at-all`, which is a garbage token, and no fetch follows. The
+#: sentence that promised more was this docstring's "(no fetch amplification
+#: from unauthenticated callers)", which generalised a narrow true result into
+#: a claim about a whole class. That case is also the CHEAPEST to defend
+#: rather than one nobody sends -- a fuzzer sends it constantly, and it is a
+#: reasonable regression guard on its own terms (#50 r1).
 #:
 #: A COOLDOWN, NOT A PER-KID MEMORY, and the difference is the whole fix. My
 #: first attempt remembered each kid it had missed and refused repeats without
@@ -115,7 +131,13 @@ class JwtVerifier:
         self._fetch = fetch or self._http_fetch
         self._key_set: KeySet | None = None
         self._fetched_at: float = 0.0
-        self._refreshed_at: float = 0.0
+        # -inf, NOT 0.0, because `time.monotonic()`'s reference point is
+        # UNDEFINED and is uptime on Linux (#50 r1 nit). A process starting
+        # within REFRESH_COOLDOWN_SECONDS of that epoch would refuse its first
+        # genuine rotation without a fetch -- measured with the clock stubbed,
+        # refused at epoch+3.0s and accepted at epoch+30.0s. A sentinel cannot
+        # be mistaken for a real reading.
+        self._refreshed_at: float = float("-inf")
 
     async def _http_fetch(self) -> dict:
         import httpx
@@ -144,11 +166,43 @@ class JwtVerifier:
 
     async def _keys(self, *, refresh: bool = False) -> KeySet:
         if self._key_set is None or refresh or self._age >= KEYS_TTL_SECONDS:
+            # STAMP THE ATTEMPT, NOT THE SUCCESS, AND SERVE STALE ON FAILURE
+            # (#50 r1 Critical). Stamping after the await left `_fetched_at`
+            # unadvanced whenever a fetch raised, so `_age` stayed above the
+            # TTL FOREVER and every request re-entered the fetch. Two things
+            # fell out, and neither was fail-closed by design -- `_key_set` is
+            # still populated and still correct when it happens:
+            #   * the 1:1 unauthenticated amplification this module exists to
+            #     close came back, aimed at a JWKS endpoint already degraded
+            #     (measured, endpoint down: 20 requests -> 20 GETs);
+            #   * a JWKS blip, previously survivable indefinitely from cache,
+            #     became 100% auth failure one TTL in.
+            # The cooldown cannot bound either, because `_keys()` raises
+            # before `verify` ever reaches the `_since_refresh` check.
+            #
+            # It also closes a thundering herd that needs no outage at all:
+            # one verifier serves the whole process on one loop, so N
+            # concurrent requests all see `_age >= TTL` before any of them
+            # stamps. Measured: 20 concurrent verifies at expiry -> 20 GETs
+            # before, 1 after. The unknown-kid path already did this right,
+            # which is what made the asymmetry visible -- `_refreshed_at` is
+            # stamped BEFORE its await and `_fetched_at` was stamped after.
+            #
+            # The cost is that a failed refresh extends the cached set's trust
+            # by one TTL. That is the standard serve-stale trade and the right
+            # one: a revocation you cannot fetch is undeliverable anyway. The
+            # accepted limit is that someone who can hold the JWKS endpoint
+            # unreachable can hold a revoked key alive -- not invisibly, and
+            # the alternative hands them a total outage instead.
+            self._fetched_at = time.monotonic()
             try:
                 self._key_set = KeySet.import_key_set(await self._fetch())
             except Exception as exc:
-                raise AuthError(f"could not load JWKS from {self.jwks_url}: {exc}") from exc
-            self._fetched_at = time.monotonic()
+                if self._key_set is None:
+                    # Cold start: there is nothing to serve stale.
+                    raise AuthError(
+                        f"could not load JWKS from {self.jwks_url}: {exc}"
+                    ) from exc
         return self._key_set
 
     async def verify_header(self, authorization: str | None) -> dict:

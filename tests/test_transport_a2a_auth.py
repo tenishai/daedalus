@@ -4,6 +4,7 @@ Adversarial per design §5: forged algorithms, wrong audience, expiry,
 garbage tokens, and key rotation all must fail closed (or rotate cleanly).
 """
 
+import asyncio
 import time
 
 import pytest
@@ -17,7 +18,7 @@ from joserfc.jwk import OctKey, RSAKey  # noqa: E402
 
 from daedalus.task import VERIFIED_SUB_KEY, Task  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app  # noqa: E402
-from daedalus.transports.a2a_auth import AuthError, JwtVerifier  # noqa: E402
+from daedalus.transports.a2a_auth import KEYS_TTL_SECONDS, AuthError, JwtVerifier  # noqa: E402
 
 ISSUER = "cabal-core"
 AUDIENCE = "scout-svc"
@@ -296,6 +297,129 @@ async def test_the_ttl_does_not_refetch_on_every_verification(key):
     for _ in range(10):
         assert await verifier.verify(mint(key))
     assert fetch.calls == 1
+
+
+def _age_out(verifier) -> None:
+    """Age the cached key set past its TTL, ONCE.
+
+    NOT by pinning KEYS_TTL_SECONDS to 0 — that makes the cache permanently
+    stale, so every call refetches no matter when the stamp lands, and the
+    test then fails against the FIX as loudly as against the bug. (It did.)
+    Reality is a cache that ages out once and is then re-stamped; winding the
+    stamp backwards models that and leaves the TTL doing its real job."""
+    verifier._fetched_at -= KEYS_TTL_SECONDS * 10
+
+
+class FlakyFetch(CountingFetch):
+    """A JWKS that can be switched to failing, counting attempts either way."""
+
+    def __init__(self, *keys):
+        super().__init__(*keys)
+        self.down = False
+
+    async def __call__(self) -> dict:
+        self.calls += 1
+        if self.down:
+            raise ConnectionError("connection refused")
+        return {"keys": [key.as_dict(private=False) for key in self.keys]}
+
+
+async def test_a_JWKS_OUTAGE_does_not_become_an_auth_outage(key):
+    """#50 r1 Critical: stamping the SUCCESS left `_fetched_at` unadvanced on
+    failure, so `_age` stayed over the TTL forever.
+
+    Before this PR a token whose kid was already cached verified whether or
+    not the endpoint was reachable — a blip was survivable indefinitely. The
+    TTL turned that into 100% auth failure one TTL into any outage, and
+    nothing in the diff claimed that as a design: the cached set is still
+    populated and still correct while it happens.
+    """
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm
+
+    fetch.down = True
+    _age_out(verifier)
+
+    assert await verifier.verify(mint(key)), "a cached, still-correct key stopped verifying"
+
+
+async def test_an_outage_does_not_reopen_the_fetch_amplification(key):
+    """The same root cause, and the nastier half: the amplification this
+    module exists to close came back, aimed at an endpoint already degraded.
+    Measured before the fix, endpoint down: 20 requests -> 20 GETs."""
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+    fetch.down = True
+    _age_out(verifier)
+
+    before = fetch.calls
+    for _ in range(20):
+        await verifier.verify(mint(key))
+
+    assert fetch.calls - before <= 2, (
+        f"{fetch.calls - before} fetches for 20 requests during an outage"
+    )
+
+
+async def test_a_COLD_start_with_no_keys_still_fails_closed(key):
+    """Serve-stale must not become serve-nothing: with no cached set there is
+    nothing to serve, and the caller has to hear about it."""
+    fetch = FlakyFetch(key)
+    fetch.down = True
+    verifier = verifier_with(fetch)
+
+    with pytest.raises(AuthError, match="could not load JWKS"):
+        await verifier.verify(mint(key))
+
+
+async def test_a_TTL_expiry_is_not_a_thundering_herd(key):
+    """#50 r1 Important, and it needs no outage. One verifier serves the whole
+    process on one loop, so N concurrent requests all read `_age >= TTL`
+    before any of them stamps. The unknown-kid path already stamped before its
+    await, which is what made the asymmetry visible."""
+    # A FETCH THAT ACTUALLY YIELDS. `CountingFetch` is `async def` with no
+    # await inside, so it completes without ever suspending -- the gather runs
+    # the twenty coroutines to completion one at a time and NOTHING
+    # interleaves. This test passed against the bug for that reason until the
+    # mutant caught it. Concurrency needs a suspension point to be concurrent.
+    class SlowFetch(CountingFetch):
+        async def __call__(self) -> dict:
+            self.calls += 1
+            await asyncio.sleep(0.01)
+            return {"keys": [k.as_dict(private=False) for k in self.keys]}
+
+    fetch = SlowFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+    _age_out(verifier)
+
+    before = fetch.calls
+    await asyncio.gather(*(verifier.verify(mint(key)) for _ in range(20)))
+
+    assert fetch.calls - before == 1, (
+        f"{fetch.calls - before} concurrent fetches at TTL expiry"
+    )
+
+
+async def test_the_cooldown_sentinel_is_not_a_real_point_on_the_clock(key, monkeypatch):
+    """#50 r1 nit: `time.monotonic()`'s epoch is undefined and is uptime on
+    Linux, so `_refreshed_at = 0.0` refuses the first rotation of a process
+    that starts inside the cooldown window."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    # WARM THE CACHE WITHOUT k2 FIRST. Appending the rotated key before the
+    # first fetch puts it in the very first key set, so the kid is FOUND and
+    # the cooldown branch is never entered -- this test passed against the bug
+    # for exactly that reason until the mutant caught it.
+    assert await verifier.verify(mint(key))
+
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: 3.0)
+    rotated = make_key("k2")
+    fetch.keys.append(rotated)
+    claims = await verifier.verify(mint(rotated, kid="k2"))
+    assert claims["sub"] == "rook:1"
 
 
 def test_gets_stay_open_when_auth_is_configured(client):
