@@ -599,14 +599,31 @@ async def test_an_OFF_LIST_veto_still_stops_the_action():
 
     Raising the bar to authorise must never lower the bar to stop.
     """
+    approvers = frozenset({"U-operator"})
+
+    # THE POSITIVE CONTROL IS THE TEETH (#54 r2). `is False` alone is
+    # `approve()`'s DEFAULT answer, so this test passed against a mutant that
+    # simply returned False unconditionally -- it was one of the three new
+    # tests, and the only one whose sole assertion was the default. Its two
+    # siblings survived that mutant because they assert on log content.
+    # Pairing the veto case with the identical script MINUS the veto is what
+    # makes the False mean "the :x: did it" rather than "nothing happened".
+    without_veto = FakeApi(
+        reactions_script=[[("white_check_mark", ["U-operator"])]]
+    )
+    assert (
+        await SlackReactionApprover(
+            without_veto, CH, timeout=5, poll=0.01, approvers=approvers
+        ).approve("dangerous_tool", {"plan": "x"})
+        is True
+    ), "the control did not approve, so a False below would prove nothing"
+
     api = FakeApi(
         reactions_script=[
             [("x", ["U-stranger"]), ("white_check_mark", ["U-operator"])],
         ]
     )
-    approver = SlackReactionApprover(
-        api, CH, timeout=5, poll=0.01, approvers=frozenset({"U-operator"})
-    )
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=approvers)
 
     assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
 
