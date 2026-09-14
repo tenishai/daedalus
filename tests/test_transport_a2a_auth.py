@@ -4,6 +4,8 @@ Adversarial per design §5: forged algorithms, wrong audience, expiry,
 garbage tokens, and key rotation all must fail closed (or rotate cleanly).
 """
 
+import asyncio
+import logging
 import time
 
 import pytest
@@ -17,7 +19,12 @@ from joserfc.jwk import OctKey, RSAKey  # noqa: E402
 
 from daedalus.task import VERIFIED_SUB_KEY, Task  # noqa: E402
 from daedalus.transports.a2a import build_a2a_app  # noqa: E402
-from daedalus.transports.a2a_auth import AuthError, JwtVerifier  # noqa: E402
+from daedalus.transports.a2a_auth import (  # noqa: E402
+    KEYS_TTL_SECONDS,
+    REFRESH_COOLDOWN_SECONDS,
+    AuthError,
+    JwtVerifier,
+)  # noqa: E402
 
 ISSUER = "cabal-core"
 AUDIENCE = "scout-svc"
@@ -186,6 +193,254 @@ async def test_unknown_kid_after_refresh_fails_closed(key):
     assert fetch.calls == 2  # initial + one rotation refresh, no more
 
 
+def _kid_only_token(kid: str) -> str:
+    """A token with a WELL-FORMED header naming `kid` and nothing valid after.
+
+    This is what an attacker sends, and what the pre-#44 code called "not
+    garbage": `_header_kid` needs only a base64-decodable JSON header with a
+    string kid -- no signature, no authentication -- so each one reached the
+    kid lookup and, missing, triggered a JWKS fetch."""
+    import base64 as _b64
+    import json as _json
+
+    header = _b64.urlsafe_b64encode(
+        _json.dumps({"alg": "RS256", "kid": kid}).encode()
+    ).rstrip(b"=").decode()
+    return f"{header}.eyJhIjoxfQ.not-a-real-signature"
+
+
+async def test_a_flood_of_unknown_kids_does_not_become_a_flood_of_FETCHES(key):
+    """#44: the amplification the old docstring said could not happen.
+
+    `test_garbage_token_never_touches_the_jwks` above is true and tests the
+    EASY half -- an unparseable token. It passed while this was wide open,
+    which is how the claim looked verified. Measured before the fix: 20
+    unauthenticated requests with random kids produced 20 outbound GETs to
+    the cabal's JWKS endpoint, from a surface that is reachable before auth
+    by construction."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm the cache
+    warm = fetch.calls
+
+    for i in range(20):
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"attacker-{i}"))
+
+    # One refresh for the first miss; the rest are refused from memory.
+    assert fetch.calls - warm == 1, (
+        f"{fetch.calls - warm} fetches for 20 unauthenticated requests — "
+        "an unknown kid is still an outbound fetch trigger"
+    )
+
+
+async def test_a_REVOKED_key_stops_verifying_once_the_cache_expires(key, monkeypatch):
+    """#44, and the serious half.
+
+    Refresh is gated on a kid being ABSENT, so rotation works and revocation
+    produces no signal at all: the kid is still cached, nothing asks again,
+    and a key pulled from the JWKS goes on verifying for the life of the
+    process. Measured before the fix: still accepted after the endpoint
+    stopped serving the key."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    # The operator pulls the compromised key and the endpoint serves its
+    # REPLACEMENT. Not an empty set, and the reason is not the one an earlier
+    # version of this comment gave.
+    #
+    # I wrote that an empty set "would make this test pass without exercising
+    # the TTL". That is backwards, and I had the measurement in front of me
+    # when I wrote it: an empty set makes `import_key_set` raise, `_keys()`
+    # re-raises it as `could not load JWKS ... No keys to import`, and the
+    # `match=` below does NOT match that -- so the test FAILS. It was a
+    # rationalisation, not a finding (#50 r1).
+    #
+    # The real reason to serve a replacement is that it models revocation
+    # rather than outage. An empty set proves only that an unreadable JWKS
+    # fails closed, which is a coarser and less interesting property; a
+    # healthy endpoint that no longer lists ONE key is what an operator
+    # actually does when a key is compromised, and it is the case where the
+    # cached set would otherwise still verify it.
+    fetch.keys[:] = [make_key("k-replacement")]
+
+    # Still accepted inside the TTL — that window is the deliberate cost.
+    assert await verifier.verify(mint(key))
+
+    monkeypatch.setattr("daedalus.transports.a2a_auth.KEYS_TTL_SECONDS", 0.0)
+    with pytest.raises(AuthError, match="unknown signing key"):
+        await verifier.verify(mint(key))
+
+
+async def test_the_cooldown_expires_so_a_ROTATION_during_a_flood_still_works(
+    key, monkeypatch
+):
+    """The fix must not invent an availability bug.
+
+    The cooldown refuses an unknown kid without fetching — so a genuinely new
+    key that arrives while it is running is refused too. That is the cost, and
+    it has to be bounded: once the cooldown expires the rotation must land."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    with pytest.raises(AuthError):
+        await verifier.verify(_kid_only_token("k2"))  # probed before it exists
+
+    rotated = make_key("k2")
+    fetch.keys.append(rotated)  # now the cabal really does rotate to k2
+    _cool_down(verifier)
+    claims = await verifier.verify(mint(rotated, kid="k2"))
+    assert claims["sub"] == "rook:1"
+
+
+async def test_the_ttl_does_not_refetch_on_every_verification(key):
+    """A TTL that expired instantly would turn every request into a JWKS GET,
+    which is the amplification this file also exists to prevent."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    for _ in range(10):
+        assert await verifier.verify(mint(key))
+    assert fetch.calls == 1
+
+
+def _cool_down(verifier) -> None:
+    """Age the cooldown out, ONCE — the `_age_out` principle, other constant.
+
+    NOT by pinning REFRESH_COOLDOWN_SECONDS to 0, which DELETES the mechanism
+    rather than ageing past it. That is the same mistake `_age_out` exists to
+    prevent wearing the other constant's name, and it shipped here: the
+    rotation-during-a-flood test pinned the constant to zero, so a mutant that
+    turned the fixed cooldown into a SLIDING window -- restamping
+    `_refreshed_at` on every refusal, which a sustained flood then holds open
+    forever -- passed all 25 tests (#50 r2 nit)."""
+    verifier._refreshed_at -= REFRESH_COOLDOWN_SECONDS * 10
+
+
+def _age_out(verifier) -> None:
+    """Age the cached key set past its TTL, ONCE.
+
+    NOT by pinning KEYS_TTL_SECONDS to 0 — that makes the cache permanently
+    stale, so every call refetches no matter when the stamp lands, and the
+    test then fails against the FIX as loudly as against the bug. (It did.)
+    Reality is a cache that ages out once and is then re-stamped; winding the
+    stamp backwards models that and leaves the TTL doing its real job."""
+    verifier._fetched_at -= KEYS_TTL_SECONDS * 10
+
+
+class FlakyFetch(CountingFetch):
+    """A JWKS that can be switched to failing, counting attempts either way."""
+
+    def __init__(self, *keys):
+        super().__init__(*keys)
+        self.down = False
+
+    async def __call__(self) -> dict:
+        self.calls += 1
+        if self.down:
+            raise ConnectionError("connection refused")
+        return {"keys": [key.as_dict(private=False) for key in self.keys]}
+
+
+async def test_a_JWKS_OUTAGE_does_not_become_an_auth_outage(key):
+    """#50 r1 Critical: stamping the SUCCESS left `_fetched_at` unadvanced on
+    failure, so `_age` stayed over the TTL forever.
+
+    Before this PR a token whose kid was already cached verified whether or
+    not the endpoint was reachable — a blip was survivable indefinitely. The
+    TTL turned that into 100% auth failure one TTL into any outage, and
+    nothing in the diff claimed that as a design: the cached set is still
+    populated and still correct while it happens.
+    """
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm
+
+    fetch.down = True
+    _age_out(verifier)
+
+    assert await verifier.verify(mint(key)), "a cached, still-correct key stopped verifying"
+
+
+async def test_an_outage_does_not_reopen_the_fetch_amplification(key):
+    """The same root cause, and the nastier half: the amplification this
+    module exists to close came back, aimed at an endpoint already degraded.
+    Measured before the fix, endpoint down: 20 requests -> 20 GETs."""
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+    fetch.down = True
+    _age_out(verifier)
+
+    before = fetch.calls
+    for _ in range(20):
+        await verifier.verify(mint(key))
+
+    assert fetch.calls - before <= 2, (
+        f"{fetch.calls - before} fetches for 20 requests during an outage"
+    )
+
+
+async def test_a_COLD_start_with_no_keys_still_fails_closed(key):
+    """Serve-stale must not become serve-nothing: with no cached set there is
+    nothing to serve, and the caller has to hear about it."""
+    fetch = FlakyFetch(key)
+    fetch.down = True
+    verifier = verifier_with(fetch)
+
+    with pytest.raises(AuthError, match="could not load JWKS"):
+        await verifier.verify(mint(key))
+
+
+async def test_a_TTL_expiry_is_not_a_thundering_herd(key):
+    """#50 r1 Important, and it needs no outage. One verifier serves the whole
+    process on one loop, so N concurrent requests all read `_age >= TTL`
+    before any of them stamps. The unknown-kid path already stamped before its
+    await, which is what made the asymmetry visible."""
+    # A FETCH THAT ACTUALLY YIELDS. `CountingFetch` is `async def` with no
+    # await inside, so it completes without ever suspending -- the gather runs
+    # the twenty coroutines to completion one at a time and NOTHING
+    # interleaves. This test passed against the bug for that reason until the
+    # mutant caught it. Concurrency needs a suspension point to be concurrent.
+    class SlowFetch(CountingFetch):
+        async def __call__(self) -> dict:
+            self.calls += 1
+            await asyncio.sleep(0.01)
+            return {"keys": [k.as_dict(private=False) for k in self.keys]}
+
+    fetch = SlowFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+    _age_out(verifier)
+
+    before = fetch.calls
+    await asyncio.gather(*(verifier.verify(mint(key)) for _ in range(20)))
+
+    assert fetch.calls - before == 1, (
+        f"{fetch.calls - before} concurrent fetches at TTL expiry"
+    )
+
+
+async def test_the_cooldown_sentinel_is_not_a_real_point_on_the_clock(key, monkeypatch):
+    """#50 r1 nit: `time.monotonic()`'s epoch is undefined and is uptime on
+    Linux, so `_refreshed_at = 0.0` refuses the first rotation of a process
+    that starts inside the cooldown window."""
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    # WARM THE CACHE WITHOUT k2 FIRST. Appending the rotated key before the
+    # first fetch puts it in the very first key set, so the kid is FOUND and
+    # the cooldown branch is never entered -- this test passed against the bug
+    # for exactly that reason until the mutant caught it.
+    assert await verifier.verify(mint(key))
+
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: 3.0)
+    rotated = make_key("k2")
+    fetch.keys.append(rotated)
+    claims = await verifier.verify(mint(rotated, kid="k2"))
+    assert claims["sub"] == "rook:1"
+
+
 def test_gets_stay_open_when_auth_is_configured(client):
     """Auth gates dispatch. The card is a public document (cabal serves its
     agents' cards openly too); the events door is the kaminos-auth item."""
@@ -326,3 +581,129 @@ def test_verifier_claims_without_sub_leave_key_absent():
     )
     assert response.status_code == 200
     assert VERIFIED_SUB_KEY not in handler.received.metadata
+
+
+async def test_the_cooldown_does_not_SLIDE_under_a_sustained_flood(key, monkeypatch):
+    """#50 r2 nit: a mutant turning the fixed cooldown into a sliding window
+    passed all 25 tests, because the only test exercising the cooldown's
+    EXPIRY had pinned the constant to zero — deleting the mechanism rather
+    than ageing past it, which is the mistake `_age_out` exists to prevent.
+
+    THE FLOOD HAS TO CONTINUE WHILE THE ROTATION IS TRIED, and my first
+    version of this test got that wrong: it flooded, stopped, then tried the
+    rotation, and the correct code refused it too — legitimately, because
+    under 10s had passed since the last real refresh. Stopping the flood makes
+    both implementations converge, so it discriminates nothing.
+
+    Interleaved, they diverge. Correct: every ~10s one attempt gets a refresh
+    and finds the rotated key. Sliding: every refusal restamps, so a flood at
+    any interval under the cooldown holds the window open and the rotation is
+    never picked up.
+
+    The blast radius is capped at KEYS_TTL_SECONDS -- the TTL refetch picks up
+    a rotated key independently -- so this costs rotation latency rather than
+    indefinite refusal. That is why it is a nit, and why the window below stays
+    inside one TTL: past it the TTL would mask the mutant.
+    """
+    now = [1_000.0]
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: now[0])
+    fetch = CountingFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # warm; stamps _fetched_at at 1000
+
+    # THE ROTATION MUST ARRIVE AFTER THE FIRST REFRESH, and my first version
+    # of this test appended it before the flood started. The first flood token
+    # is always ALLOWED a refresh (`_since_refresh` is -inf), so that refresh
+    # picked up k2 immediately and the cooldown was never consulted — the test
+    # passed under the mutant and under the fix alike. Third time in this file
+    # a test of mine passed for a reason unrelated to its name.
+    rotated = make_key("k2")
+    for i in range(3):
+        now[0] += 1.0
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"pre-{i}"))
+    fetch.keys.append(rotated)  # the cabal rotates, with a warm cache lacking k2
+
+    accepted_at = None
+    for i in range(40):
+        now[0] += 1.0
+        if now[0] - 1_000.0 >= KEYS_TTL_SECONDS:
+            break  # past here the TTL would refetch anyway and mask the mutant
+        # the flood never repeats a kid, so a per-kid memory would not help
+        with pytest.raises(AuthError, match="unknown signing key"):
+            await verifier.verify(_kid_only_token(f"flood-{i}"))
+        try:
+            claims = await verifier.verify(mint(rotated, kid="k2"))
+        except AuthError:
+            continue
+        assert claims["sub"] == "rook:1"
+        accepted_at = now[0] - 1_000.0
+        break
+
+    assert accepted_at is not None, (
+        "a rotation was never picked up during a sustained flood — the "
+        "cooldown slid instead of expiring"
+    )
+    assert accepted_at <= REFRESH_COOLDOWN_SECONDS * 2, (
+        f"the rotation took {accepted_at}s against a {REFRESH_COOLDOWN_SECONDS}s cooldown"
+    )
+
+
+async def test_serving_a_STALE_key_set_says_so(key, caplog):
+    """#50 r2: "not invisibly" was a property the module did not have.
+
+    The `except` swallowed the failure with no log, no counter and no readable
+    state, so from the agent's side auth simply kept succeeding on a stale set
+    for as long as the endpoint stayed down. The comment claiming the trade was
+    visible is what made it sound like housekeeping.
+
+    Choosing to keep serving a stale set is exactly the decision that wants a
+    record, so the record is pinned here — a downgrade to debug leaves the
+    clause false again and nothing else would notice.
+    """
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))
+
+    fetch.down = True
+    _age_out(verifier)
+
+    with caplog.at_level(logging.WARNING):
+        assert await verifier.verify(mint(key))
+
+    assert "still serving the cached key set" in caplog.text
+    assert verifier.jwks_url in caplog.text
+    assert "Revocations cannot reach this verifier" in caplog.text
+
+
+async def test_the_stale_age_GROWS_across_a_sustained_outage(key, monkeypatch, caplog):
+    """#50 r3 pre-pass: the age reported was time-since-last-ATTEMPT.
+
+    `_fetched_at` is stamped on every attempt — the r1 fix, correct for the
+    TTL — so it cannot answer "how old is the data we are serving". Each
+    failure restamped, and every line after the first said one TTL regardless
+    of the true age: at t=120 with the last success at t=0 it claimed 60 when
+    the answer was 120, understating without bound.
+
+    That is the renews-per-attempt mechanism this module documents, biting the
+    diagnostic added to make the trade visible — a log built for exactly the
+    scenario it under-reported. `_loaded_at` tracks the last SUCCESS.
+    """
+    now = [1_000.0]
+    monkeypatch.setattr("daedalus.transports.a2a_auth.time.monotonic", lambda: now[0])
+    fetch = FlakyFetch(key)
+    verifier = verifier_with(fetch)
+    assert await verifier.verify(mint(key))  # success at t=1000
+    fetch.down = True
+
+    ages = []
+    for t in (1_060.0, 1_120.0, 1_180.0):
+        now[0] = t
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert await verifier.verify(mint(key))
+        ages.append(caplog.text)
+
+    assert "60s old" in ages[0]
+    assert "120s old" in ages[1], "the age reset — it is measuring attempts, not staleness"
+    assert "180s old" in ages[2]
