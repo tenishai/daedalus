@@ -8,7 +8,7 @@ Section convention: knowledge files are split on `## ` headings; the filename
 stem picks the techne knowledge type (see TYPE_MAP; anything else is a fact).
 
 bundle/skills/<id>/SKILL.md rides the SAME convergence pass (2026-08-27:
-until then the runtime never read bundle/skills at all -- kobo staged skill
+until then this seeder never read bundle/skills at all -- kobo staged skill
 picks into every image and every one of them was dead weight). Each SKILL.md
 enters `sync()`'s ledger under the collision-free key `skills/<id>/SKILL.md`
 and seeds as ONE whole-file `procedure` entry -- a skill is a coherent
