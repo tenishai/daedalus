@@ -11,6 +11,7 @@ import types
 from pathlib import Path
 
 import pytest
+
 from seeder import TYPE_MAP, ingest_intake, main, parse_knowledge_file, sync, type_for
 
 
