@@ -1175,3 +1175,51 @@ def test_summary_log_names_skills(tmp_path, caplog, monkeypatch):
     assert len(summary) == 1
     assert "skills: 1/0/0" in summary[0]
     assert "knowledge: 1/0/0" in summary[0]
+
+
+def _assert_totals_match_breakdown(result):
+    """Every total equals the sum of its per-kind buckets.
+
+    One assertion defending all nine `_tally` sites and every future one.
+    Prudence's post-merge review demonstrated the gap it closes: replacing
+    `unchanged += _tally(filename, "unchanged")` with `unchanged += 1` in the
+    converged-live branch left all 44 tests in this file green while the
+    breakdown silently under-reported."""
+    by_kind = result["by_kind"]
+    for key in ("seeded", "removed", "unchanged"):
+        assert result[key] == sum(bucket[key] for bucket in by_kind.values()), (
+            f"{key}: total {result[key]} != breakdown "
+            f"{ {kind: bucket[key] for kind, bucket in by_kind.items()} }"
+        )
+
+
+def test_the_breakdown_stays_consistent_across_the_staleness_branches(tmp_path):
+    """The staleness branches are where a `_tally` bypass would hide: only 11 of
+    this file's `sync()` calls pass `skills_dir`, and before this test none of
+    the six staleness tests did — so `by_kind` was absent there and the
+    invariant had nowhere to live."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    state = tmp_path / "seed_state.db"
+    args = (kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    _assert_totals_match_breakdown(sync(*args, skills_dir=sdir))
+
+    # Converged live row: image bytes match the fast-lane write's sha, so the
+    # row flips back to lane='seed' and counts unchanged.
+    original_sha = hashlib.sha256((kdir / "gotchas.md").read_bytes()).hexdigest()
+    _mark_live(state, "gotchas.md", original_sha, None, [1])
+    _assert_totals_match_breakdown(sync(*args, skills_dir=sdir))
+
+    # Stale image: previous_sha names the bytes on disk, so the branch skips
+    # entirely and still counts unchanged.
+    _mark_live(state, "gotchas.md", "0" * 64, original_sha, [1])
+    _assert_totals_match_breakdown(sync(*args, skills_dir=sdir))
+
+    # A changed skill re-seeds, and a removed one is removed.
+    (sdir / "cost-report" / "SKILL.md").write_text("Revised.\n")
+    _assert_totals_match_breakdown(sync(*args, skills_dir=sdir))
+    shutil.rmtree(sdir / "cost-report")
+    result = sync(*args, skills_dir=sdir)
+    _assert_totals_match_breakdown(result)
+    assert result["by_kind"]["skills"]["removed"] == 1
