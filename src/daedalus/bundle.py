@@ -235,10 +235,12 @@ _SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 class Skill:
     """One `skills/<id>/SKILL.md`, parsed but not loaded into the prompt.
 
-    `body` is held rather than injected: an agent with fourteen skills carries
-    ~183 KB of them, which cannot go in a system prompt and grows with the
-    catalogue. Only `id` and `when_to_use` are indexed; the body is fetched on
-    demand through the `skills.load` tool. (#58)
+    `body` is held rather than injected: a catalogue's worth of bodies cannot go
+    in a system prompt and grows without bound as skills are added. One reporting
+    team measured their own fourteen-skill assignment at ~183 KB (#57) -- their
+    figure for their catalogue, not a property of this runtime, and cited only to
+    show the order of magnitude. Only `id` and `when_to_use` are indexed; the body
+    is fetched on demand through the `skills.load` tool. (#58)
     """
 
     id: str
@@ -277,9 +279,23 @@ def parse_skill(skill_id: str, path: Path) -> Skill:
             warnings.warn(f"{path}: unparseable frontmatter ({exc}); ignoring", stacklevel=2)
         text = text[match.end():]
 
+    # Every non-list shape is handled, not just str. PyYAML is YAML 1.1, so an
+    # unquoted `requires: yes` is the BOOLEAN True -- and the two adjacent typos
+    # used to fail asymmetrically: `requires: no` is False, hits `or []`, and
+    # silently means "no requirements", while `requires: yes` reached the
+    # comprehension below and took the whole agent down with a bare
+    # `TypeError: 'bool' object is not iterable` naming neither file nor field.
+    # That contradicted this function's own degradation contract on exactly the
+    # input it was written for: SKILL.md files are authored outside this repo.
     requires = meta.get("requires") or []
-    if isinstance(requires, str):  # `requires: gateway.logs`, not a list
-        requires = [requires]
+    if not isinstance(requires, list):
+        if isinstance(requires, str):  # `requires: gateway.logs`, not a list
+            requires = [requires]
+        else:
+            warnings.warn(
+                f"{path}: 'requires' is not a list or a string; ignoring", stacklevel=2
+            )
+            requires = []
 
     return Skill(
         id=skill_id,
