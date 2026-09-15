@@ -12,7 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from seeder import TYPE_MAP, ingest_intake, main, parse_knowledge_file, sync, type_for
+from seeder import (
+    TYPE_MAP,
+    _render_breakdown,
+    ingest_intake,
+    main,
+    parse_knowledge_file,
+    sync,
+    type_for,
+)
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -1081,3 +1089,89 @@ def test_sync_without_skills_dir_is_byte_identical_to_before(tmp_path):
     result = sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
                   fake.store, fake.delete)
     assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+
+
+# --- per-kind counts in the summary (#57) ------------------------------------
+
+
+def test_by_kind_separates_skills_from_knowledge(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    result = sync(
+        kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+        fake.store, fake.delete, skills_dir=sdir,
+    )
+    # The totals are unchanged and still authoritative.
+    assert result["seeded"] == 4
+    # ...and now say which 4: 3 knowledge sections, 1 whole-file skill.
+    assert result["by_kind"] == {
+        "knowledge": {"seeded": 3, "removed": 0, "unchanged": 0},
+        "skills": {"seeded": 1, "removed": 0, "unchanged": 0},
+    }
+
+
+def test_by_kind_tracks_unchanged_and_removed_separately(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+
+    # Second pass: everything converges, nothing is re-seeded.
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+    assert r["by_kind"]["skills"] == {"seeded": 0, "removed": 0, "unchanged": 1}
+    # 2, not 3: `seeded` counts stored ENTRIES (gotchas.md alone yields two
+    # sections) while `unchanged` and `removed` count FILES. That asymmetry is
+    # pre-existing in the totals; the breakdown inherits it rather than
+    # inventing a third convention.
+    assert r["by_kind"]["knowledge"]["unchanged"] == 2
+
+    # Drop the skill only: the removal must land in the skills bucket, and
+    # knowledge must be untouched.
+    shutil.rmtree(sdir / "cost-report")
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+    assert r["by_kind"]["skills"] == {"seeded": 0, "removed": 1, "unchanged": 0}
+    assert r["by_kind"]["knowledge"] == {"seeded": 0, "removed": 0, "unchanged": 2}
+
+
+def test_a_bundle_with_no_skills_is_visibly_zero_not_merely_absent(tmp_path):
+    """The whole point of #57: "skills: 0/0/0" and "14 skills seeded" must not
+    look alike. A skills_dir that exists but is empty still reports the bucket."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = tmp_path / "skills"
+    sdir.mkdir()
+    result = sync(
+        kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+        fake.store, fake.delete, skills_dir=sdir,
+    )
+    assert result["by_kind"]["skills"] == {"seeded": 0, "removed": 0, "unchanged": 0}
+    assert "skills: 0/0/0" in _render_breakdown(result["by_kind"])
+
+
+def test_knowledge_only_call_returns_the_original_three_key_shape(tmp_path):
+    """Companion to test_sync_without_skills_dir_is_byte_identical_to_before:
+    `by_kind` is additive with `skills_dir`, so a caller that never passes one
+    sees the result dict it always saw."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    result = sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+                  fake.store, fake.delete)
+    assert result == {"seeded": 3, "removed": 0, "unchanged": 0}
+    assert "by_kind" not in result
+    assert _render_breakdown(result.get("by_kind")) == ""
+
+
+def test_summary_log_names_skills(tmp_path, caplog, monkeypatch):
+    """An operator reading pod logs must be able to tell a seeded skill from a
+    bundle that has none. Before #57 this line could not distinguish them."""
+    _install_fake_techne(monkeypatch)
+    bundle = tmp_path / "bundle"
+    (bundle / "knowledge").mkdir(parents=True)
+    (bundle / "knowledge" / "gotchas.md").write_text("## One\n\nbody\n")
+    (bundle / "skills" / "cost-report").mkdir(parents=True)
+    (bundle / "skills" / "cost-report" / "SKILL.md").write_text("# Cost\n\nRun it.\n")
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "techne"))
+    with caplog.at_level(logging.INFO):
+        assert main(["seeder.py", str(bundle)]) == 0
+    summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("seeded=")]
+    assert len(summary) == 1
+    assert "skills: 1/0/0" in summary[0]
+    assert "knowledge: 1/0/0" in summary[0]
