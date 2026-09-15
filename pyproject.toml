@@ -45,11 +45,11 @@ packages = ["src/daedalus"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "docker"]
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "docker"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
