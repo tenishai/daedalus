@@ -1194,10 +1194,15 @@ def _assert_totals_match_breakdown(result):
 
 
 def test_the_breakdown_stays_consistent_across_the_staleness_branches(tmp_path):
-    """The staleness branches are where a `_tally` bypass would hide: only 11 of
-    this file's `sync()` calls pass `skills_dir`, and before this test none of
-    the six staleness tests did — so `by_kind` was absent there and the
-    invariant had nowhere to live."""
+    """The staleness branches are where a `_tally` bypass would hide: before this
+    test none of the six staleness tests passed `skills_dir`, so `by_kind` was
+    absent on exactly those branches and the invariant had nowhere to live.
+
+    No call-site count here on purpose. The first draft of this docstring said
+    "11 of 43", which this test falsified as it was written: 11 was the pre-PR
+    figure, this test adds five more, and the 43 was a `grep -c "sync("` artefact
+    counting LINES rather than call sites (45 by AST). A measured number in a
+    comment is a cached result with no invalidation."""
     kdir, fake = _bundle(tmp_path), FakeStore()
     sdir = _skills(tmp_path)
     state = tmp_path / "seed_state.db"
