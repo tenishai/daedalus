@@ -2,11 +2,13 @@
 
 Progressive disclosure, not prompt stuffing. The system prompt carries an index
 of one line per assigned skill (`Agent._skills_index`); the bodies stay here and
-are fetched on demand. A fourteen-skill catalogue is ~183 KB and grows, so
-concatenating bodies into the persona works at three skills and falls over at
-thirty.
+are fetched on demand. Concatenating bodies into the persona works at three
+skills and falls over at thirty: one reporting team measured their own
+fourteen-skill assignment at ~183 KB (#57), which is their catalogue's figure
+rather than anything this runtime guarantees, and it grows as skills are added.
 
-This closes the gap named in #58: the boot seeder already puts every SKILL.md
+This closes the gap named in #58: the boot seeder (docker/seeder.py, a separate
+process run by entrypoint.sh before `daedalus run`) already puts every SKILL.md
 into the agent's memory, which makes a skill RECALLABLE, but recall is
 probabilistic and task-shaped. A persona saying "start with <skill>" is a
 deterministic request, and nothing guaranteed the right body surfaced for it.

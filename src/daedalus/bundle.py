@@ -235,10 +235,12 @@ _SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 class Skill:
     """One `skills/<id>/SKILL.md`, parsed but not loaded into the prompt.
 
-    `body` is held rather than injected: an agent with fourteen skills carries
-    ~183 KB of them, which cannot go in a system prompt and grows with the
-    catalogue. Only `id` and `when_to_use` are indexed; the body is fetched on
-    demand through the `skills.load` tool. (#58)
+    `body` is held rather than injected: a catalogue's worth of bodies cannot go
+    in a system prompt and grows without bound as skills are added. One reporting
+    team measured their own fourteen-skill assignment at ~183 KB (#57) -- their
+    figure for their catalogue, not a property of this runtime, and cited only to
+    show the order of magnitude. Only `id` and `when_to_use` are indexed; the body
+    is fetched on demand through the `skills.load` tool. (#58)
     """
 
     id: str
@@ -277,9 +279,32 @@ def parse_skill(skill_id: str, path: Path) -> Skill:
             warnings.warn(f"{path}: unparseable frontmatter ({exc}); ignoring", stacklevel=2)
         text = text[match.end():]
 
+    # Non-list shapes reach the isinstance check and degrade with a warning.
+    # FALSY ones (False, 0, "", {}, []) never get that far -- `or []` short
+    # circuits above it and they degrade SILENTLY, which is correct but is not
+    # the same thing as being handled here.
+    #
+    # PyYAML is YAML 1.1, so an unquoted `requires: yes` is the BOOLEAN True.
+    # Three adjacent typos used to fail three different ways:
+    #   requires: no       -> False, short-circuits, silently "no requirements"
+    #   requires: yes      -> True, reached the comprehension below and took the
+    #                         whole agent down with a bare TypeError naming
+    #                         neither the file nor the field
+    #   requires: {a: b}   -> a dict IS iterable, so it yielded ["a"] from key
+    #                         iteration -- a PHANTOM REQUIREMENT that would then
+    #                         be reported unmet against the allowlist. Silent
+    #                         corruption, and the worst of the three.
+    # That contradicted this function's own degradation contract on exactly the
+    # input it was written for: SKILL.md files are authored outside this repo.
     requires = meta.get("requires") or []
-    if isinstance(requires, str):  # `requires: gateway.logs`, not a list
-        requires = [requires]
+    if not isinstance(requires, list):
+        if isinstance(requires, str):  # `requires: gateway.logs`, not a list
+            requires = [requires]
+        else:
+            warnings.warn(
+                f"{path}: 'requires' is not a list or a string; ignoring", stacklevel=2
+            )
+            requires = []
 
     return Skill(
         id=skill_id,
@@ -294,8 +319,8 @@ def parse_skill(skill_id: str, path: Path) -> Skill:
 def load_skills(root: Path) -> dict[str, Skill]:
     """Every `skills/<id>/SKILL.md` under `root`, keyed by directory name.
 
-    Same one-level glob the boot seeder uses, so the runtime's view of which
-    skills exist cannot disagree with what was seeded into memory."""
+    Same one-level glob the boot seeder uses, so the agent process's view of
+    which skills exist cannot disagree with what that seeder put into memory."""
     skills_dir = root / "skills"
     return {
         md.parent.name: parse_skill(md.parent.name, md)
