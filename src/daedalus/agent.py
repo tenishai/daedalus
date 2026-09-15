@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import warnings
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 
-from daedalus.bundle import Bundle, BundleError
+from daedalus.bundle import Bundle, BundleError, unmet_requirements
 from daedalus.enforcement import Enforcement
 from daedalus.memory.teach import (
     DELETE_KEY,
@@ -38,6 +39,8 @@ from daedalus.protocols import (
     Transport,
 )
 from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
+
+log = logging.getLogger(__name__)
 
 
 def _munge(name: str) -> str:
@@ -149,6 +152,10 @@ class Agent:
         # trade (see revision.COLLEAGUE_REASK_COOLDOWN_S).
         self._reask_cooldowns: dict[int, float] = {}
         self._revision_fires: set[asyncio.Task] = set()
+        # Last, so it reports against fully-wired state. An assigned skill that
+        # cannot be reached is invisible otherwise: the agent boots green and
+        # simply never uses it.
+        self._warn_on_unusable_skills()
 
     def _operator_gate(self, task: Task, lane: str) -> bool:
         """The shared gate on the three operator-only lanes, and the ONE place
@@ -230,6 +237,14 @@ class Agent:
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
         providers: list[ToolProvider] = []
+
+        if self.bundle.skills:
+            # First in the list, so `skills.load` wins any name collision with a
+            # provider that happens to offer the same name -- an agent's own
+            # assigned skills are not something a remote server gets to shadow.
+            from daedalus.tools.skills import SkillsToolProvider
+
+            providers.append(SkillsToolProvider(self.bundle.skills))
 
         for key, config in spec.builtin.items():
             if key != "files":
@@ -710,10 +725,61 @@ class Agent:
             ],
         }
 
+    def _skills_index(self) -> str:
+        """One line per assigned skill: the id and when to use it.
+
+        Names only. The bodies are fetched through `skills.load` -- see
+        daedalus/tools/skills.py for why they cannot live here.
+
+        Returns "" when `skills.load` is not in the allowlist, because an index
+        the agent cannot act on is worse than no index: it would name fourteen
+        capabilities and leave every one of them unreachable, which is the
+        failure mode this whole feature exists to remove.
+        """
+        if not self.bundle.skills:
+            return ""
+        allow = self.bundle.spec.tools.allow
+        if not any(fnmatch("skills.load", pattern) for pattern in allow):
+            return ""
+        lines = [f"- `{skill.id}` — {skill.summary}" for skill in self.bundle.skills.values()]
+        return (
+            "\n\n## Skills\n"
+            "Assigned skills. Call `skills.load(name)` to read one in full "
+            "before acting on it.\n" + "\n".join(lines)
+        )
+
+    def _warn_on_unusable_skills(self) -> None:
+        """Say so, at load time, when an assigned skill cannot work.
+
+        Two distinct silent failures, both of which look exactly like success:
+        a skill whose `requires:` names tools the allowlist does not admit, and
+        a bundle with skills whose allowlist omits `skills.load` entirely (so
+        the index is suppressed and nothing can be fetched by name).
+        """
+        if not self.bundle.skills:
+            return
+        allow = self.bundle.spec.tools.allow
+        if not any(fnmatch("skills.load", pattern) for pattern in allow):
+            log.warning(
+                "%d skill(s) assigned but tools.allow does not admit 'skills.load' — "
+                "none of them can be loaded by name: %s",
+                len(self.bundle.skills),
+                ", ".join(sorted(self.bundle.skills)),
+            )
+        for skill_id, missing in unmet_requirements(self.bundle.skills, allow).items():
+            log.warning(
+                "skill %r requires %s, which tools.allow does not admit",
+                skill_id,
+                ", ".join(missing),
+            )
+
     def _messages(
         self, task: Task, recalled: list[str], notices: list[str] | None = None
     ) -> list[dict]:
         system = self.bundle.persona
+        index = self._skills_index()
+        if index:
+            system += index
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
         if notices:
