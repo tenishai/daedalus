@@ -15,6 +15,7 @@ approval flow (which rides the teach lane) ever stores anything.
 from __future__ import annotations
 
 import json
+import re
 
 LEARNINGS_MARKER = "learnings"
 MAX_CANDIDATES = 5
@@ -70,6 +71,20 @@ If nobody told you anything worth keeping, reply {{"candidates": []}}.
 """
 
 
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def safe_date(value: object, *, fallback: str) -> str:
+    """The task's date, accepted only as a bare ISO `YYYY-MM-DD` string.
+    It is interpolated into the instructions block, so anything else --
+    wrong type, extra text, embedded newlines -- reads as `fallback`
+    rather than being sanitized into something that still carries
+    caller-chosen words."""
+    if isinstance(value, str) and _ISO_DATE_RE.fullmatch(value.strip()):
+        return value.strip()
+    return fallback
+
+
 def _one_line(text: str) -> str:
     """Collapse every whitespace run (newlines, tabs, carriage returns
     included) to a single space. A learning is one sentence; more to the
@@ -89,6 +104,7 @@ def build_messages(
     """The one-shot summarization prompt: persona as system (the agent
     summarizes as itself), instructions + recalled knowledge + already
     proposed/decided entries + transcript as the single user turn."""
+    on_date = safe_date(on_date, fallback="today")
     instructions = _INSTRUCTIONS.format(
         max_candidates=MAX_CANDIDATES,
         statement_max=STATEMENT_MAX_CHARS,
