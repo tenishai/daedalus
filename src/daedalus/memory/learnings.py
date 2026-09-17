@@ -22,6 +22,10 @@ STATEMENT_MAX_CHARS = 160
 EVIDENCE_MAX_CHARS = 200
 SAID_BY_MAX_CHARS = 120
 WHERE_MAX_CHARS = 120
+# Legacy already-proposed rows can be longer than STATEMENT_MAX_CHARS (the
+# cap has changed over time, and rows predate this fix). Clip on render
+# rather than reject, so old rows still show up in the prompt.
+ALREADY_STATEMENT_MAX_CHARS = 400
 # Bound the transcript fed to the model. Oldest conversations are dropped
 # first when over budget -- the freshest context is the most valuable.
 TRANSCRIPT_BUDGET_CHARS = 60_000
@@ -66,6 +70,14 @@ If nobody told you anything worth keeping, reply {{"candidates": []}}.
 """
 
 
+def _one_line(text: str) -> str:
+    """Collapse every whitespace run (newlines, tabs, carriage returns
+    included) to a single space. A learning is one sentence; more to the
+    point, anything rendered into a prompt line must not be able to start
+    a new line and forge a heading."""
+    return " ".join(text.split())
+
+
 def build_messages(
     persona: str,
     conversations: list[dict],
@@ -89,14 +101,21 @@ def build_messages(
             "## What you already know (do not re-propose)\n"
             + "\n".join(f"- {item}" for item in known)
         )
-    listed = [
-        f"- [{entry['id']}, {entry['status']}] {entry['statement']}"
-        for entry in (already or [])
-        if isinstance(entry, dict)
-        and isinstance(entry.get("id"), int) and not isinstance(entry.get("id"), bool)
-        and isinstance(entry.get("status"), str)
-        and isinstance(entry.get("statement"), str)
-    ]
+    _ALREADY_STATUSES = ("pending", "remembered", "skipped")
+    listed = []
+    for entry in already or []:
+        if not isinstance(entry, dict):
+            continue
+        if not isinstance(entry.get("id"), int) or isinstance(entry.get("id"), bool):
+            continue
+        if entry.get("status") not in _ALREADY_STATUSES:
+            continue
+        if not isinstance(entry.get("statement"), str):
+            continue
+        statement = _one_line(entry["statement"])[:ALREADY_STATEMENT_MAX_CHARS]
+        if not statement:
+            continue
+        listed.append(f"- [{entry['id']}, {entry['status']}] {statement}")
     if listed:
         parts.append("## Already proposed or decided (do not repeat)\n" + "\n".join(listed))
     parts.append(
@@ -165,14 +184,14 @@ def parse_candidates(text: str) -> list[dict]:
             break
         if not isinstance(item, dict):
             continue
-        statement = _string_field(item, "statement")
+        statement = _one_line(_string_field(item, "statement"))
         if not statement or len(statement) > STATEMENT_MAX_CHARS:
             continue
         candidate = {
             "statement": statement,
-            "said_by": _string_field(item, "said_by")[:SAID_BY_MAX_CHARS],
-            "quote": _string_field(item, "quote")[:EVIDENCE_MAX_CHARS],
-            "where": _string_field(item, "where")[:WHERE_MAX_CHARS],
+            "said_by": _one_line(_string_field(item, "said_by"))[:SAID_BY_MAX_CHARS],
+            "quote": _one_line(_string_field(item, "quote"))[:EVIDENCE_MAX_CHARS],
+            "where": _one_line(_string_field(item, "where"))[:WHERE_MAX_CHARS],
         }
         replaces = item.get("replaces")
         if isinstance(replaces, int) and not isinstance(replaces, bool):
