@@ -24,10 +24,10 @@ GOOD_REPLY = json.dumps(
     {
         "candidates": [
             {
-                "content": "the canary gate is manual",
-                "kind": "fact",
-                "source": "Slack thread, Sep 1",
-                "evidence": "gate is manual now",
+                "statement": "The canary gate is manual now.",
+                "said_by": "jsmith",
+                "quote": "gate is manual now",
+                "where": "Slack thread, Sep 1",
             }
         ]
     }
@@ -68,7 +68,29 @@ async def test_learnings_summarizes_journal_into_candidates(tmp_path):
     assert result.state is TaskState.COMPLETED
     parsed = json.loads(result.agent_text())
     assert len(parsed["candidates"]) == 1
-    assert parsed["candidates"][0]["content"] == "the canary gate is manual"
+    assert parsed["candidates"][0]["statement"] == "The canary gate is manual now."
+
+
+async def test_already_metadata_reaches_the_prompt(tmp_path):
+    db = tmp_path / "techne.db"
+    record(
+        journal_path(db),
+        "slack:C1:171",
+        [{"role": "user", "text": "the canary gate is manual now"}],
+    )
+    llm = ScriptedLLM(GOOD_REPLY)
+    agent = make_agent(llm=llm, memory=FakeMemory(db))
+    task = _learnings_task()
+    task.metadata["known"] = [
+        {"id": 12, "status": "pending", "statement": "Suspend keeps memberships."}
+    ]
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.COMPLETED
+    prompt = llm.calls[0][1]["content"]
+    assert "## Already proposed or decided (do not repeat)" in prompt
+    assert "- [12, pending] Suspend keeps memberships." in prompt
 
 
 async def test_model_garbage_reads_as_empty_candidates(tmp_path):
