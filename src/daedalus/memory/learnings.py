@@ -1,7 +1,7 @@
-"""The learnings system task: summarize the journal's last day into
-candidate memory snippets for the room's owner-approval queue
-(daily-learnings spec, 2026-09-01). Pure functions here; the dispatch
-lives on Agent (_handle_learnings) beside the other system-task handlers.
+"""The learnings system task: propose what people told the agent that day,
+for the room's owner-approval queue (daily-learnings spec, 2026-09-01).
+Pure functions here; the dispatch lives on Agent (_handle_learnings)
+beside the other system-task handlers.
 
 The reply is JSON in the task's reply text: {"candidates": [...]} -- the
 a2a envelope carries reply text verbatim (transports/a2a.task_to_a2a), so
@@ -17,11 +17,11 @@ from __future__ import annotations
 import json
 
 LEARNINGS_MARKER = "learnings"
-MAX_CANDIDATES = 10
-CONTENT_MAX_CHARS = 400
+MAX_CANDIDATES = 5
+STATEMENT_MAX_CHARS = 160
 EVIDENCE_MAX_CHARS = 200
-SOURCE_MAX_CHARS = 512
-KINDS = ("fact", "procedure")
+SAID_BY_MAX_CHARS = 120
+WHERE_MAX_CHARS = 120
 # Bound the transcript fed to the model. Oldest conversations are dropped
 # first when over budget -- the freshest context is the most valuable.
 TRANSCRIPT_BUDGET_CHARS = 60_000
@@ -32,24 +32,37 @@ TRANSCRIPT_BUDGET_CHARS = 60_000
 # already know") from these instructions by that exact substring.
 _INSTRUCTIONS = """\
 Review your conversations from the last day, shown below. Propose up to
-{max_candidates} candidate memory snippets: durable facts or procedures you
-learned that are worth keeping permanently. Skip anything you have seen
-before (your recalled knowledge is listed when present), anything ephemeral
-(a deploy in progress, someone's availability today), and anything you were
-explicitly taught already.
+{max_candidates} things worth remembering permanently.
+
+A candidate is ONLY something a person explicitly said or corrected in
+these conversations: a fact they stated, a correction they made to you, a
+rule or preference they told you. It is never your own conclusion, never
+something you inferred by combining threads, never the output of a tool,
+and never a general lesson you drew. If no person said it, it is not a
+candidate.
+
+Write each one as a single plain sentence, at most {statement_max}
+characters, specific enough to act on, in the person's meaning (not
+necessarily their exact words). If the same topic came up more than once,
+propose it once. Skip anything ephemeral (a deploy in progress, someone's
+availability today), anything listed as recalled knowledge, and anything
+listed as proposed or decided before. If today's conversation refines
+something listed as pending, propose the refined sentence and name the
+pending entry's id in "replaces".
 
 Reply with ONLY a JSON object, no prose, in exactly this shape:
-{{"candidates": [{{"content": "...", "kind": "fact",
-"source": "...", "evidence": "..."}}]}}
+{{"candidates": [{{"statement": "...", "said_by": "...",
+"quote": "...", "where": "..."}}]}}
 
-- content: the fact or procedure, at most {content_max} characters
-- kind: "fact" or "procedure"
-- source: where it came from, in plain language, e.g.
-  "Slack thread with jsmith, {date}"
-- evidence: a short verbatim quote from the conversation supporting it,
-  at most {evidence_max} characters
+- statement: the one sentence
+- said_by: who said it, exactly as the conversation shows them; omit only
+  if the conversation truly does not show who
+- quote: their words, verbatim, at most {quote_max} characters
+- where: where it was said, in plain language, e.g.
+  "Slack thread, {date}"
+- replaces: optional; the id of a pending entry this sentence refines
 
-If nothing from the day is worth keeping, reply {{"candidates": []}}.
+If nobody told you anything worth keeping, reply {{"candidates": []}}.
 """
 
 
@@ -59,14 +72,15 @@ def build_messages(
     known: list[str],
     *,
     on_date: str,
+    already: list[dict] | None = None,
 ) -> list[dict]:
     """The one-shot summarization prompt: persona as system (the agent
-    summarizes as itself), instructions + recalled knowledge + transcript
-    as the single user turn."""
+    summarizes as itself), instructions + recalled knowledge + already
+    proposed/decided entries + transcript as the single user turn."""
     instructions = _INSTRUCTIONS.format(
         max_candidates=MAX_CANDIDATES,
-        content_max=CONTENT_MAX_CHARS,
-        evidence_max=EVIDENCE_MAX_CHARS,
+        statement_max=STATEMENT_MAX_CHARS,
+        quote_max=EVIDENCE_MAX_CHARS,
         date=on_date,
     )
     parts = [instructions]
@@ -75,6 +89,16 @@ def build_messages(
             "## What you already know (do not re-propose)\n"
             + "\n".join(f"- {item}" for item in known)
         )
+    listed = [
+        f"- [{entry['id']}, {entry['status']}] {entry['statement']}"
+        for entry in (already or [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("id"), int) and not isinstance(entry.get("id"), bool)
+        and isinstance(entry.get("status"), str)
+        and isinstance(entry.get("statement"), str)
+    ]
+    if listed:
+        parts.append("## Already proposed or decided (do not repeat)\n" + "\n".join(listed))
     parts.append(
         "## Conversations from the last day\n" + _render_transcript(conversations)
     )
@@ -136,21 +160,22 @@ def parse_candidates(text: str) -> list[dict]:
     if not isinstance(raw, list):
         return []
     candidates: list[dict] = []
-    for item in raw[:MAX_CANDIDATES]:
+    for item in raw:
+        if len(candidates) == MAX_CANDIDATES:
+            break
         if not isinstance(item, dict):
             continue
-        content = _string_field(item, "content")
-        kind = _string_field(item, "kind")
-        source = _string_field(item, "source")
-        evidence = _string_field(item, "evidence")
-        if not content or kind not in KINDS or not source:
+        statement = _string_field(item, "statement")
+        if not statement or len(statement) > STATEMENT_MAX_CHARS:
             continue
-        candidates.append(
-            {
-                "content": content[:CONTENT_MAX_CHARS],
-                "kind": kind,
-                "source": source[:SOURCE_MAX_CHARS],
-                "evidence": evidence[:EVIDENCE_MAX_CHARS],
-            }
-        )
+        candidate = {
+            "statement": statement,
+            "said_by": _string_field(item, "said_by")[:SAID_BY_MAX_CHARS],
+            "quote": _string_field(item, "quote")[:EVIDENCE_MAX_CHARS],
+            "where": _string_field(item, "where")[:WHERE_MAX_CHARS],
+        }
+        replaces = item.get("replaces")
+        if isinstance(replaces, int) and not isinstance(replaces, bool):
+            candidate["replaces"] = replaces
+        candidates.append(candidate)
     return candidates

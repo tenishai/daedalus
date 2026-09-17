@@ -4,7 +4,6 @@ parsing. No techne, no model, no sqlite."""
 import json
 
 from daedalus.memory.learnings import (
-    CONTENT_MAX_CHARS,
     MAX_CANDIDATES,
     TRANSCRIPT_BUDGET_CHARS,
     _render_transcript,
@@ -69,15 +68,38 @@ def test_render_transcript_caps_even_the_lone_newest_section():
     assert len(transcript) <= TRANSCRIPT_BUDGET_CHARS
 
 
+def test_instructions_demand_human_statements_not_conclusions():
+    text = build_messages("p", [], [], on_date="2026-09-16")[1]["content"]
+    assert "a person explicitly said" in text
+    assert "never your own conclusion" in text
+    assert '"statement"' in text and '"said_by"' in text
+    assert '"kind"' not in text
+
+
+def test_already_block_lists_ids_and_appears_only_when_present():
+    none = build_messages("p", [], [], on_date="d")[1]["content"]
+    assert "Already proposed or decided" not in none
+    some = build_messages("p", [], [], on_date="d", already=[
+        {"id": 12, "status": "pending", "statement": "Suspend keeps memberships."}])[1]["content"]
+    assert "## Already proposed or decided (do not repeat)" in some
+    assert "- [12, pending] Suspend keeps memberships." in some
+
+
+def test_already_block_survives_garbage_entries():
+    text = build_messages("p", [], [], on_date="d", already=[
+        "nope", {"id": "x"}, {"id": 3, "status": "skipped", "statement": "Fine."}])[1]["content"]
+    assert "- [3, skipped] Fine." in text and "nope" not in text
+
+
 def test_parse_candidates_valid_json():
     reply = json.dumps(
         {
             "candidates": [
                 {
-                    "content": "the canary gate is manual",
-                    "kind": "fact",
-                    "source": "Slack thread, Sep 1",
-                    "evidence": "gate is manual now",
+                    "statement": "The canary gate is manual now.",
+                    "said_by": "jsmith",
+                    "quote": "the canary gate is manual now",
+                    "where": "Slack thread, Sep 1",
                 }
             ]
         }
@@ -85,11 +107,12 @@ def test_parse_candidates_valid_json():
     parsed = parse_candidates(reply)
 
     assert len(parsed) == 1
-    assert parsed[0]["kind"] == "fact"
+    assert parsed[0]["statement"] == "The canary gate is manual now."
+    assert parsed[0]["said_by"] == "jsmith"
 
 
 def test_parse_candidates_strips_code_fences():
-    reply = '```json\n{"candidates": [{"content": "c", "kind": "fact", "source": "s"}]}\n```'
+    reply = '```json\n{"candidates": [{"statement": "c"}]}\n```'
     assert len(parse_candidates(reply)) == 1
 
 
@@ -103,26 +126,42 @@ def test_parse_candidates_drops_invalid_and_clips_long():
     reply = json.dumps(
         {
             "candidates": [
-                {"content": "", "kind": "fact", "source": "s"},  # empty content
-                {"content": "c", "kind": "opinion", "source": "s"},  # bad kind
-                {"content": "c", "kind": "fact", "source": ""},  # no source
-                {"content": None, "kind": "fact", "source": "s"},  # non-string
-                {"content": "y" * 999, "kind": "fact", "source": "s"},  # clipped
+                {"statement": ""},  # empty statement
+                {"statement": None},  # non-string
+                {"statement": "x" * 161},  # over the char limit
+                {"statement": "y", "said_by": "z" * 999},  # said_by clipped
             ]
         }
     )
     parsed = parse_candidates(reply)
 
     assert len(parsed) == 1
-    assert len(parsed[0]["content"]) == CONTENT_MAX_CHARS
+    assert parsed[0]["statement"] == "y"
+    assert len(parsed[0]["said_by"]) == 120
 
 
 def test_parse_candidates_caps_count():
     reply = json.dumps(
-        {
-            "candidates": [
-                {"content": f"c{i}", "kind": "fact", "source": "s"} for i in range(30)
-            ]
-        }
+        {"candidates": [{"statement": f"Sentence {i}."} for i in range(30)]}
     )
     assert len(parse_candidates(reply)) == MAX_CANDIDATES
+
+
+def test_parse_v2_validates_and_caps():
+    first = {
+        "statement": "A sentence.",
+        "said_by": "kgreiner",
+        "quote": "q",
+        "where": "Slack",
+        "replaces": 4,
+    }
+    raw = json.dumps({"candidates": [
+        first,
+        {"statement": "x" * 161},
+        {"statement": "B sentence.", "replaces": True},
+        *[{"statement": f"Sentence {i}."} for i in range(10)],
+    ]})
+    got = parse_candidates(raw)
+    assert len(got) == 5
+    assert got[0] == first
+    assert "replaces" not in got[1]
