@@ -480,7 +480,7 @@ class Agent:
             )
         if not conversations:
             return task.reply(empty)
-        on_date = str(task.metadata.get("date", "")) or "today"
+        on_date = learnings.safe_date(task.metadata.get("date"), fallback="today")
         already = (task.metadata or {}).get("known")
         # "What you already know": probe techne with the day's own text so
         # the model can skip re-proposing established knowledge.
