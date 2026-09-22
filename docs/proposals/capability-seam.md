@@ -86,9 +86,9 @@ Builtin groups become discoverable via a Python entry point, so fleet
 repos ship their own without touching daedalus:
 
 ```toml
-# fubo-k8s-tools pyproject.toml
+# acme-k8s-tools pyproject.toml
 [project.entry-points."daedalus.tool_groups"]
-kubectl_read = "fubo_k8s_tools.daedalus:KubectlReadProvider"
+kubectl_read = "acme_k8s_tools.daedalus:KubectlReadProvider"
 ```
 
 ```yaml
@@ -158,7 +158,7 @@ inspect what you got.
 ## 4. Related, deliberately not covered here
 
 - **The skills layer** (on-demand instruction packs, the
-  `gs://fubo-skills` pattern) — the four-layer model's remaining gap in
+  `gs://<bucket>/skills` pattern) — the four-layer model's remaining gap in
   the bundle format. Separate design; it will want its own bundle
   section and schema rev. Don't conflate instructions (context) with
   tools (capabilities).
