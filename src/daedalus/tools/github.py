@@ -12,7 +12,7 @@ on it, and open a pull request. Nothing here merges, reviews, or touches a
 default branch directly. Alongside that one write path sit read tools
 (list_prs, get_pr, list_releases, read_file) -- pure GETs under the same
 mint-per-call scoped token, added 2026-08-28 so an agent can survey a repo
-it has been granted (the fubo-schema release-survey use case) instead of
+it has been granted (the release-survey use case) instead of
 asking a human to paste the state in. Every read is bounded and marks its
 own truncation honestly -- a silently clipped answer reads as complete,
 which is worse than no answer.
