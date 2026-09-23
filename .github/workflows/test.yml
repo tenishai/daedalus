@@ -7,11 +7,14 @@ on:
 
 jobs:
   # SELF-HOSTED on mash1 (2026-09-23): hosted Actions stopped on a billing failure.
-  # The guard keeps FORK pull requests off it (they run `fork-pr` below on a hosted
-  # runner instead), the same trust split as tenishai/techne's test.yml. Stop the
-  # runner at the go-public flip regardless (techne's go-public runbook).
+  # The `if:` below is DEFENCE IN DEPTH for honest fork PRs, not a security boundary:
+  # for `pull_request` GitHub runs the PR's own copy of this file, so a fork can
+  # delete the guard (see the ATTACKER-EDITABLE block in tenishai/techne's test.yml).
+  # The real controls: this repo is private, "Run workflows from fork pull requests"
+  # is off (checked 2026-09-23), and the runner stops before the go-public flip.
   test:
     runs-on: [self-hosted, linux, x64, daedalus-ci]
+    timeout-minutes: 20  # one small runner; a hung job starves it
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     strategy:
       matrix:
@@ -28,7 +31,9 @@ jobs:
   # ---- fork-pr: the complement of test's guard, on a hosted runner -----------
   fork-pr:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+    # Techne's spelling (#590): the literal negation, so an event nobody named still
+    # gets a hosted run instead of an empty Checks tab.
+    if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
