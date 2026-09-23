@@ -10,7 +10,14 @@ from __future__ import annotations
 import pytest
 
 # techne is not on PyPI; local runs use the sibling checkout (PYTHONPATH=src:../techne).
-techne = pytest.importorskip("techne")
+# NOT ONE SKIP — 47. A module-level importorskip collapses this whole file
+# into a single "s" in pytest output, so the gap reads as 1 skipped test when
+# it is 47 (daedalus#48). The reason string is the only place that number can
+# be seen, so it says it; `pytest -rs` prints it.
+techne = pytest.importorskip(
+    "techne",
+    reason="techne is not installed — 47 tests in this file did not run",
+)
 
 import asyncio  # noqa: E402
 import io  # noqa: E402

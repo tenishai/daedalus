@@ -26,7 +26,14 @@ from daedalus.memory.teach import (
 )
 from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 
-techne = pytest.importorskip("techne", reason="techne is not installed")
+# NOT ONE SKIP — 20. A module-level importorskip collapses this whole file
+# into a single "s" in pytest output, so the gap reads as 1 skipped test when
+# it is 20 (daedalus#48). The reason string is the only place that number can
+# be seen, so it says it; `pytest -rs` prints it.
+techne = pytest.importorskip(
+    "techne",
+    reason="techne is not installed — 20 tests in this file did not run",
+)
 from techne.core import knowledge  # noqa: E402
 from techne.core.database import init_db  # noqa: E402
 
