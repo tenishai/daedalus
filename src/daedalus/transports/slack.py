@@ -362,6 +362,15 @@ class SlackReactionApprover:
         self.thread_ts: str | None = None  # set per-event by the transport
 
     async def approve(self, action: str, plan: dict) -> bool:
+        # An open transport (no allowlist, so no primary channel) wires this
+        # approver with an empty channel, and the real one is filled in from
+        # each Slack event. A gate tripped by a task from ANOTHER transport
+        # before any Slack event has arrived therefore has nowhere to ask.
+        # Deny, and name the reason: posting to "" would raise out through
+        # the agent loop, which is a crash dressed up as a policy decision.
+        if not self.channel:
+            log.info("tier-2 %s denied: no slack channel to ask in", action)
+            return False
         text = (
             f":shield: approval required: `{action}`\n"
             f"```{json.dumps(plan, indent=2, default=str)}```\n"

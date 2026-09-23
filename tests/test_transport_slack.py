@@ -955,6 +955,29 @@ async def test_a_non_empty_allowlist_is_still_an_allowlist():
     assert api.posts[0][0] == CH2
 
 
+async def test_an_approval_with_nowhere_to_ask_is_a_denial_not_a_crash(caplog):
+    """An open transport has no primary channel, and the approver is wired
+    from it before any event arrives -- so a tier-2 gate tripped by a task
+    from ANOTHER transport (a2a, cli) has no thread to ask in. Deny and say
+    why; posting to an empty channel id would raise out of the agent loop."""
+    api = FakeApi()
+    approver = SlackReactionApprover(api, "", timeout=0.01, poll=0.001)
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("tool.x", {}) is False
+    assert api.posts == []
+    assert "no slack channel" in caplog.text
+
+
+async def test_the_first_slack_event_gives_that_approver_a_channel():
+    transport, api, handler = make_open()
+    transport._wire_approver(handler)
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="44.1", channel=ANY_CH, channel_type="channel"),
+        handler,
+    )
+    assert handler.approver.channel == ANY_CH
+
+
 def test_channels_empty_when_no_channel_is_named():
     open_one = SlackTransport(bot_token="x", app_token="y", api=FakeApi())
     assert open_one.channels == []
