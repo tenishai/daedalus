@@ -69,10 +69,17 @@ def test_is_teach_task_only_on_exact_marker():
     assert not is_teach_task(other)
 
 
-def test_teach_authorized_rejects_colleagues_and_absent_sub():
+def test_teach_authorized_rejects_agent_subs_and_absent_sub():
     assert teach_authorized(_teach_task(sub="service:room"))
     assert teach_authorized(_teach_task(sub="kobo-room"))
     assert not teach_authorized(_teach_task(sub="agent:ward"))
+    # `persona:` is what cabal ACTUALLY mints for an agent; `agent:` is the
+    # format this gate used to check and nothing has ever produced (#43). The
+    # old name said this test "rejects colleagues" while testing only the
+    # format no colleague presents — a reader checking coverage found it green
+    # and stopped.
+    assert not teach_authorized(_teach_task(sub="persona:scout"))
+    assert not teach_authorized(_teach_task(sub="operator"))
     assert not teach_authorized(_teach_task(sub=None))
     empty = _teach_task(sub=None)
     empty.metadata[VERIFIED_SUB_KEY] = ""

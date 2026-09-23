@@ -116,7 +116,7 @@ async def test_teach_never_reaches_model_or_enforcement(tmp_path, techne_db):
     assert len(rows) == 1
 
 
-async def test_teach_refused_for_colleague_sub(tmp_path, techne_db):
+async def test_teach_refused_for_a_prefixed_agent_sub(tmp_path, techne_db):
     agent = _techne_agent(tmp_path, techne_db)
 
     result = await agent.handle_task(_teach_task(sub="agent:ward"))
@@ -127,6 +127,89 @@ async def test_teach_refused_for_colleague_sub(tmp_path, techne_db):
     assert result.state is TaskState.FAILED
     assert result.reason_code is ReasonCode.POLICY_VIOLATION
     assert _all_rows(techne_db) == []
+
+
+async def test_teach_refused_for_a_PERSONA_sub_which_is_what_cabal_actually_mints(
+    tmp_path, techne_db
+):
+    """THE #43 REGRESSION, and the one the old gate let straight through.
+
+    The gate refused `agent:` and cabal has never minted that. Its two
+    bootstrap shapes are `operator:<id>` and `persona:<name>`
+    (cabal/core/routes/auth.py:75-79), and the dispatch re-mint propagates
+    whichever started the chain -- so a colleague agent arrives here as
+    `persona:<name>` and, before this test, was operator-grade.
+
+    That matters beyond one forged fact. apply_teach writes the source as
+    `intake:<caller-supplied filename>`, and memory/revision.py auto-promotes
+    the `intake:chat-` slice WITHOUT human review, retiring whatever it
+    contradicts -- though only when `memory.revision` is enabled, which is off
+    by default. `apply_knowledge_delete` needs no such setting: it retires
+    entries directly, returning before the revision pass the write branches
+    make. So the reachable consequence was an agent retiring another agent's
+    beliefs through the lane built to keep that human-gated, and the leg that
+    does not depend on any config is the delete (#49 r2).
+    """
+    agent = _techne_agent(tmp_path, techne_db)
+
+    result = await agent.handle_task(_teach_task(sub="persona:scout"))
+
+    assert result.agent_text() == (
+        "Teaching is operator-only. This connection is not an operator door."
+    )
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.POLICY_VIOLATION
+    assert _all_rows(techne_db) == []
+
+
+async def test_teach_refused_for_the_bare_operator_sub_that_means_nobody_identified(
+    tmp_path, techne_db
+):
+    """cabal re-mints a sub-less token as the literal string "operator"
+    (`sub=claims.get("sub", "operator")`, cabal#184) -- not `operator:<id>`,
+    just the word. A bearer that failed to identify itself must not land one
+    character from the most privileged prefix in the fleet."""
+    agent = _techne_agent(tmp_path, techne_db)
+
+    result = await agent.handle_task(_teach_task(sub="operator"))
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.POLICY_VIOLATION
+    assert _all_rows(techne_db) == []
+
+
+async def test_an_operator_prefixed_sub_still_teaches(tmp_path, techne_db):
+    """The fix must not close the door it exists to keep open: cabal's real
+    operator shape (`operator:<id>`) is still admitted."""
+    agent = _techne_agent(tmp_path, techne_db)
+
+    result = await agent.handle_task(_teach_task(sub="operator:richard"))
+
+    assert result.state is not TaskState.FAILED
+    assert [e for e in _all_rows(techne_db) if e.get("source", "").startswith("intake:")]
+
+
+async def test_the_gate_records_the_sub_it_ADMITTED_not_only_the_ones_it_refused(
+    tmp_path, techne_db
+):
+    """#47 cannot be answered from refusals.
+
+    Inverting this gate to an `operator:` allowlist needs to know what
+    LEGITIMATE callers present -- kobo above all, whose sub is DEPLOYMENT-
+    CHOSEN: it relays through cabal carrying whatever token the environment
+    put in `CABAL_OPERATOR_TOKEN`, and cabal propagates that token's sub to
+    us. So it is a property of one env var in one cluster and no amount of
+    reading either repo settles it. Refusal events say nothing about
+    legitimate callers. The allow event is the only way that question gets an
+    answer off a running agent, so it is pinned here rather than left as a
+    convenience."""
+    seen: list[dict] = []
+    agent = _techne_agent(tmp_path, techne_db, on_event=seen.append)
+
+    await agent.handle_task(_teach_task(sub="service:room"))
+
+    allowed = [e for e in seen if e["type"] == "teach_allowed"]
+    assert allowed == [{"type": "teach_allowed", "sub": "service:room"}]
 
 
 async def test_teach_refused_without_verified_sub(tmp_path, techne_db):
@@ -284,7 +367,7 @@ async def test_knowledge_task_delete_removes_recall(tmp_path, techne_db):
     assert not any("Tsuru" in e["content"] for e in live)
 
 
-async def test_knowledge_refused_for_colleague_sub(tmp_path, techne_db):
+async def test_knowledge_refused_for_a_prefixed_agent_sub(tmp_path, techne_db):
     agent = _techne_agent(tmp_path, techne_db)
 
     result = await agent.handle_task(_knowledge_task(sub="agent:ward"))
@@ -318,3 +401,35 @@ async def test_unknown_system_task_marker_is_refused_and_never_reaches_model(tmp
 
     assert result.state is TaskState.FAILED
     assert result.reason_code is ReasonCode.POLICY_VIOLATION
+
+
+@pytest.mark.parametrize(
+    "marker,lane",
+    [(TEACH_MARKER, "teach"), (KNOWLEDGE_MARKER, "knowledge"), (TOOL_MARKER, "tool")],
+)
+async def test_the_operator_gate_event_NAMES_are_pinned(tmp_path, techne_db, marker, lane):
+    """`_operator_gate`'s docstring promises these names are stable, and
+    nothing pinned them (#49 r1).
+
+    Prudence renamed all three refusal events at once and the suite stayed
+    green at 399 passed — `teach_allowed` was the only one of the six names
+    with a test, and only because it was pinned deliberately. The kaminos
+    trace pane consumes this stream by name, so a rename is a silent break
+    for a consumer in another repo: exactly the kind of cross-repo coupling
+    that produced #43 in the first place.
+    """
+    seen: list[dict] = []
+    agent = _techne_agent(tmp_path, techne_db, on_event=seen.append)
+
+    task = _teach_task(sub="persona:scout")  # refused
+    task.metadata[SYSTEM_TASK_KEY] = marker
+    await agent.handle_task(task)
+
+    assert {"type": f"{lane}_refused", "sub": "persona:scout"} in seen
+
+    allowed = _teach_task(sub="service:room")
+    allowed.metadata[SYSTEM_TASK_KEY] = marker
+    await agent.handle_task(allowed)
+
+    assert {"type": f"{lane}_allowed", "sub": "service:room"} in seen
+

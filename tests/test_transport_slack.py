@@ -2,6 +2,7 @@
 All against a fake API seam; no slack-sdk needed."""
 
 import asyncio
+import logging
 
 from daedalus.protocols import DenyAll
 from daedalus.task import ReasonCode, Task, TaskState
@@ -61,8 +62,12 @@ class FakeApi:
     async def unreact(self, channel, ts, name):
         self.unreacts.append((ts, name))
 
-    async def reactions(self, channel, ts):
-        return self._reactions_script.pop(0) if self._reactions_script else []
+    async def reactions_with_users(self, channel, ts):
+        """The script entries stay plain names; each gets one anonymous
+        reactor so existing scripts keep meaning what they meant. A script
+        entry may also be a (name, [users]) pair when a test cares WHO."""
+        step = self._reactions_script.pop(0) if self._reactions_script else []
+        return [item if isinstance(item, tuple) else (item, ["U-someone"]) for item in step]
 
     async def download_file(self, url):
         self.downloaded.append(url)
@@ -954,3 +959,141 @@ def test_single_pipe_line_and_fenced_tables_pass_through():
     assert to_mrkdwn(lone) == lone
     fenced = "```\n| raw | table |\n| kept | as-is |\n```"
     assert to_mrkdwn(fenced) == fenced
+async def test_the_approver_allowlist_ignores_a_reaction_from_outside_it():
+    """#46: who approved was not merely unchecked, it was UNAVAILABLE.
+
+    `reactions()` returned names and discarded the `users` Slack already
+    sends, so at the point of decision there was nothing to check against and
+    nothing to record. Anyone in the channel could approve a tier-2 action
+    with a thumbs-up, and no trace said who did.
+    """
+    api = FakeApi(
+        reactions_script=[
+            [("white_check_mark", ["U-stranger"])],
+            [("white_check_mark", ["U-stranger", "U-operator"])],
+        ]
+    )
+    approver = SlackReactionApprover(
+        api, CH, timeout=5, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    # First poll: only a stranger has reacted — not an approval.
+    # Second poll: the operator has, and it is.
+    assert await approver.approve("dangerous_tool", {"plan": "x"}) is True
+    assert api._reactions_script == []
+
+
+async def test_an_allowlisted_agent_is_not_approved_by_a_stranger_alone():
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U-stranger"])]] * 3)
+    approver = SlackReactionApprover(
+        api, CH, timeout=0.05, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
+
+
+async def test_with_no_allowlist_any_reactor_still_approves():
+    """The default is unchanged on purpose, and it is NOT the safe one (#53).
+
+    Refusing every approval on an agent whose operator has not yet listed
+    themselves would take tier-2 tools offline in a running room with no
+    announcement. Pinned so the default cannot drift silently either way.
+    """
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U-anyone"])]])
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+
+    assert await approver.approve("dangerous_tool", {"plan": "x"}) is True
+
+
+async def test_every_decision_names_its_approver_in_the_log(caplog):
+    """The log is what makes #53 answerable: an operator can read the real
+    approver set off a running agent instead of guessing at one."""
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U-operator"])]])
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is True
+
+    assert "U-operator" in caplog.text
+    assert "APPROVED" in caplog.text
+    assert "deploy" in caplog.text
+
+
+async def test_a_silent_timeout_is_recorded_as_a_denial_with_its_reason(caplog):
+    """`silence is denial` is right, but a requester could not tell a
+    deliberate deny from an operator who never saw the message."""
+    api = FakeApi(reactions_script=[])
+    approver = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01)
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is False
+
+    assert "no reaction" in caplog.text
+
+
+async def test_an_OFF_LIST_veto_still_stops_the_action():
+    """#54 r1: the allowlist must gate APPROVAL only.
+
+    `_who` applied `users & self.approvers` to whatever set it was handed, and
+    `approve()` handed it DENY too — so a stranger's :x: was discarded.
+    Measured before the fix, with this exact arrangement: approve() returned
+    True, the veto dropped. That is strictly WEAKER than the behaviour this PR
+    replaced, where any :x: stopped the action.
+
+    Raising the bar to authorise must never lower the bar to stop.
+    """
+    approvers = frozenset({"U-operator"})
+
+    # THE POSITIVE CONTROL IS THE TEETH (#54 r2). `is False` alone is
+    # `approve()`'s DEFAULT answer, so this test passed against a mutant that
+    # simply returned False unconditionally -- it was one of the three new
+    # tests, and the only one whose sole assertion was the default. Its two
+    # siblings survived that mutant because they assert on log content.
+    # Pairing the veto case with the identical script MINUS the veto is what
+    # makes the False mean "the :x: did it" rather than "nothing happened".
+    without_veto = FakeApi(
+        reactions_script=[[("white_check_mark", ["U-operator"])]]
+    )
+    assert (
+        await SlackReactionApprover(
+            without_veto, CH, timeout=5, poll=0.01, approvers=approvers
+        ).approve("dangerous_tool", {"plan": "x"})
+        is True
+    ), "the control did not approve, so a False below would prove nothing"
+
+    api = FakeApi(
+        reactions_script=[
+            [("x", ["U-stranger"]), ("white_check_mark", ["U-operator"])],
+        ]
+    )
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=approvers)
+
+    assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
+
+
+async def test_an_off_list_veto_is_named_in_the_log_as_the_denier(caplog):
+    api = FakeApi(reactions_script=[[("x", ["U-stranger"])]])
+    approver = SlackReactionApprover(
+        api, CH, timeout=5, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is False
+
+    assert "DENIED" in caplog.text
+    assert "U-stranger" in caplog.text
+
+
+async def test_a_timeout_after_an_OFF_LIST_tick_does_not_claim_there_was_no_reaction(caplog):
+    """There was a reaction. Reporting silence puts a false statement into the
+    one artefact this class exists to produce (#54 r1)."""
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U-stranger"])]] * 4)
+    approver = SlackReactionApprover(
+        api, CH, timeout=0.05, poll=0.01, approvers=frozenset({"U-operator"})
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("deploy", {"plan": "x"}) is False
+
+    assert "off-list" in caplog.text
+    assert "no reaction" not in caplog.text

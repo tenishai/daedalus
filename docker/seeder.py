@@ -8,7 +8,7 @@ Section convention: knowledge files are split on `## ` headings; the filename
 stem picks the techne knowledge type (see TYPE_MAP; anything else is a fact).
 
 bundle/skills/<id>/SKILL.md rides the SAME convergence pass (2026-08-27:
-until then the runtime never read bundle/skills at all -- kobo staged skill
+until then this seeder never read bundle/skills at all -- kobo staged skill
 picks into every image and every one of them was dead weight). Each SKILL.md
 enters `sync()`'s ledger under the collision-free key `skills/<id>/SKILL.md`
 and seeds as ONE whole-file `procedure` entry -- a skill is a coherent
@@ -89,6 +89,19 @@ def parse_skill_file(key: str, path: Path) -> list[str]:
         return []
     skill_id = key.split("/")[1]
     return [f"## Skill: {skill_id}\n\n{text}"]
+
+
+def _render_breakdown(by_kind: dict | None) -> str:
+    """` (knowledge: s/r/u, skills: s/r/u)` for the summary log, or `''` when
+    skills were not in scope. Purely presentational -- the totals it follows
+    stay authoritative and unchanged."""
+    if not by_kind:
+        return ""
+    parts = [
+        f"{kind}: {counts['seeded']}/{counts['removed']}/{counts['unchanged']}"
+        for kind, counts in by_kind.items()
+    ]
+    return " (" + ", ".join(parts) + ")"
 
 
 def parse_knowledge_file(path: Path) -> list[str]:
@@ -225,6 +238,23 @@ def sync(
             for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
                 current[f"skills/{skill_md.parent.name}/SKILL.md"] = skill_md
         seeded = removed = unchanged = 0
+        by_kind = {
+            "knowledge": {"seeded": 0, "removed": 0, "unchanged": 0},
+            "skills": {"seeded": 0, "removed": 0, "unchanged": 0},
+        }
+
+        def _tally(filename: str, key: str, n: int = 1) -> int:
+            """Mirror a total into its per-kind bucket and return `n`, so a
+            call site stays one line: `seeded += _tally(fn, "seeded", k)`.
+
+            The totals and the breakdown are incremented at the SAME sites
+            on purpose. A separate pass over `current` would have to re-derive
+            which branch each file took, and would drift the first time a
+            branch is added -- silently, since nothing compares the two.
+            """
+            kind = "skills" if filename.startswith(_SKILL_KEY_PREFIX) else "knowledge"
+            by_kind[kind][key] += n
+            return n
 
         for filename in set(state) - set(current):
             row = state[filename]
@@ -243,7 +273,7 @@ def sync(
                 delete_fn(techne_db, entry_id)
             conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
             conn.commit()
-            removed += 1
+            removed += _tally(filename, "removed")
 
         def _store_sections(filename: str, path: Path) -> list[int]:
             """Store `path`'s sections fresh under the ordinary seed source.
@@ -335,7 +365,7 @@ def sync(
                     # leave duplicates behind.
                     for entry_id in list_ids_fn(techne_db, f"seed:{filename}"):
                         delete_fn(techne_db, entry_id)
-                seeded += _reseed(filename, path, digest)
+                seeded += _tally(filename, "seeded", _reseed(filename, path, digest))
                 continue
 
             if prior["lane"] == "live":
@@ -344,7 +374,7 @@ def sync(
                         # STALE image of a deleted file: this boot's image
                         # predates the fast-lane delete. Skip entirely --
                         # keep the tombstone, never resurrect the file.
-                        unchanged += 1
+                        unchanged += _tally(filename, "unchanged")
                         continue
                     # Else: genuinely new content landed at this filename
                     # after the delete (a repo-direct add, unrelated to the
@@ -352,7 +382,7 @@ def sync(
                     # below, same as any other new file. Nothing to
                     # delete_fn: the tombstone's entries were already
                     # retired at delete time.
-                    seeded += _reseed(filename, path, digest)
+                    seeded += _tally(filename, "seeded", _reseed(filename, path, digest))
                     continue
                 if digest == prior["sha256"]:
                     # The archive commit landed the fast-lane write's exact
@@ -365,7 +395,7 @@ def sync(
                         (filename,),
                     )
                     conn.commit()
-                    unchanged += 1
+                    unchanged += _tally(filename, "unchanged")
                     continue
                 if prior["previous_sha"] is not None and digest == prior["previous_sha"]:
                     # STALE image: this boot's image predates the
@@ -373,7 +403,7 @@ def sync(
                     # delete, no re-seed. The live write's entries stand
                     # exactly as they are; this is the destructive
                     # scenario the staleness protocol exists to prevent.
-                    unchanged += 1
+                    unchanged += _tally(filename, "unchanged")
                     continue
                 # Genuinely new content (a repo-direct edit), unrelated to
                 # the live write: normal convergence wins. The live entries
@@ -389,18 +419,24 @@ def sync(
                     for entry_id in prior["entry_ids"]:
                         delete_fn(techne_db, entry_id)
                 _write_seed_row(filename, digest, ids)
-                seeded += len(ids)
+                seeded += _tally(filename, "seeded", len(ids))
                 continue
 
             if prior["sha256"] == digest:
-                unchanged += 1
+                unchanged += _tally(filename, "unchanged")
                 continue
 
             for entry_id in prior["entry_ids"]:
                 delete_fn(techne_db, entry_id)
-            seeded += _reseed(filename, path, digest)
+            seeded += _tally(filename, "seeded", _reseed(filename, path, digest))
 
-        return {"seeded": seeded, "removed": removed, "unchanged": unchanged}
+        result = {"seeded": seeded, "removed": removed, "unchanged": unchanged}
+        if skills_dir is not None:
+            # Only when skills were in scope. A knowledge-only call returns the
+            # exact three-key dict it always has -- `skills_dir` is an additive
+            # parameter and its absence stays invisible in the result shape.
+            result["by_kind"] = by_kind
+        return result
     finally:
         conn.close()
 
@@ -601,12 +637,25 @@ def main(argv: list[str]) -> int:
         retire_fn=retire_fn,
         skills_dir=bundle / "skills",
     )
-    if not knowledge_dir.is_dir() and result == {"seeded": 0, "removed": 0, "unchanged": 0}:
+    nothing_happened = not any(result[k] for k in ("seeded", "removed", "unchanged"))
+    if not knowledge_dir.is_dir() and nothing_happened:
         # Truly never-seeded bundle: no knowledge/ now, and no prior state to
         # purge either — a clean no-op, so keep the quieter fast-path log.
+        #
+        # Compared key by key rather than against a whole literal dict: main()
+        # always passes skills_dir, so the result carries a `by_kind` breakdown
+        # and an `== {...}` equality can never match here again.
         log.info("no knowledge/ in bundle — nothing to seed")
     else:
-        log.info("seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s", result)
+        # Name the categories. Skills ride the same convergence pass as
+        # knowledge files and land in the same three totals, so a correctly
+        # seeded 14-skill bundle and a bundle with no skills at all used to
+        # print the same line -- an operator checking whether skills loaded had
+        # no signal here at all, and the store was the only place to look.
+        log.info(
+            "seeded=%(seeded)s removed=%(removed)s unchanged=%(unchanged)s%(breakdown)s",
+            {**result, "breakdown": _render_breakdown(result.get("by_kind"))},
+        )
 
     intake_dir = bundle / "intake"
     if intake_dir.is_dir():

@@ -65,11 +65,17 @@ why this, and not the softer `status='archived'` lifecycle flag, is the
 primitive that actually removes an entry from recall.
 
 Authorization gates on the transport-stamped verified JWT subject
-(daedalus.task.VERIFIED_SUB_KEY): colleagues dispatch as "agent:<name>"
-and must never mint operator-grade intake:chat-* facts (the operator
-shield's provenance would be forged). No verified sub means refused. Every
-marker's write carries exactly this same requirement -- teach_authorized is
-reused verbatim, not reimplemented per marker.
+(daedalus.task.VERIFIED_SUB_KEY): a colleague agent must never mint
+operator-grade intake:chat-* facts, because the operator shield's provenance
+would then be forged. No verified sub means refused. Every marker's write
+carries exactly this same requirement -- teach_authorized is reused verbatim,
+not reimplemented per marker.
+
+THIS PARAGRAPH USED TO SAY colleagues dispatch as "agent:<name>", and that
+was the false belief the gate was built on (#43): cabal mints `persona:<name>`
+for an agent and `operator:<id>` for a human, never `agent:`. See
+`teach_authorized` for what is actually refused and why the gate is still a
+blocklist.
 """
 
 from __future__ import annotations
@@ -160,9 +166,61 @@ def is_teach_task(task: Task) -> bool:
     return task.metadata.get(SYSTEM_TASK_KEY) == TEACH_MARKER
 
 
+#: Sub prefixes that are NOT operator-grade, however well a token verifies.
+#:
+#: THESE ARE CABAL'S SPELLINGS, AND THE COUPLING IS THE WHOLE POINT (#43).
+#: cabal mints exactly two shapes at bootstrap (`core/routes/auth.py:75-79`):
+#: `operator:<id>` for a human and `persona:<name>` for an agent, and its
+#: dispatch re-mint propagates whichever one started the chain. This gate
+#: previously refused `agent:` -- a prefix nothing in the fleet has ever
+#: minted -- so it refused nothing at all and the operator-only lane was
+#: reachable by any caller whose token merely verified.
+#:
+#: `agent:` is kept because it costs nothing and some future issuer may
+#: use it. The bare string `"operator"` is refused because it is cabal's
+#: fallback when an inbound token carries NO sub at all
+#: (`sub=claims.get("sub", "operator")`, cabal#184): a bearer that failed
+#: to identify itself must not land one character from the most privileged
+#: prefix in the system.
+_NON_OPERATOR_SUBS = ("persona:", "agent:")
+_UNIDENTIFIED_SUB = "operator"
+
+
 def teach_authorized(task: Task) -> bool:
+    """True when the task's VERIFIED sub may drive an operator-only lane.
+
+    WHAT THIS GATE IS THE ONLY CONTROL OVER. The transport strips any
+    wire-supplied sub, so nothing upstream re-checks this. Two writes reach
+    past it, not one: `apply_teach`'s provenance feeds `memory/revision.py`,
+    which auto-promotes the `intake:chat-` slice with no human review and
+    RETIRES what it contradicts -- though only when `memory.revision` is
+    enabled, which is off by default. `apply_knowledge_delete` needs no such
+    setting: it retires entries directly, no revision pass, no model, no
+    config (#49 r1).
+
+    A BLOCKLIST, DELIBERATELY, AND IT SHOULD NOT STAY ONE (#47). An
+    allowlist on `operator:` is the better shape and is what this wants to
+    become -- it fails closed when a new principal type appears, where this
+    fails open.
+
+    It is not that today because kobo's sub is DEPLOYMENT-CHOSEN, not
+    source-derivable. kobo drives these same lanes, and its primary path
+    relays through cabal carrying whatever token the environment put in
+    `CABAL_OPERATOR_TOKEN` (kobo clients.py:2913-2926, read live per call).
+    cabal verifies that token and propagates its sub to us. So the sub we
+    see is a property of one env var in one cluster, and no amount of
+    reading either repo settles what it is. An `operator:` allowlist is
+    very likely correct and would very likely break nothing -- "very
+    likely" is not a thing to deploy unattended into the room's own teach
+    route. So: close the known hole now, log what real callers actually
+    present, invert once the field data exists.
+    """
     sub = task.metadata.get(VERIFIED_SUB_KEY)
-    return isinstance(sub, str) and bool(sub) and not sub.startswith("agent:")
+    if not isinstance(sub, str) or not sub:
+        return False
+    if sub == _UNIDENTIFIED_SUB:
+        return False
+    return not sub.startswith(_NON_OPERATOR_SUBS)
 
 
 def _sections(text: str) -> list[str]:

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import warnings
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 
-from daedalus.bundle import Bundle, BundleError
+from daedalus.bundle import Bundle, BundleError, unmet_requirements
 from daedalus.enforcement import Enforcement
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
@@ -39,6 +40,8 @@ from daedalus.protocols import (
     Transport,
 )
 from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
+
+log = logging.getLogger(__name__)
 
 
 def _munge(name: str) -> str:
@@ -166,6 +169,31 @@ class Agent:
         # trade (see revision.COLLEAGUE_REASK_COOLDOWN_S).
         self._reask_cooldowns: dict[int, float] = {}
         self._revision_fires: set[asyncio.Task] = set()
+        # Last, so it reports against fully-wired state. An assigned skill that
+        # cannot be reached is invisible otherwise: the agent boots green and
+        # simply never uses it.
+        self._warn_on_unusable_skills()
+
+    def _operator_gate(self, task: Task, lane: str) -> bool:
+        """The shared gate on the three operator-only lanes, and the ONE place
+        that records which sub reached them.
+
+        EMITS ON BOTH OUTCOMES, and the allow event is the point (#47). The
+        refusal events already existed; refusals alone cannot tell you what
+        your LEGITIMATE callers present, and that is exactly the question
+        blocking the inversion of this gate from a blocklist to an
+        `operator:` allowlist. kobo's sub is a property of one env var in one
+        cluster (`CABAL_OPERATOR_TOKEN`, propagated through cabal's re-mint),
+        so no amount of reading either repo settles it -- it has to be read
+        off a running agent. `<lane>_allowed` is how.
+
+        The refusal event names are unchanged on purpose: the kaminos trace
+        pane consumes this stream, and renaming a signal to add a sibling is
+        how you break a consumer for no reason."""
+        sub = task.metadata.get(VERIFIED_SUB_KEY)
+        allowed = teach_authorized(task)
+        self._emit(f"{lane}_allowed" if allowed else f"{lane}_refused", sub=sub)
+        return allowed
 
     def _emit(self, event_type: str, **fields) -> None:
         """The runtime's trace stream: --verbose renders it in the terminal;
@@ -226,6 +254,14 @@ class Agent:
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
         providers: list[ToolProvider] = []
+
+        if self.bundle.skills:
+            # First in the list, so `skills.load` wins any name collision with a
+            # provider that happens to offer the same name -- an agent's own
+            # assigned skills are not something a remote server gets to shadow.
+            from daedalus.tools.skills import SkillsToolProvider
+
+            providers.append(SkillsToolProvider(self.bundle.skills))
 
         for key, config in spec.builtin.items():
             if key != "files":
@@ -378,10 +414,49 @@ class Agent:
         # daedalus.tools.* at point of use rather than at module level (see
         # the tools_from_spec provider branches above), not a real cycle --
         # colleagues.py imports nothing from daedalus.agent.
-        from daedalus.tools.colleagues import consulted_colleagues, current_context_id
+        from daedalus.tools.colleagues import (
+            DEPTH_KEY,
+            consulted_colleagues,
+            current_context_id,
+            current_delegation_depth,
+        )
 
         current_context_id.set(task.context_id or task.id)
         consulted_colleagues.set([])
+        # cabal#144 — carry the inbound hop count so an outbound ask can send
+        # depth+1. An unreadable value is treated as the TOP of the chain
+        # rather than as an error: a malformed number must not be a way to
+        # claim a shallower depth than you have, and anything asking onward
+        # from here is still stamped 1 and bounded from there.
+        #
+        # OverflowError IS NOT REDUNDANT (#40 pre-pass). `int(float("inf"))`
+        # raises it rather than ValueError, and an infinity gets here: Task
+        # metadata has no value-type constraint, it rides through verbatim from
+        # the wire, and Starlette's Request.json() is json.loads, which accepts
+        # a bare `Infinity` token. Without this arm the exception escapes
+        # handle_task entirely and the transport turns it into an HTTP 500 --
+        # a crash, in the branch whose stated property is that garbage degrades.
+        # (`nan` lands on ValueError and always worked.) cabal's own parser had
+        # the identical gap; both ends are fixed.
+        try:
+            _inbound_depth = max(0, int(task.metadata.get(DEPTH_KEY, 0)))
+        except (TypeError, ValueError, OverflowError):
+            _inbound_depth = 0
+        current_delegation_depth.set(_inbound_depth)
+        # A BACKGROUND TASK SPAWNED BELOW THIS LINE INHERITS THE DEPTH, because
+        # asyncio.create_task copies the current context (#40 r1 Nit, filed as
+        # daedalus#42). _start_revision_pass does exactly that, and its own ask
+        # is a FRESH chain that would be stamped parent+1 and can be refused for
+        # the parent's depth. Left as-is: current_context_id inherits the same
+        # way, and the two call sites reachable from HERE -- _handle_teach and
+        # _handle_knowledge -- both sit behind teach_authorized, which requires
+        # a verified human subject. (There is a third, in serve(), and it is the
+        # safe one: it runs at startup outside any handle_task, so it inherits
+        # the contextvar's default rather than a chain's depth. Naming two of
+        # three was an incomplete enumeration in a comment about which sites are
+        # gated -- #40 r2 Nit.) No legitimate producer sends a depth key on such
+        # a task today; revisit if teach becomes reachable from an agent
+        # subject.
         marker = task.metadata.get(SYSTEM_TASK_KEY)
         if marker is not None:
             return await self._dispatch_system_task(marker, task)
@@ -508,8 +583,7 @@ class Agent:
         locked check on purpose: memory writes are operator-gated by the
         transport-stamped sub, not law-gated -- a broken orchestrator file
         must not also brick teaching."""
-        if not teach_authorized(task):
-            self._emit("teach_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "teach"):
             return task.reply(
                 "Teaching is operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,
@@ -603,8 +677,7 @@ class Agent:
         operator-grade, so teach_authorized is reused verbatim rather than
         reimplemented. DELETE_KEY in metadata routes to
         apply_knowledge_delete; its absence is a write (apply_knowledge)."""
-        if not teach_authorized(task):
-            self._emit("knowledge_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "knowledge"):
             return task.reply(
                 "Knowledge writes are operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,
@@ -660,8 +733,7 @@ class Agent:
         Enforcement.load) only re-runs at process boot, so a tool delivered
         here is inert in this process no matter what -- the reply says so
         plainly rather than implying anything more."""
-        if not teach_authorized(task):
-            self._emit("tool_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        if not self._operator_gate(task, "tool"):
             return task.reply(
                 "Tool writes are operator-only. This connection is not an operator door.",
                 state=TaskState.FAILED,
@@ -851,10 +923,61 @@ class Agent:
             ],
         }
 
+    def _skills_index(self) -> str:
+        """One line per assigned skill: the id and when to use it.
+
+        Names only. The bodies are fetched through `skills.load` -- see
+        daedalus/tools/skills.py for why they cannot live here.
+
+        Returns "" when `skills.load` is not in the allowlist, because an index
+        the agent cannot act on is worse than no index: it would name fourteen
+        capabilities and leave every one of them unreachable, which is the
+        failure mode this whole feature exists to remove.
+        """
+        if not self.bundle.skills:
+            return ""
+        allow = self.bundle.spec.tools.allow
+        if not any(fnmatch("skills.load", pattern) for pattern in allow):
+            return ""
+        lines = [f"- `{skill.id}` — {skill.summary}" for skill in self.bundle.skills.values()]
+        return (
+            "\n\n## Skills\n"
+            "Assigned skills. Call `skills.load(name)` to read one in full "
+            "before acting on it.\n" + "\n".join(lines)
+        )
+
+    def _warn_on_unusable_skills(self) -> None:
+        """Say so, at load time, when an assigned skill cannot work.
+
+        Two distinct silent failures, both of which look exactly like success:
+        a skill whose `requires:` names tools the allowlist does not admit, and
+        a bundle with skills whose allowlist omits `skills.load` entirely (so
+        the index is suppressed and nothing can be fetched by name).
+        """
+        if not self.bundle.skills:
+            return
+        allow = self.bundle.spec.tools.allow
+        if not any(fnmatch("skills.load", pattern) for pattern in allow):
+            log.warning(
+                "%d skill(s) assigned but tools.allow does not admit 'skills.load' — "
+                "none of them can be loaded by name: %s",
+                len(self.bundle.skills),
+                ", ".join(sorted(self.bundle.skills)),
+            )
+        for skill_id, missing in unmet_requirements(self.bundle.skills, allow).items():
+            log.warning(
+                "skill %r requires %s, which tools.allow does not admit",
+                skill_id,
+                ", ".join(missing),
+            )
+
     def _messages(
         self, task: Task, recalled: list[str], notices: list[str] | None = None
     ) -> list[dict]:
         system = self.bundle.persona
+        index = self._skills_index()
+        if index:
+            system += index
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
         if notices:

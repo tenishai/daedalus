@@ -10,7 +10,8 @@ import json
 import os
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
@@ -265,12 +266,144 @@ def bundle_schema() -> dict:
     }
 
 
+
+#: Leading YAML frontmatter in a SKILL.md. Same dialect docker/seeder.py strips
+#: before seeding (`_FRONTMATTER` there) -- deliberately the same shape, read by
+#: two readers for two different purposes. The seeder drops it because catalog
+#: metadata is not procedure and has no business in a memory entry. Here it is
+#: the whole point: `when_to_use` is what the index in the system prompt is made
+#: of, and `requires` is what the load-time precondition check reads.
+_SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class Skill:
+    """One `skills/<id>/SKILL.md`, parsed but not loaded into the prompt.
+
+    `body` is held rather than injected: a catalogue's worth of bodies cannot go
+    in a system prompt and grows without bound as skills are added. One reporting
+    team measured their own fourteen-skill assignment at ~183 KB (#57) -- their
+    figure for their catalogue, not a property of this runtime, and cited only to
+    show the order of magnitude. Only `id` and `when_to_use` are indexed; the body
+    is fetched on demand through the `skills.load` tool. (#58)
+    """
+
+    id: str
+    body: str
+    name: str | None = None
+    when_to_use: str | None = None
+    requires: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def summary(self) -> str:
+        """The one index line. Falls back through when_to_use -> name -> id, so
+        a skill with no frontmatter at all is still addressable by name rather
+        than silently missing from the index."""
+        return self.when_to_use or self.name or self.id
+
+
+def parse_skill(skill_id: str, path: Path) -> Skill:
+    """Read one SKILL.md into a Skill. Malformed frontmatter degrades to "no
+    frontmatter" rather than raising: a skill whose YAML we cannot parse is
+    still a usable procedure body, and refusing to boot the whole agent over a
+    catalog-metadata typo would be a worse failure than an unindexed skill."""
+    text = path.read_text()
+    meta: dict = {}
+    match = _SKILL_FRONTMATTER.match(text)
+    if match:
+        try:
+            loaded = yaml.safe_load(match.group(1))
+            if isinstance(loaded, dict):
+                meta = loaded
+            else:
+                warnings.warn(
+                    f"{path}: frontmatter is not a mapping; ignoring", stacklevel=2
+                )
+        except yaml.YAMLError as exc:
+            warnings.warn(f"{path}: unparseable frontmatter ({exc}); ignoring", stacklevel=2)
+        text = text[match.end():]
+
+    # Non-list shapes reach the isinstance check and degrade with a warning.
+    # FALSY ones (False, 0, "", {}, []) never get that far -- `or []` short
+    # circuits above it and they degrade SILENTLY, which is correct but is not
+    # the same thing as being handled here.
+    #
+    # PyYAML is YAML 1.1, so an unquoted `requires: yes` is the BOOLEAN True.
+    # Three adjacent typos used to fail three different ways:
+    #   requires: no       -> False, short-circuits, silently "no requirements"
+    #   requires: yes      -> True, reached the comprehension below and took the
+    #                         whole agent down with a bare TypeError naming
+    #                         neither the file nor the field
+    #   requires: {a: b}   -> a dict IS iterable, so it yielded ["a"] from key
+    #                         iteration -- a PHANTOM REQUIREMENT that would then
+    #                         be reported unmet against the allowlist. Silent
+    #                         corruption, and the worst of the three.
+    # That contradicted this function's own degradation contract on exactly the
+    # input it was written for: SKILL.md files are authored outside this repo.
+    requires = meta.get("requires") or []
+    if not isinstance(requires, list):
+        if isinstance(requires, str):  # `requires: gateway.logs`, not a list
+            requires = [requires]
+        else:
+            warnings.warn(
+                f"{path}: 'requires' is not a list or a string; ignoring", stacklevel=2
+            )
+            requires = []
+
+    return Skill(
+        id=skill_id,
+        body=text.strip(),
+        name=meta.get("name"),
+        when_to_use=meta.get("when_to_use"),
+        requires=[str(item) for item in requires],
+        meta=meta,
+    )
+
+
+def load_skills(root: Path) -> dict[str, Skill]:
+    """Every `skills/<id>/SKILL.md` under `root`, keyed by directory name.
+
+    Same one-level glob the boot seeder uses, so the agent process's view of
+    which skills exist cannot disagree with what that seeder put into memory."""
+    skills_dir = root / "skills"
+    return {
+        md.parent.name: parse_skill(md.parent.name, md)
+        for md in sorted(skills_dir.glob("*/SKILL.md"))
+    }
+
+
+def unmet_requirements(skills: dict[str, Skill], allow: list[str]) -> dict[str, list[str]]:
+    """Skills whose `requires:` names tools the allowlist does not admit.
+
+    Matched with fnmatch because `tools.allow` holds PATTERNS, not names --
+    `gateway.*` satisfies a skill requiring `gateway.logs`, and comparing the
+    raw strings would report every globbed allowlist as entirely unmet.
+
+    This is the allowlist ceiling, not the provider's live listing: a tool the
+    allowlist admits but no provider offers is a different gap and is not
+    detectable here. Reporting what IS detectable beats reporting nothing,
+    which is what happens today. (#59)
+    """
+    unmet = {}
+    for skill_id, skill in skills.items():
+        missing = [
+            required
+            for required in skill.requires
+            if not any(fnmatch(required, pattern) for pattern in allow)
+        ]
+        if missing:
+            unmet[skill_id] = missing
+    return unmet
+
+
 @dataclass
 class Bundle:
     path: Path
     spec: AgentSpec
     card: dict
     persona: str
+    skills: dict[str, Skill] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path, env: dict[str, str] | None = None) -> Bundle:
@@ -300,4 +433,5 @@ class Bundle:
             spec=spec,
             card=card,
             persona=strip_persona_comments(persona_file.read_text()),
+            skills=load_skills(root),
         )

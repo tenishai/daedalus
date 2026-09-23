@@ -246,3 +246,39 @@ async def test_no_consultation_appends_nothing():
     agent = make_agent(llm=ScriptedLLM("plain answer"))
     task = await agent.handle_task(Task.from_text("hi"))
     assert task.agent_text() == "plain answer"
+
+
+@pytest.mark.parametrize(
+    "junk", [float("inf"), float("-inf"), float("nan"), "nonsense", None, [], {"a": 1}, -5]
+)
+async def test_an_unreadable_inbound_depth_serves_the_task_at_the_top(junk) -> None:
+    """daedalus#40 pre-pass — THE SHAPE THAT CRASHED INSTEAD OF DEGRADING.
+
+    The inbound parser caught `(TypeError, ValueError)`, and
+    `int(float("inf"))` raises `OverflowError`. So an infinite claimed depth
+    escaped `handle_task` and the transport turned it into an HTTP 500 — in the
+    branch whose entire stated property is that a malformed number costs a hop
+    of slack rather than an error. `nan` lands on `ValueError` and always
+    worked, which is why the neighbouring float shape hid it.
+
+    REACHABLE OVER THE WIRE, not just from a test: `Task.metadata` has no
+    value-type constraint, it rides through `task_from_a2a` verbatim, and
+    Starlette's `Request.json()` is `json.loads`, which parses a bare
+    `Infinity` token into this float.
+
+    Asserts the task is SERVED, not that the parser returns 0 — serving is the
+    property, and a parser that returned 0 while something downstream still
+    raised would pass a narrower test.
+    """
+    from daedalus.tools.colleagues import DEPTH_KEY, current_delegation_depth
+
+    agent = make_agent()
+    task = Task.from_text("hi")
+    task.metadata[DEPTH_KEY] = junk
+
+    result = await agent.handle_task(task)
+
+    assert result.state is TaskState.COMPLETED
+    assert current_delegation_depth.get() == 0, (
+        "a malformed depth must read as the top of the chain"
+    )

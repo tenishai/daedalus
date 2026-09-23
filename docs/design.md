@@ -43,7 +43,8 @@ prudence/
 ├── agent-card.json    # A2A Agent Card — identity, capabilities, skills
 ├── persona.md         # system prompt / SOP — the single persona source
 ├── agent.yaml         # wiring: model, transports, tools, memory, approvals
-└── skills/            # optional SKILL.md reference material
+└── skills/            # <id>/SKILL.md — seeded as procedure memory at boot,
+                       #   and indexed for the skills.load tool
 ```
 
 - `agent-card.json` follows the A2A `/.well-known/agent-card.json` schema.
