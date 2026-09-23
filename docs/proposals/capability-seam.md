@@ -1,3 +1,9 @@
+> **Internal design discussion.** Written inside a working fleet in 2026-07,
+> for the people in it. It names agents and colleagues by internal names that
+> this repo does not explain — read them as "some agent" and "whoever owned
+> that decision". The technical argument is the part that transfers. See
+> [README.md](README.md) in this directory.
+
 # The capability seam — how fleet agents get, discover, and gate tools
 
 *Proposal, 2026-07. Ember. Input from the Iris working session (fleet-side
@@ -94,7 +100,7 @@ kubectl_read = "client_k8s_tools.daedalus:KubectlReadProvider"
 ```yaml
 tools:
   builtin:
-    files: {roots: ["/home/iris/work"]}
+    files: {roots: ["/home/agent/work"]}
     kubectl_read: {contexts: ["vidai-prod", "vidai-dev"]}   # from the entry point
 ```
 
