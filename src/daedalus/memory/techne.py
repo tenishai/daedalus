@@ -1,6 +1,6 @@
 """techne-backed personal memory behind the MemoryStore seam.
 
-techne (github.com/dimartin/techne) is not on PyPI; install it alongside:
+techne (github.com/tenishai/techne) is not on PyPI; install it alongside:
 pip install -e path/to/techne. Recall failures degrade to no memories —
 a broken memory backend must never take the agent down.
 """

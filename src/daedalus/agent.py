@@ -208,7 +208,7 @@ class Agent:
             except ImportError as exc:
                 raise BundleError(
                     "memory.personal is 'techne' but techne is not installed — "
-                    "pip install -e path/to/techne (github.com/dimartin/techne)"
+                    "pip install -e path/to/techne (github.com/tenishai/techne)"
                 ) from exc
             from daedalus.memory.techne import TechneMemoryStore
 
