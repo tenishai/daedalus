@@ -47,7 +47,7 @@ class FakeLake:
         if self.fail_lifecycle and is_lifecycle:
             raise RuntimeError("lifecycle lane said no")
         self.started.append(QueryStatement)
-        qid = "q-%d" % len(self.started)
+        qid = f"q-{len(self.started)}"
         self._lane_by_qid[qid] = is_lifecycle
         return {"QueryId": qid}
 
