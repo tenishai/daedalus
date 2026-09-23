@@ -1,16 +1,16 @@
 > **Internal design discussion.** Written inside a working fleet in 2026-07,
-> for the people in it. It names agents and colleagues by internal names that
-> this repo does not explain — read them as "some agent" and "whoever owned
-> that decision". The technical argument is the part that transfers. See
-> [README.md](README.md) in this directory.
+> for the people in it. Agents and colleagues are referred to generically
+> below rather than by their internal names, and identifying paths have been
+> replaced with placeholders. The technical argument is the part that
+> transfers. See [README.md](README.md) in this directory.
 
 # The capability seam — how fleet agents get, discover, and gate tools
 
-*Proposal, 2026-07. Ember. Input from the Iris working session (fleet-side
-Ember + Shaz) and the whiteboard target architecture (Iris / Rook Remote /
-Clio over cabal, per-agent techne, shared Archive/Library). Discussion
-doc for Shaz, Rich, and both Embers — nothing here is built yet except
-where marked GROUND TRUTH.*
+*Proposal, 2026-07. Written by a daedalus SRE agent, with input from a
+fleet working session and a whiteboard target architecture (three fleet
+agents over cabal, per-agent techne, shared Archive/Library). Discussion
+doc for the daedalus maintainer, the operator, and the SRE agents
+involved — nothing here is built yet except where marked GROUND TRUTH.*
 
 ## 1. Ground truth — what the runtime does today
 
@@ -38,23 +38,24 @@ runtime (daedalus 0.4.0, 419 tests):
   bundle whose ceiling matches it, no yaml edit required.
 - **Transports are faces, not identities.** One bundle serves cli, a2a,
   and Slack simultaneously. "Slack-resident agent vs headless service"
-  is a `transports:` list, not an architectural fork. (Sherlock can keep
-  his channel and persona while a2a makes him fleet infrastructure; the
-  capacity question that follows belongs to cabal's bulletin board, not
-  the bundle.)
+  is a `transports:` list, not an architectural fork. (A Slack-resident
+  agent can keep its channel and persona while a2a makes it fleet
+  infrastructure too; the capacity question that follows belongs to
+  cabal's bulletin board, not the bundle.)
 
 ## 2. The problem
 
-The fleet pattern converging out of Iris/Cinder: domain agents with
-local builtin tools (kubectl, gcloud — fast, scoped, no hop) plus shared
-fleet capabilities through liminal (`sherlock.holmes_ask`,
+The fleet pattern converging out of two fleet working sessions: domain
+agents with local builtin tools (kubectl, gcloud — fast, scoped, no hop)
+plus shared fleet capabilities through liminal (`oncall.investigate_alert`,
 `prudence.review_pr`, `archivist.search`, `thoth.search_docs`). Two
 frictions:
 
 1. **Enumeration drift.** Requiring every agent.yaml to list every
    fleet capability means N bundles to edit whenever the fleet grows.
-2. **Local tools don't scale by fork.** Iris's kubectl set shouldn't
-   live in daedalus core, and shouldn't require forking daedalus either.
+2. **Local tools don't scale by fork.** A domain agent's kubectl set
+   shouldn't live in daedalus core, and shouldn't require forking
+   daedalus either.
 
 And one hazard the fleet discussion surfaced but didn't close: with any
 wide-open ceiling, **a newly appearing mutation tool runs ungated**
@@ -114,8 +115,8 @@ invalid config fails at load, not mid-conversation.
 
 Liminal capability cards already declare what each handler covers, and
 liminal now derives per-tool scopes from cards (#41/#43). Add one field
-to the card contract: **`mutating: true|false`** (Rich's call on the
-exact name/shape). Then:
+to the card contract: **`mutating: true|false`** (the operator's call on
+the exact name/shape). Then:
 
 - daedalus's liminal provider reads card metadata; any tool marked
   mutating is **auto-gated** (`plan_approval`) unless the bundle
@@ -168,8 +169,9 @@ inspect what you got.
   the bundle format. Separate design; it will want its own bundle
   section and schema rev. Don't conflate instructions (context) with
   tools (capabilities).
-- **Sherlock's deployment shape** — see ground truth: a transports
-  decision plus a cabal capacity question, not a bundle-format one.
+- **The Slack-resident agent's deployment shape** — see ground truth: a
+  transports decision plus a cabal capacity question, not a bundle-format
+  one.
 - **The Archive/Library** — the techne outbox's landing zone. Separate
   design.
 
@@ -177,15 +179,15 @@ inspect what you got.
 
 | # | Decision | Whose call |
 |---|---|---|
-| 1 | `tools.deny` semantics as specified (A) | Shaz |
-| 2 | Entry-point name `daedalus.tool_groups` + provider contract (B) | Shaz |
-| 3 | Card `mutating` field name/shape in liminal (C) | Rich |
-| 4 | Auto-gate default for metadata-less tools (C, open q) | Shaz + fleet experience |
-| 5 | Fleet read-scope grant convention in liminal deploys (D) | Rich + fleet Ember |
-| 6 | Palette as the kaminos arc after v0.5 (E) | Shaz |
+| 1 | `tools.deny` semantics as specified (A) | the daedalus maintainer |
+| 2 | Entry-point name `daedalus.tool_groups` + provider contract (B) | the daedalus maintainer |
+| 3 | Card `mutating` field name/shape in liminal (C) | the operator |
+| 4 | Auto-gate default for metadata-less tools (C, open q) | the daedalus maintainer + fleet experience |
+| 5 | Fleet read-scope grant convention in liminal deploys (D) | the operator + the fleet SRE team |
+| 6 | Palette as the kaminos arc after v0.5 (E) | the daedalus maintainer |
 
-A + B are small, self-contained daedalus PRs and unblock Iris-as-bundle
-immediately. C needs Rich. D is deployment config, not code. E waits for
-kaminos PR #3 (v0.5) to merge.
+A + B are small, self-contained daedalus PRs and unblock the pending
+fleet agent's bundle immediately. C needs the operator. D is deployment
+config, not code. E waits for kaminos PR #3 (v0.5) to merge.
 
-— Ember (SRE AI)
+— an SRE agent
