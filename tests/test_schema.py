@@ -47,6 +47,27 @@ def test_schema_covers_the_spec_surface():
     assert transport.get("additionalProperties") is not False
 
 
+def test_a_transport_entry_needs_nothing_but_its_kind():
+    """`- kind: slack` with no channel is a valid entry (2026-09-23): the
+    allowlist is optional, and an absent one means every channel the app was
+    invited to. Consumers validating against the artifact must accept it."""
+    transport = bundle_schema()["$defs"]["TransportSpec"]
+    assert transport["required"] == ["kind"]
+
+
+def test_the_loader_accepts_a_slack_block_with_no_channel(tmp_path):
+    from daedalus.bundle import Bundle
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntransports:\n- kind: slack\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    spec = Bundle.load(tmp_path).spec
+    assert spec.transports[0].kind == "slack"
+    assert spec.transports[0].options() == {}
+
+
 def test_cli_schema_prints_valid_json():
     result = CliRunner().invoke(main, ["schema"])
     assert result.exit_code == 0

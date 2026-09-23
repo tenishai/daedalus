@@ -417,14 +417,22 @@
     },
     "SlackReadSpec": {
       "additionalProperties": true,
-      "description": "A read-only SIDECAR block (2026-09-04): the agent may read\nconversation threads from exactly the channels listed here, using the\npod's own Slack bot token (the transport's env). Slack's channel\nmembership is the second wall -- history reads fail until a human\ninvites the bot. Absent channels = the block is off.",
+      "description": "A read-only SIDECAR block (2026-09-04): the agent may read\nconversation threads from the channels listed here, using the pod's own\nSlack bot token (the transport's env). Slack's channel membership is the\nsecond wall -- history reads fail until a human invites the bot.\n\nThree states, and the difference between the last two is deliberate\n(2026-09-23 operator ruling):\n  - `channels` absent      -> the block is OFF\n  - `channels: []`         -> ON with no allowlist: every channel the app\n                              has been invited to. Inviting the app is\n                              already the human grant; re-typing the IDs\n                              is the same permission asked for twice.\n  - `channels: [C012ABC]`  -> ON, and exactly those channels",
       "properties": {
         "channels": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Channels",
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channels"
         },
         "token_env": {
           "default": "SLACK_BOT_TOKEN",

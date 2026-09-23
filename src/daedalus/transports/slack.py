@@ -423,7 +423,7 @@ class SlackReactionApprover:
 class SlackTransport:
     def __init__(
         self,
-        channel: str,
+        channel: str = "",
         *,
         channels: list[str] | None = None,
         bot_token: str | None = None,
@@ -438,8 +438,16 @@ class SlackTransport:
         # transport on the same app token is not a second channel, it is a
         # coin flip that silently loses half the events (2026-09-04, found
         # live the day a second channel was added).
+        #
+        # AN EMPTY ALLOWLIST IS NOT "NOWHERE", IT IS "EVERYWHERE THE APP WAS
+        # INVITED" (2026-09-23 operator ruling). Typing channel IDs into a
+        # bundle when a human must ALSO invite the app to the channel is the
+        # same permission asked for twice; Slack delivers channel events only
+        # to apps that have been invited, so membership already IS the grant.
+        # Name channels and this stays an allowlist, exactly as before.
         self.channel = channel
-        self.channels = list(dict.fromkeys(channels or [channel]))
+        given = [channel] if channels is None else channels
+        self.channels = list(dict.fromkeys(c for c in given if c))
         self.bot_token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
         self.escalation_route = escalation_route
@@ -486,11 +494,20 @@ class SlackTransport:
 
         socket.socket_mode_request_listeners.append(listener)
         await socket.connect()
-        print(f"(slack listening in {', '.join(self.channels)})", flush=True)
+        print(self.listening_line(), flush=True)
         try:
             await asyncio.Event().wait()
         finally:
             await socket.disconnect()
+
+    def listening_line(self) -> str:
+        """The one line boot prints about this transport's reach. It states
+        which of the two regimes is in force, because "listening in " with
+        nothing after it is how an open transport would read as a broken
+        one."""
+        if not self.channels:
+            return "(slack listening in every channel the app is invited to)"
+        return f"(slack listening in {', '.join(self.channels)})"
 
     async def _gather_images(self, files: list[dict]) -> tuple[list[ImagePart], list[str]]:
         """Filter, bound, and fetch the event's image attachments. Every
@@ -560,13 +577,21 @@ class SlackTransport:
         if event.get("bot_id") or event.get("subtype"):
             return
         if (
-            event.get("channel") not in self.channels
+            self.channels
+            and event.get("channel") not in self.channels
             and event.get("channel_type") not in {"im", "mpim"}
         ):
             # Not one of our channels. DMs and group DMs pass regardless --
             # they are full-delivery by design (the tagged-only ruling was
             # about channels), and Slack only delivers them to apps the
             # user deliberately opened a conversation with.
+            #
+            # No allowlist at all skips this gate entirely: the event only
+            # reached us because the app is a member of that channel, and
+            # membership is the permission. Every filter below still runs --
+            # bots, subtypes, dedupe, and above all the tagged-only rule --
+            # so "any channel" widens WHERE we may answer, never WHAT we
+            # answer.
             return
         if self._not_for_us_in_channel(event):
             # Tagged-only in channels: a message event that does not mention

@@ -1,13 +1,22 @@
 """slack-read tool provider -- a deployed agent reads conversation threads
-from Slack channels its bundle explicitly allows.
+from the Slack channels its bundle allows.
 
 A read-only SIDECAR, stacking alongside the primary provider the way
-github/cloudtrail already do. The bundle names the channel IDs the agent may
-read; every tool here refuses any channel outside that list, so the reach
-is declared in the bundle, reviewable in the repo, and never widened at
+github/cloudtrail already do. The bundle may name the channel IDs the agent
+may read; every tool here then refuses any channel outside that list, so the
+reach is declared in the bundle, reviewable in the repo, and never widened at
 runtime. Auth is the pod's own bot token (the same env the Slack transport
 uses) -- membership in a channel is Slack's own second wall: history reads
 fail with not_in_channel until a human invites the bot.
+
+AN EMPTY LIST (`channels: []`, written out loud) turns the lane on with NO
+allowlist: the agent may read every channel the app has been invited to
+(2026-09-23 operator ruling). Membership is then the whole permission, which
+is the wall a human already has to build by hand, and Slack's own
+`not_in_channel` is the refusal -- surfaced verbatim in the plain sentences
+below rather than pre-empted by a membership lookup the tool would have to
+keep in step with reality. OMITTING the block entirely still leaves the lane
+OFF; absent and empty say different things on purpose.
 
 Why conversations.history scans instead of search.messages: Slack's search
 indexer does not reliably hit text inside `<mailto:foo@bar|foo@bar>` link
@@ -29,10 +38,13 @@ from datetime import UTC, datetime
 
 _SLACK_API = "https://slack.com/api"
 
-_NOT_CONFIGURED = "The Slack read lane is not configured for me."
 _NO_CHANNEL = (
     "That channel is not on my allowed list. Channels my bundle allows: {allowed}."
 )
+#: How an empty allowlist describes itself, everywhere it has to. Never
+#: "none": an unrestricted lane that reports its reach as nothing is a lie
+#: the model would dutifully repeat to the person who asked.
+_EVERY_INVITED = "every channel the app is invited to"
 
 # Bounds. Each is a ceiling the tool states out loud when it clips, never a
 # silent cut (the github sidecar's honesty rule).
@@ -107,7 +119,7 @@ class SlackReadToolProvider:
         return token or None
 
     async def tools(self) -> list[dict]:
-        allowed = ", ".join(self.channels) or "none"
+        allowed = ", ".join(self.channels) or _EVERY_INVITED
         return [
             {
                 "name": "slack.find_threads",
@@ -209,18 +221,28 @@ class SlackReadToolProvider:
 
     def _resolve_channel(self, channel: str) -> tuple[str | None, str | None]:
         """(channel_id, None) when the request may proceed, (None, refusal)
-        otherwise. The allowlist is the bundle's declared reach -- enforced
-        here on every call, not just advertised in the tool description."""
-        if not self.channels:
-            return None, _NOT_CONFIGURED
+        otherwise. A non-empty allowlist is the bundle's declared reach --
+        enforced here on every call, not just advertised in the tool
+        description. An EMPTY one declares no reach of its own and defers to
+        Slack: the call goes out, and `not_in_channel` comes back as the
+        refusal if the app was never invited."""
         if not channel:
             if len(self.channels) == 1:
                 return self.channels[0], None
+            if not self.channels:
+                # Nothing to guess from and nothing to list. Saying which
+                # channels are allowed would either print "none" (false) or
+                # print the workspace (unknowable), so ask for the one fact
+                # that settles it.
+                return None, (
+                    "Tell me which channel ID to read -- I can read "
+                    f"{_EVERY_INVITED}, so there is no one channel to assume."
+                )
             return None, (
                 "More than one channel is allowed; tell me which channel ID "
                 f"to read. Channels my bundle allows: {', '.join(self.channels)}."
             )
-        if channel not in self.channels:
+        if self.channels and channel not in self.channels:
             return None, _NO_CHANNEL.format(allowed=", ".join(self.channels))
         return channel, None
 

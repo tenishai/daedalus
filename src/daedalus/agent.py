@@ -347,7 +347,10 @@ class Agent:
 
         # The slack-read sidecar (2026-09-04): same stacking rule. Reach is
         # the bundle's channel allowlist; auth is the pod's own bot token.
-        if spec.slack_read.channels:
+        # `is not None`, not truthiness: an explicit empty list turns the lane
+        # ON with no allowlist (every channel the app was invited to), which
+        # is a different answer from omitting the block (2026-09-23).
+        if spec.slack_read.channels is not None:
             from daedalus.tools.slack_read import SlackReadToolProvider
 
             providers.append(
@@ -1047,6 +1050,8 @@ class Agent:
 
         built: list[Transport] = []
         slack_channels: list[str] = []
+        slack_asked = False  # any slack block at all
+        slack_open = False  # a block that named no channel
         for spec in self.bundle.spec.transports:
             if spec.kind == "cli":
                 built.append(CliTransport())
@@ -1087,27 +1092,38 @@ class Agent:
 
                 options = spec.options()
                 channel = options.get("channel")
-                if not channel:
-                    raise BundleError("slack transport requires a 'channel' (channel ID)")
-                # Collected, not built: every slack block folds into ONE
-                # transport below. Slack Socket Mode load-balances each
-                # event to exactly one open connection per app, so a
-                # transport per channel is not extra coverage -- it is a
-                # lottery where the wrong connection silently drops the
-                # event (2026-09-04, found live).
-                slack_channels.append(str(channel))
+                slack_asked = True
+                # `channel` IS OPTIONAL (2026-09-23 operator ruling). A block
+                # that names none asks for every channel the app has been
+                # invited to -- inviting the app is already the human act
+                # that grants the reach, and demanding the ID again is the
+                # same permission typed twice.
+                if channel:
+                    # Collected, not built: every slack block folds into ONE
+                    # transport below. Slack Socket Mode load-balances each
+                    # event to exactly one open connection per app, so a
+                    # transport per channel is not extra coverage -- it is a
+                    # lottery where the wrong connection silently drops the
+                    # event (2026-09-04, found live).
+                    slack_channels.append(str(channel))
+                else:
+                    slack_open = True
             else:
                 warnings.warn(
                     f"transport {spec.kind!r} is not available in this version; skipping",
                     stacklevel=2,
                 )
-        if slack_channels:
+        if slack_asked:
             from daedalus.transports.slack import SlackTransport
 
+            # Mixed blocks resolve OPEN: naming one channel and also asking
+            # for any channel is a request for any channel, and the narrower
+            # reading would silently ignore the block that asked for more.
+            # The named channel still stands as the primary (escalation home).
             built.append(
                 SlackTransport(
-                    slack_channels[0],
-                    channels=slack_channels,
+                    slack_channels[0] if slack_channels else "",
+                    channels=[] if slack_open else slack_channels,
                     escalation_route=self.bundle.spec.approvals.escalation.route,
                 )
             )
