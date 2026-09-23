@@ -24,6 +24,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # The runner CONTAINER persists between jobs (same machine name across legs), so
+      # setup-python's interpreter in _work/_tool is shared: a bare `pip install` would
+      # let one job's packages satisfy the next job's imports (liminal#103 r1). A fresh
+      # venv per job, first on PATH, keeps each run to what it installed itself.
+      # setup-python stays (proven on this runner) rather than the image's interpreters.
+      - name: Fresh venv for this job
+        run: |
+          python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
+          echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
       - run: pip install -e .[dev]
       - run: ruff check src tests docker
       - run: pytest -q
