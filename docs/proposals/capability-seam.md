@@ -71,7 +71,7 @@ Add a block list applied after the allow ceiling:
 tools:
   allow: ["*"]                      # explicit, visible operator choice
   deny:
-    - "sherlock.holmes_investigate_alert"   # too expensive here
+    - "oncall.investigate_alert"   # too expensive here
     - "files.write"
 ```
 

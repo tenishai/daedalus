@@ -10,8 +10,8 @@ they assign decisions to individuals and reference a specific fleet's
 internal working sessions. None of that is part of daedalus, so
 `capability-seam.md` has been generalized — agents and people referred to
 generically ("the daedalus maintainer", "the operator", "a Slack-resident
-agent") rather than by internal name, and a personal path replaced with a
-placeholder.
+agent") rather than by internal name. Its one personal path was replaced with
+a placeholder earlier, in #71.
 
 Read them for the technical argument, which is real: the entry-point tool-group
 seam, the approval-ceiling analysis, and what the capability card has to carry.
