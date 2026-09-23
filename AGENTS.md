@@ -38,7 +38,8 @@ right.
   `pip install -e .[dev]`; techne lives in the `techne` extra. So every techne-path test
   skips in CI, and `pytest -q` prints `13 skipped` — which is not 13 tests. A module-level
   `importorskip` collapses a whole file into one `s`, and the three guarded files hold
-  **89 tests** between them (#48). A memory-path change can look tested when nothing ran
+  **92 tests** between them — 22 + 23 + 47, counted the way pytest collects, which
+  is not the same as counting `def test_` (#48). A memory-path change can look tested when nothing ran
   it. Install a sibling checkout (`pip install -e ../techne`) before trusting a green run
   on that path, and run `pytest -rs` to see what the summary line hides.
   `tests/test_skip_counts_are_honest.py` keeps those numbers true; it does not make the
