@@ -1,6 +1,10 @@
 # Daedalus — design
 
-**Status: draft for review — no implementation until approved**
+**Status: IMPLEMENTED AND RELEASED.** This began as a pre-implementation design
+doc and is kept as the architectural rationale, not as a plan. daedalus 0.4.0 has
+shipped; §8 was written against live behaviour. Where this document and the code
+disagree, the code is right — `src/daedalus/protocols.py` is the authority on the
+Protocol seams.
 
 Daedalus is an open-source agent construction kit: the assembly layer of the
 tenish family. It defines a declarative **agent bundle** (a directory that *is*
@@ -160,12 +164,12 @@ the loader — never `None`-checked in the hot path:
 
 ```python
 class MemoryStore(Protocol):
-    async def recall(self, query: str, k: int = 5) -> list[Memory]: ...
-    async def commit(self, content: str, kind: str) -> None: ...
+    async def recall(self, query: str, k: int = 5) -> list[str]: ...
+    async def commit(self, content: str, kind: str = "fact") -> None: ...
 
 class ToolProvider(Protocol):
-    async def tools(self) -> list[ToolSpec]: ...
-    async def call(self, name: str, payload: dict, ctx: Context) -> ToolResult: ...
+    async def tools(self) -> list[dict]: ...
+    async def call(self, name: str, payload: dict) -> str: ...
 
 class CheckpointStore(Protocol):     # save/load/drop; enables crash-resume
 class Budget(Protocol):              # reserve/refund; trips 702

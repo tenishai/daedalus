@@ -1,0 +1,69 @@
+# AGENTS.md — daedalus
+
+Instructions for AI coding agents working in this repo. Claude Code loads this via
+`CLAUDE.md` (`@AGENTS.md`); other AGENTS.md-aware tools read it directly.
+
+## Build, test, lint
+
+```bash
+make install    # pip install -e .[dev]
+make test       # pytest -q
+make lint       # ruff check src tests docker
+make check      # lint + test
+```
+
+`testpaths = ["tests", "docker"]` — `docker/test_seeder.py` is a real test file and a
+contributor who only looks in `tests/` will miss it. ruff is `line-length = 100`,
+`select = ["E","F","I","UP","B"]`.
+
+## The rule that shapes everything: the base install stays small
+
+Base dependencies are `pydantic`, `pyyaml`, `click`, `litellm`. That is the whole list.
+techne (memory), liminal (tools) and cabal (orchestration) are **optional extras behind
+Protocol seams** — an agent with no memory and no tool gateway still runs, and that is
+the product, not a degraded mode.
+
+So: **never add a module-scope import of an optional dependency.** `agent.py` defers
+`import fastapi` and `import slack_sdk` inside the functions that need them. Follow that
+pattern; a top-level import turns an extra into a requirement and nothing in CI will tell
+you, because the dev environment has everything installed.
+
+`src/daedalus/protocols.py` is the authority on the seams. `docs/design.md` is the
+rationale and predates much of the implementation — where the two disagree, the code is
+right.
+
+## Traps that have already cost someone
+
+- **techne is not on PyPI.** Without it, every techne-path test skips. `pytest -q` prints
+  `13 skipped`, which is not 13 tests: module-level `importorskip` collapses whole files
+  into one line, and issue #48 measures the real number at 88. A memory-path change can
+  look tested when nothing ran it. Install a sibling checkout (`pip install -e ../techne`)
+  before trusting a green run on that path.
+- **The version lives in `src/daedalus/__init__.py`**, not in `pyproject.toml`
+  (`[tool.hatch.version]` points at it). Bumping pyproject silently does nothing.
+- **`docs/bundle.schema.json` is drift-pinned** to `AgentSpec` by
+  `tests/test_schema.py::test_committed_schema_cannot_drift_from_the_runtime`. Change an
+  `AgentSpec` field and you must run `daedalus schema --out docs/bundle.schema.json` in
+  the same commit or CI fails.
+- **Operator-gate events are matched by exact name**, in the `_OPERATOR_GATE_EVENTS`
+  frozenset at `src/daedalus/cli.py:85` — deliberately not by suffix. The comment there
+  records the incident (#49) where a suffix match swallowed two unrelated events. Adding a
+  gate event means adding it to that set explicitly.
+- **Golden bundles are documentation.** `tests/golden/<name>/` bundles are loaded and
+  round-tripped as tests. A new bundle-format feature wants a golden fixture, not only a
+  unit test.
+
+## Directory boundaries
+
+```
+src/daedalus/
+  protocols.py     the Protocol seams — the contract optional extras implement
+  agent.py         the runtime loop
+  bundle.py        agent.yaml / persona.md / agent-card.json loading
+  transports/      cli, a2a, slack — one file per transport
+  memory/          techne adapter (optional)
+  tools/           tool providers (optional)
+  enforcement.py   the three-tier approval model
+tests/golden/      bundles that are both fixture and worked example
+docs/proposals/    design notes, not documentation of current behaviour
+```

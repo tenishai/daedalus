@@ -9,7 +9,7 @@ where marked GROUND TRUTH.*
 ## 1. Ground truth — what the runtime does today
 
 Correcting some drift between fleet-side sketches and the shipped
-runtime (daedalus v0.4.0.dev0, 155 tests):
+runtime (daedalus 0.4.0, 419 tests):
 
 - **Hybrid is not a proposal — it's how scout runs.** `tools.builtin`
   composes with `provider: mcp|liminal` through `MultiToolProvider`;
