@@ -144,6 +144,63 @@ def test_removed_file_drops_its_entries(tmp_path):
     assert all(s != "seed:facts.md" for (_, _, s) in fake.rows.values())
 
 
+class RefusingDelete(FakeStore):
+    """Like FakeStore, but the store refuses to delete one entry: what a
+    foreign-key constraint on a referenced row looks like from here."""
+
+    def __init__(self, refuse_id: int):
+        super().__init__()
+        self.refuse_id = refuse_id
+        self.refused = 0
+
+    def delete(self, db_path, entry_id):
+        if entry_id == self.refuse_id:
+            self.refused += 1
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+        return super().delete(db_path, entry_id)
+
+
+def test_a_delete_the_store_refuses_does_not_stop_the_sync(tmp_path):
+    """Live, 2026-09-24: one retired seed entry that another entry depended on
+    could not be deleted, the seeder raised, and the agent crash-looped at
+    boot for two days. A removal the store refuses is logged and left for the
+    next boot; the rest of the sync, and the agent, go on."""
+    # Files seed in name order, so facts.md's one entry is id 1.
+    kdir, fake = _bundle(tmp_path), RefusingDelete(refuse_id=1)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    (kdir / "facts.md").unlink()
+    (kdir / "gotchas.md").unlink()
+
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # gotchas.md went; facts.md could not, and is not counted as removed.
+    assert result["removed"] == 1
+    assert fake.refused == 1
+    assert 1 in fake.rows
+    assert all(s != "seed:gotchas.md" for (_, _, s) in fake.rows.values())
+    # Its ledger row stays, so the next boot tries again rather than forgetting.
+    conn = sqlite3.connect(state)
+    rows = conn.execute("SELECT filename FROM seed_state ORDER BY filename").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["facts.md"]
+
+
+def test_a_refused_delete_is_retried_on_the_next_sync(tmp_path):
+    kdir, fake = _bundle(tmp_path), RefusingDelete(refuse_id=1)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    (kdir / "facts.md").unlink()
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    assert 1 in fake.rows
+
+    fake.refuse_id = -1  # the store can delete it now
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result["removed"] == 1
+    assert 1 not in fake.rows
+
+
 def test_state_survives_in_sqlite(tmp_path):
     kdir, fake = _bundle(tmp_path), FakeStore()
     state = tmp_path / "seed_state.db"

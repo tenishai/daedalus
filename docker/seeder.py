@@ -269,8 +269,24 @@ def sync(
                 conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
                 conn.commit()
                 continue
-            for entry_id in row["entry_ids"]:
-                delete_fn(techne_db, entry_id)
+            try:
+                for entry_id in row["entry_ids"]:
+                    delete_fn(techne_db, entry_id)
+            except Exception:
+                # The store refused one of this file's entries (live,
+                # 2026-09-24: a foreign key from an edge another entry drew
+                # to it). Raising here made the whole seeder, and with it the
+                # agent's boot, fail on one retired row for two days. The
+                # ledger row is kept so the next boot tries again, and the
+                # rest of the sync goes on: a stale seed entry is a smaller
+                # wrong than an agent that never starts.
+                log.warning(
+                    "seed: could not remove the entries of %s; keeping its ledger row "
+                    "to retry at the next boot",
+                    filename,
+                    exc_info=True,
+                )
+                continue
             conn.execute("DELETE FROM seed_state WHERE filename = ?", (filename,))
             conn.commit()
             removed += _tally(filename, "removed")
