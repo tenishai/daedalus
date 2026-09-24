@@ -5,15 +5,17 @@ the [README](../../README.md); for the architecture and its rationale, read
 [design.md](../design.md), with `src/daedalus/protocols.py` as the authority on
 the seams.
 
-These documents were written inside a working fleet, and they read like it.
-They name **agents and people by internal names** — Iris, Cinder, Clio, Ember,
-Sherlock, "Rook Remote" — and assign decisions to individuals. None of that is
-explained anywhere in this repo, because none of it is part of daedalus.
+These documents were written inside a working fleet, and they read like it:
+they assign decisions to individuals and reference a specific fleet's
+internal working sessions. None of that is part of daedalus, so
+`capability-seam.md` has been generalized — agents and people referred to
+generically ("the daedalus maintainer", "the operator", "a Slack-resident
+agent") rather than by internal name. Its one personal path was replaced with
+a placeholder earlier, in #71.
 
 Read them for the technical argument, which is real: the entry-point tool-group
 seam, the approval-ceiling analysis, and what the capability card has to carry.
-Treat every name as "some agent" or "the person who owned that decision", and
-treat every build-status claim as dated.
+Treat every build-status claim as dated.
 
 | file | what it is |
 |---|---|
