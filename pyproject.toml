@@ -52,6 +52,8 @@ packages = ["src/daedalus"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "docker"]
+# Import the checkout pytest runs in, not the editable install (#72).
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
