@@ -107,7 +107,11 @@ def test_a2a_transport_wires_with_card_and_options(tmp_path):
     assert transports[0].card == {"name": "x"}
 
 
-def test_slack_transport_requires_channel_and_extra(tmp_path):
+def test_slack_transport_needs_the_extra_but_no_longer_a_channel(tmp_path):
+    """The extra is still a hard requirement -- a bundle asking for Slack
+    without the SDK is a boot failure, not a silent skip. The CHANNEL is not:
+    since 2026-09-23 a block that names none serves every channel the app has
+    been invited to (REPLACES the BundleError this test used to pin)."""
     import importlib.util
 
     import pytest
@@ -126,14 +130,17 @@ def test_slack_transport_requires_channel_and_extra(tmp_path):
     else:
         transport = agent.transports()[0]
         assert transport.channel == "C0123"
+        assert transport.channels == ["C0123"]
 
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: slack\n"
     )
     agent2 = Agent.load(tmp_path, llm=ScriptedLLM())
-    if importlib.util.find_spec("slack_sdk") is not None:
-        with pytest.raises(BundleError, match="channel"):
+    if importlib.util.find_spec("slack_sdk") is None:
+        with pytest.raises(BundleError, match=r"daedalus\[slack\]"):
             agent2.transports()
+    else:
+        assert agent2.transports()[0].channels == []
 
 
 def test_unknown_transport_kind_warns_and_is_skipped(tmp_path):

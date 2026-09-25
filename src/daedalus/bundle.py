@@ -139,12 +139,23 @@ class CloudTrailSpec(_WarnExtra):
 
 class SlackReadSpec(_WarnExtra):
     """A read-only SIDECAR block (2026-09-04): the agent may read
-    conversation threads from exactly the channels listed here, using the
-    pod's own Slack bot token (the transport's env). Slack's channel
-    membership is the second wall -- history reads fail until a human
-    invites the bot. Absent channels = the block is off."""
+    conversation threads from the channels listed here, using the pod's own
+    Slack bot token (the transport's env). Slack's channel membership is the
+    second wall -- history reads fail until a human invites the bot.
 
-    channels: list[str] = Field(default_factory=list)  # channel IDs, e.g. C012ABC
+    Three states, and the difference between the last two is deliberate
+    (2026-09-23 operator ruling):
+      - `channels` absent      -> the block is OFF
+      - `channels: []`         -> ON with no allowlist: every channel the app
+                                  has been invited to. Inviting the app is
+                                  already the human grant; re-typing the IDs
+                                  is the same permission asked for twice.
+      - `channels: [C012ABC]`  -> ON, and exactly those channels
+    """
+
+    # None (absent) and [] (present, empty) must stay distinguishable -- that
+    # is the whole off-vs-open distinction above.
+    channels: list[str] | None = None  # channel IDs, e.g. C012ABC
     token_env: str = "SLACK_BOT_TOKEN"  # same env the slack transport reads
     scan_limit: int = 2000  # history-scan message budget per search
 

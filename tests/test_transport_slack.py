@@ -886,6 +886,183 @@ def test_channels_default_and_dedupe():
     assert multi.channels == ["C1", "C2"]
 
 
+# --- an empty allowlist means every channel the app was invited to -----------
+#
+# 2026-09-23 operator ruling: asking a human to type channel IDs when they
+# must ALSO invite the app to the channel is redundant paperwork. Slack only
+# delivers channel events to apps that have been invited, so membership IS
+# the permission. An empty allowlist therefore opens the transport to every
+# such channel; a non-empty one stays exactly the allowlist it was.
+
+ANY_CH = "C0SOMEWHERE"
+
+
+def make_open(api=None, handler=None):
+    api = api or FakeApi()
+    transport = SlackTransport(channels=[], bot_token="xoxb", app_token="xapp", api=api)
+    transport.user_id = "UBOT"
+    return transport, api, handler or EchoHandler()
+
+
+async def test_empty_allowlist_answers_in_a_channel_it_never_listed():
+    transport, api, handler = make_open()
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="40.1", channel=ANY_CH, channel_type="channel"),
+        handler,
+    )
+    assert api.posts[0][0] == ANY_CH
+    assert "echo:" in api.updates[-1][2]
+
+
+async def test_empty_allowlist_keeps_the_tagged_only_rule():
+    """Open reach is not open season: an unaddressed channel message is
+    still not ours to answer."""
+    transport, api, handler = make_open()
+    await transport.handle_event(
+        event("plain question", ts="41.1", channel=ANY_CH, channel_type="channel"),
+        handler,
+    )
+    assert api.posts == [] and api.reacts == []
+
+
+async def test_empty_allowlist_still_drops_bots_and_subtypes():
+    transport, api, handler = make_open()
+    await transport.handle_event(
+        event("<@UBOT> hi", ts="42.1", channel=ANY_CH, channel_type="channel",
+              bot_id="B1"),
+        handler,
+    )
+    await transport.handle_event(
+        event("<@UBOT> hi", ts="42.2", channel=ANY_CH, channel_type="channel",
+              subtype="message_changed"),
+        handler,
+    )
+    assert api.posts == []
+
+
+async def test_a_non_empty_allowlist_is_still_an_allowlist():
+    """The opt-in behaviour is unchanged for every bundle that names its
+    channels -- the new default only applies when nothing is named."""
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="43.1", channel=ANY_CH, channel_type="channel"),
+        handler,
+    )
+    assert api.posts == []
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="43.2", channel=CH2, channel_type="channel"), handler
+    )
+    assert api.posts[0][0] == CH2
+
+
+async def test_an_approval_with_nowhere_to_ask_is_a_denial_not_a_crash(caplog):
+    """An open transport has no primary channel, and the approver is wired
+    from it before any event arrives -- so a tier-2 gate tripped by a task
+    from ANOTHER transport (a2a, cli) has no thread to ask in. Deny and say
+    why; posting to an empty channel id would raise out of the agent loop."""
+    api = FakeApi()
+    approver = SlackReactionApprover(api, "", timeout=0.01, poll=0.001)
+    with caplog.at_level(logging.INFO):
+        assert await approver.approve("tool.x", {}) is False
+    assert api.posts == []
+    assert "no slack channel" in caplog.text
+
+
+async def test_an_open_transport_keeps_tier2_closed(caplog):
+    """No allowlist means any channel a workspace member invites the app to,
+    and until #53 anyone who can react there would approve. So the DenyAll
+    default stays, even after an event arrives from an unlisted channel."""
+    transport, api, handler = make_open()
+    handler.approver = DenyAll()
+    with caplog.at_level(logging.WARNING):
+        transport._wire_approver(handler)
+    assert isinstance(handler.approver, DenyAll)
+    assert "#53" in caplog.text
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="44.1", channel=ANY_CH, channel_type="channel"),
+        handler,
+    )
+    assert isinstance(handler.approver, DenyAll)
+
+
+async def test_a_listed_transport_still_wires_reaction_approvals():
+    api = FakeApi()
+    transport = SlackTransport("C1", channels=["C1", "C2"], bot_token="x",
+                               app_token="y", api=api)
+    handler = EchoHandler()
+    handler.approver = DenyAll()
+    transport._wire_approver(handler)
+    assert isinstance(handler.approver, SlackReactionApprover)
+    assert handler.approver.channel == "C1"
+
+
+def test_channels_empty_when_no_channel_is_named():
+    open_one = SlackTransport(bot_token="x", app_token="y", api=FakeApi())
+    assert open_one.channels == []
+    assert open_one.channel == ""
+    # An explicit empty list says the same thing, and says it out loud.
+    also_open = SlackTransport("", channels=[], bot_token="x", app_token="y",
+                               api=FakeApi())
+    assert also_open.channels == []
+
+
+def test_the_startup_line_states_which_reach_is_in_force():
+    listed = SlackTransport("C1", channels=["C1", "C2"], bot_token="x", app_token="y",
+                            api=FakeApi())
+    assert listed.listening_line() == "(slack listening in C1, C2)"
+    every = SlackTransport(bot_token="x", app_token="y", api=FakeApi())
+    assert every.listening_line() == (
+        "(slack listening in every channel the app is invited to)"
+    )
+
+
+def test_runner_builds_an_open_transport_from_a_channelless_block(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "transports:\n- kind: slack\n"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([]))
+    slack = [t for t in agent.transports() if isinstance(t, SlackTransport)]
+    assert len(slack) == 1
+    assert slack[0].channels == []
+
+
+def test_one_channelless_block_opens_the_whole_transport(tmp_path, monkeypatch):
+    """Mixed blocks: naming a channel AND asking for any channel is a request
+    for any channel. The named one is still passed as `channel`."""
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "transports:\n- kind: slack\n  channel: C0MAIN\n- kind: slack\n"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([]))
+    slack = [t for t in agent.transports() if isinstance(t, SlackTransport)]
+    assert len(slack) == 1
+    assert slack[0].channels == []
+    assert slack[0].channel == "C0MAIN"
+
+
 def test_runner_folds_every_slack_block_into_one_transport(tmp_path, monkeypatch):
     import sys
     import types
@@ -1109,3 +1286,30 @@ async def test_user_turn_carries_the_slack_sender_id():
 
     await transport.handle_event(event("no user field", ts="400.2", user=None), handler)
     assert transport._threads[(CH, "400.2")].history[0].sender is None
+
+
+def test_a_named_but_empty_channel_fails_boot(tmp_path, monkeypatch):
+    """`channel: ${SLACK_CHANNEL}` with the variable unset must not read as
+    "every channel": omitting the key opens the transport, an empty value is
+    a missing config value."""
+    import sys
+    import types
+
+    import pytest
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle, BundleError
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    monkeypatch.setenv("SLACK_CHANNEL", "")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "transports:\n- kind: slack\n  channel: ${SLACK_CHANNEL}\n"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([]))
+    with pytest.raises(BundleError, match="value is empty"):
+        agent.transports()

@@ -362,6 +362,16 @@ class SlackReactionApprover:
         self.thread_ts: str | None = None  # set per-event by the transport
 
     async def approve(self, action: str, plan: dict) -> bool:
+        # An approver built with an empty channel has nowhere to ask until a
+        # Slack event fills one in, so a gate tripped by a task from ANOTHER
+        # transport first would post to "". The transport no longer wires one
+        # on an open transport (see _wire_approver), but the approver is
+        # public and an explicit caller can still build it that way. Deny,
+        # and name the reason: posting to "" would raise out through the
+        # agent loop, which is a crash dressed up as a policy decision.
+        if not self.channel:
+            log.info("tier-2 %s denied: no slack channel to ask in", action)
+            return False
         text = (
             f":shield: approval required: `{action}`\n"
             f"```{json.dumps(plan, indent=2, default=str)}```\n"
@@ -423,7 +433,7 @@ class SlackReactionApprover:
 class SlackTransport:
     def __init__(
         self,
-        channel: str,
+        channel: str = "",
         *,
         channels: list[str] | None = None,
         bot_token: str | None = None,
@@ -431,15 +441,24 @@ class SlackTransport:
         escalation_route: str | None = None,
         api: SlackApi | None = None,
     ):
-        # `channel` is the PRIMARY channel (escalation posts land there);
+        # `channel` seeds the tier-2 approver before the first event (tier-3
+        # escalations follow `escalation_route`, not this);
         # `channels` is the full allowlist this one transport serves. One
         # transport, one socket, many channels -- Socket Mode load-balances
         # each event to exactly ONE open connection per app, so a second
         # transport on the same app token is not a second channel, it is a
         # coin flip that silently loses half the events (2026-09-04, found
         # live the day a second channel was added).
+        #
+        # AN EMPTY ALLOWLIST IS NOT "NOWHERE", IT IS "EVERYWHERE THE APP WAS
+        # INVITED" (2026-09-23 operator ruling). Typing channel IDs into a
+        # bundle when a human must ALSO invite the app to the channel is the
+        # same permission asked for twice; Slack delivers channel events only
+        # to apps that have been invited, so membership already IS the grant.
+        # Name channels and this stays an allowlist, exactly as before.
         self.channel = channel
-        self.channels = list(dict.fromkeys(channels or [channel]))
+        given = [channel] if channels is None else channels
+        self.channels = list(dict.fromkeys(c for c in given if c))
         self.bot_token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
         self.escalation_route = escalation_route
@@ -486,11 +505,20 @@ class SlackTransport:
 
         socket.socket_mode_request_listeners.append(listener)
         await socket.connect()
-        print(f"(slack listening in {', '.join(self.channels)})", flush=True)
+        print(self.listening_line(), flush=True)
         try:
             await asyncio.Event().wait()
         finally:
             await socket.disconnect()
+
+    def listening_line(self) -> str:
+        """The one line boot prints about this transport's reach. It states
+        which of the two regimes is in force, because "listening in " with
+        nothing after it is how an open transport would read as a broken
+        one."""
+        if not self.channels:
+            return "(slack listening in every channel the app is invited to)"
+        return f"(slack listening in {', '.join(self.channels)})"
 
     async def _gather_images(self, files: list[dict]) -> tuple[list[ImagePart], list[str]]:
         """Filter, bound, and fetch the event's image attachments. Every
@@ -550,8 +578,21 @@ class SlackTransport:
 
     def _wire_approver(self, handler: Handler) -> None:
         """Humans are reachable here, so upgrade a fail-closed DenyAll default
-        to reaction approvals — an explicitly chosen approver is respected."""
+        to reaction approvals — an explicitly chosen approver is respected.
+
+        Not on an open transport. The approver follows the channel of the
+        latest event, and until #53 wires `approvers` from config, anyone who
+        can react there approves. With an allowlist that is a channel the
+        bundle named; with none it is any channel a workspace member invites
+        the app to, including one they own. So an open transport keeps tier-2
+        closed until #53 lands (2026-09-24 operator ruling)."""
         if isinstance(getattr(handler, "approver", None), DenyAll):
+            if not self.channels:
+                log.warning(
+                    "slack transport is open (no channel allowlist): tier-2 "
+                    "approvals stay denied until an approver allowlist exists (#53)"
+                )
+                return
             handler.approver = SlackReactionApprover(self._api, self.channel)
 
     async def handle_event(self, event: dict, handler: Handler) -> None:
@@ -560,13 +601,21 @@ class SlackTransport:
         if event.get("bot_id") or event.get("subtype"):
             return
         if (
-            event.get("channel") not in self.channels
+            self.channels
+            and event.get("channel") not in self.channels
             and event.get("channel_type") not in {"im", "mpim"}
         ):
             # Not one of our channels. DMs and group DMs pass regardless --
             # they are full-delivery by design (the tagged-only ruling was
             # about channels), and Slack only delivers them to apps the
             # user deliberately opened a conversation with.
+            #
+            # No allowlist at all skips this gate entirely: the event only
+            # reached us because the app is a member of that channel, and
+            # membership is the permission. Every filter below still runs --
+            # bots, subtypes, dedupe, and above all the tagged-only rule.
+            # It does widen who could approve a tier-2 action, which is why
+            # _wire_approver keeps tier-2 closed on an open transport.
             return
         if self._not_for_us_in_channel(event):
             # Tagged-only in channels: a message event that does not mention

@@ -72,8 +72,10 @@ model:
     per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
 
 transports:
-  - kind: slack
-    channel: "#pr-reviews"
+  - kind: slack                         # no channel = every channel the app
+                                        # is invited to (see 2.4); name one
+                                        # with `channel: C012ABC` to pin an
+                                        # allowlist instead
   - kind: a2a
     port: 9200
   - kind: cli                           # always available for `daedalus chat`
@@ -204,6 +206,35 @@ back. Persona constant, transport variable:
   dedupe on `(channel, ts)`, thread-state store, reaction lifecycle
   (👀 → ✅/❌), graceful degradation when tokens are absent, reconnect
   supervision. Clean-room implementation.
+
+  Every `kind: slack` block folds into **one** transport: Socket Mode
+  load-balances each event to exactly one open connection per app, so a
+  second transport on the same app token is a coin flip, not a second
+  channel. Its reach is the union of the `channel` values those blocks
+  name — **and naming none is the default**: an empty allowlist answers in
+  every channel the app has been invited to, because inviting the app is
+  already the human act that grants the reach and re-typing the ID is the
+  same permission asked for twice (2026-09-23). Boot says which regime is
+  in force (`(slack listening in C1, C2)` vs `(slack listening in every
+  channel the app is invited to)`). In channels and private groups the
+  tagged-only rule still holds (only an `app_mention`, or a plain message
+  that mentions this bot, is answered), DMs keep full delivery, and
+  bots/subtypes/duplicates are still dropped. Widening *where* does change
+  who could approve: tier-2 reaction approvals follow the channel of the
+  latest event, and until #53 wires an approver allowlist anyone who can
+  react there approves. So an open transport keeps tier-2 **closed**
+  (`DenyAll`) and says so at boot; a listed transport wires reaction
+  approvals as before (2026-09-24). A `channel` key whose value is empty
+  (an unset `${VAR}`) fails boot rather than reading as open. Mixed blocks
+  resolve open. Tier-3 escalations go wherever `approvals.escalation.route`
+  says (`slack:<channel>` for Slack), never to the first named channel.
+
+  The read-only companion, `tools.slack_read`, takes the same three-state
+  shape: the block absent is **off**, `channels: []` is **on with no
+  allowlist** (every invited channel, with Slack's own `not_in_channel` as
+  the refusal), and `channels: [C012ABC]` is on and exactly those. Boot
+  prints a line when the lane is open, because a bundle that wrote
+  `channels: []` before 2026-09-23 got the lane off and now gets it on.
 
 FastAPI stays at the edge: nothing below a transport imports it.
 

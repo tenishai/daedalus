@@ -237,6 +237,84 @@ def test_tools_listing_names_the_allowed_channels():
     assert "C0AAA" in find["description"] and "C0BBB" in find["description"]
 
 
+# --- an empty allowlist means every channel the app was invited to -----------
+#
+# 2026-09-23 operator ruling, the read lane's half of it. The bundle may turn
+# the lane on without naming channels; Slack's own membership is then the
+# wall, and its `not_in_channel` is the refusal the agent reads.
+
+
+def test_empty_allowlist_reads_a_channel_it_never_listed(monkeypatch):
+    fake = FakeSlack(
+        replies={"171.0": [{"ts": "171.0", "text": "root"}]},
+        permalink="https://slack.example/p3",
+    )
+    provider = _provider(fake, monkeypatch, channels=())
+    out = asyncio.run(
+        provider.call("slack.read_thread", {"channel": "C0ANY", "thread_ts": "171.0"})
+    )
+    assert "root" in out
+    assert "not on my allowed list" not in out
+
+
+def test_empty_allowlist_lets_slack_be_the_refusal(monkeypatch):
+    """No membership means no read -- but the wall is Slack's, and the agent
+    is told so in the lane's own plain sentence."""
+    fake = FakeSlack(errors={"conversations.replies": "not_in_channel"})
+    provider = _provider(fake, monkeypatch, channels=())
+    out = asyncio.run(
+        provider.call("slack.read_thread", {"channel": "C0CLOSED", "thread_ts": "171.0"})
+    )
+    assert "Could not read that thread" in out
+    assert "not_in_channel" in out
+
+
+def test_empty_allowlist_asks_which_channel_without_claiming_none(monkeypatch):
+    provider = _provider(FakeSlack(), monkeypatch, channels=())
+    out = asyncio.run(provider.call("slack.find_threads", {"email": "j@a.io"}))
+    assert "which channel" in out
+    assert "every channel the app is invited to" in out
+    assert "none" not in out.lower()
+    assert not provider._client.calls
+
+
+def test_tools_listing_says_every_invited_channel_when_open():
+    provider = SlackReadToolProvider([], client=FakeSlack())
+    find = next(s for s in asyncio.run(provider.tools()) if s["name"] == "slack.find_threads")
+    assert "every channel the app is invited to" in find["description"]
+    assert "none" not in find["description"].lower()
+
+
+def test_bundle_wiring_opens_the_lane_on_an_empty_channel_list(tmp_path, capsys):
+    """`channels: []` written out loud turns the lane ON with no allowlist;
+    omitting the block entirely still leaves it OFF."""
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import ScriptedLLM
+
+    def _bundle(name: str, slack_read: str):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "agent.yaml").write_text(
+            "name: x\nmodel:\n  id: m\n"
+            "tools:\n  provider: none\n"
+            f"{slack_read}"
+            "  allow:\n    - slack.find_threads\n    - slack.read_thread\n"
+        )
+        (home / "agent-card.json").write_text("{}")
+        (home / "persona.md").write_text("You are x.")
+        return Agent(Bundle.load(home), llm=ScriptedLLM("done"))
+
+    opened = _bundle("open", "  slack_read:\n    channels: []\n")
+    assert isinstance(opened.tools, SlackReadToolProvider)
+    assert opened.tools.channels == []
+    # `channels: []` meant OFF before 2026-09-23; boot says it is now ON.
+    assert "slack read lane open" in capsys.readouterr().out
+
+    absent = _bundle("off", "")
+    assert not isinstance(absent.tools, SlackReadToolProvider)
+
+
 def test_bundle_wiring_composes_the_sidecar(tmp_path):
     from daedalus.agent import Agent
     from daedalus.bundle import Bundle
