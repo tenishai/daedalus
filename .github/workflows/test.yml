@@ -6,8 +6,43 @@ on:
   pull_request:
 
 jobs:
+  # SELF-HOSTED on mash1 (2026-09-23): hosted Actions stopped on a billing failure.
+  # The `if:` below is DEFENCE IN DEPTH for honest fork PRs, not a security boundary:
+  # for `pull_request` GitHub runs the PR's own copy of this file, so a fork can
+  # delete the guard (see the ATTACKER-EDITABLE block in tenishai/techne's test.yml).
+  # The real controls: this repo is private, "Run workflows from fork pull requests"
+  # is off (checked 2026-09-23), and the runner stops before the go-public flip.
   test:
+    runs-on: [self-hosted, linux, x64, daedalus-ci]
+    timeout-minutes: 20  # one small runner; a hung job starves it
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The runner CONTAINER persists between jobs (same machine name across legs), so
+      # setup-python's interpreter in _work/_tool is shared: a bare `pip install` would
+      # let one job's packages satisfy the next job's imports (liminal#103 r1). A fresh
+      # venv per job, first on PATH, keeps each run to what it installed itself.
+      # setup-python stays (proven on this runner) rather than the image's interpreters.
+      - name: Fresh venv for this job
+        run: |
+          python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
+          echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
+      - run: pip install -e .[dev]
+      - run: ruff check src tests docker
+      - run: pytest -q
+
+  # ---- fork-pr: the complement of test's guard, on a hosted runner -----------
+  fork-pr:
     runs-on: ubuntu-latest
+    # Techne's spelling (#590): the literal negation, so an event nobody named still
+    # gets a hosted run instead of an empty Checks tab.
+    if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
