@@ -1,9 +1,14 @@
 name: test
 
+# test and fork-pr together cover every push to main and every PR (fork-pr
+# runs whatever test's guard excludes) -- no private deps, no secret required.
+# techne runs on workflow_dispatch only: it clones the techne sibling without a
+# token, so it works once techne is public (agora#27).
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   # SELF-HOSTED on mash1 (2026-09-23): hosted Actions stopped on a billing failure.
@@ -34,8 +39,64 @@ jobs:
           python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
       - run: pip install -e .[dev]
-      - run: ruff check src tests docker
+      - run: ruff check src tests docker conftest.py
       - run: pytest -q
+
+  # ---- techne: full suite with the private techne sibling --------------------
+  # Manual dispatch only. The sibling checkout carries no token: while techne is
+  # private this job cannot clone it, and once it is public it can -- then
+  # consider `|| github.ref == 'refs/heads/main'`. Same shape as cabal's and
+  # liminal's integration legs (agora#27, agora#31).
+  #
+  # DAEDALUS_REQUIRE_TECHNE=1 turns the three techne-path files' module-level
+  # `pytest.importorskip("techne", ...)` from a quiet skip into a hard failure
+  # (conftest.py) -- this leg exists to run those 92 tests, so a broken
+  # or missing install must fail the build rather than report them skipped (#48).
+  techne:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, daedalus-ci]
+    timeout-minutes: 20  # one small runner; a hung job starves it
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - name: Checkout daedalus
+        uses: actions/checkout@v4
+        with:
+          path: daedalus
+
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          repository: tenishai/techne
+          path: techne
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Same fresh-venv reasoning as the test job above: the runner container
+      # persists between jobs, so a bare `pip install` would let this job's
+      # techne install leak into the next job's (liminal#103 r1).
+      - name: Fresh venv for this job
+        run: |
+          python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
+          echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
+
+      - name: Install (with techne sibling)
+        working-directory: daedalus
+        run: |
+          pip install -e "../techne[vectors]"
+          pip install -e ".[dev]"
+
+      - name: Ruff lint
+        working-directory: daedalus
+        run: ruff check src tests docker conftest.py
+
+      - name: Pytest (full suite, techne required)
+        working-directory: daedalus
+        env:
+          DAEDALUS_REQUIRE_TECHNE: "1"
+        run: pytest -q
 
   # ---- fork-pr: the complement of test's guard, on a hosted runner -----------
   fork-pr:
@@ -52,5 +113,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[dev]
-      - run: ruff check src tests docker
+      - run: ruff check src tests docker conftest.py
       - run: pytest -q

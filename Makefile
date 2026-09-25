@@ -7,7 +7,7 @@ test:
 	pytest -q
 
 lint:
-	ruff check src tests docker
+	ruff check src tests docker conftest.py
 
 check: lint test
 

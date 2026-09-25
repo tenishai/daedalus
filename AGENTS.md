@@ -8,7 +8,7 @@ Instructions for AI coding agents working in this repo. Claude Code loads this v
 ```bash
 make install    # pip install -e .[dev]
 make test       # pytest -q
-make lint       # ruff check src tests docker
+make lint       # ruff check src tests docker conftest.py
 make check      # lint + test
 ```
 
@@ -34,16 +34,22 @@ right.
 
 ## Traps that have already cost someone
 
-- **techne is not on PyPI, and CI does not install it.** The workflow runs
-  `pip install -e .[dev]`; techne lives in the `techne` extra. So every techne-path test
-  skips in CI, and `pytest -q` prints `13 skipped` — which is not 13 tests. A module-level
-  `importorskip` collapses a whole file into one `s`, and the three guarded files hold
-  **92 tests** between them — 22 + 23 + 47, counted the way pytest collects, which
-  is not the same as counting `def test_` (#48). A memory-path change can look tested when nothing ran
-  it. Install a sibling checkout (`pip install -e ../techne`) before trusting a green run
-  on that path, and run `pytest -rs` to see what the summary line hides.
-  `tests/test_skip_counts_are_honest.py` keeps those numbers true; it does not make the
-  tests run.
+- **techne is not on PyPI, and the default `test` CI job does not install it.** That job
+  runs `pip install -e .[dev]`; techne lives in the `techne` extra. So every techne-path
+  test skips there, and `pytest -q` prints `13 skipped` — which is not 13 tests. A
+  module-level `importorskip` collapses a whole file into one `s`, and the three guarded
+  files hold **92 tests** between them — 22 + 23 + 47, counted the way pytest collects,
+  which is not the same as counting `def test_` (#48). A memory-path change can look
+  tested when nothing ran it. Install a sibling checkout (`pip install -e ../techne`)
+  before trusting a green run on that path, and run `pytest -rs` to see what the summary
+  line hides. `tests/test_skip_counts_are_honest.py` keeps those numbers true; it does
+  not make the tests run.
+
+  A separate `techne` CI job installs the sibling and runs the full suite with
+  `DAEDALUS_REQUIRE_TECHNE=1`, which turns a missing/broken techne import into a hard
+  failure instead of a skip (`conftest.py`) — but it is `workflow_dispatch`-only
+  and clones techne without a token, so it can only run once `tenishai/techne` is public
+  (agora#27). Until then, the 92 tests are covered locally, not in CI on every PR.
 - **The version lives in `src/daedalus/__init__.py`**, not in `pyproject.toml`
   (`[tool.hatch.version]` points at it). Bumping pyproject silently does nothing.
 - **`docs/bundle.schema.json` is drift-pinned** to `AgentSpec` by
