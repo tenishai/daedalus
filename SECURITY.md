@@ -48,7 +48,12 @@ daedalus is the runtime agents run in. In scope:
 - untrusted input: anything a chat message, transcript or tool result can use
   to change an agent's instructions, memory or permissions (prompt injection
   that crosses a trust boundary the runtime claims to enforce);
-- the Slack transport and other connectors: channel and allowlist controls.
+- the a2a HTTP transport and its bearer/JWT authentication: anything that
+  reaches an agent without passing it;
+- the Slack transport and other connectors: anything that lets someone other
+  than an intended approver approve an action. The approver allowlist isn't
+  wired from configuration yet (daedalus#53), so "anyone who can react can
+  approve" is a known gap, not a new report.
 
 **Out of scope:** vulnerabilities in third-party dependencies (please report
 those upstream, and tell us if we ship an affected version), and problems that
