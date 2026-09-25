@@ -11,6 +11,10 @@ than it claims.
 
 Local dev and the plain `test` job never set this, so `pytest.importorskip`
 there behaves exactly as before -- techne is optional without it.
+
+Lives at the repo root, not tests/, so the hook fires for testpaths' other
+root (`docker/`) too, and for a bare `pytest docker/test_seeder.py` -- a
+conftest.py inside tests/ is not an ancestor of docker/ and would not load.
 """
 
 from __future__ import annotations

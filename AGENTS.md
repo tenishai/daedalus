@@ -47,7 +47,7 @@ right.
 
   A separate `techne` CI job installs the sibling and runs the full suite with
   `DAEDALUS_REQUIRE_TECHNE=1`, which turns a missing/broken techne import into a hard
-  failure instead of a skip (`tests/conftest.py`) — but it is `workflow_dispatch`-only
+  failure instead of a skip (`conftest.py`) — but it is `workflow_dispatch`-only
   and clones techne without a token, so it can only run once `tenishai/techne` is public
   (agora#27). Until then, the 92 tests are covered locally, not in CI on every PR.
 - **The version lives in `src/daedalus/__init__.py`**, not in `pyproject.toml`

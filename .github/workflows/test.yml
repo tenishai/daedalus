@@ -1,6 +1,7 @@
 name: test
 
-# test/fork-pr run on every push to main and every PR -- no private deps, no secret required.
+# test and fork-pr together cover every push to main and every PR (fork-pr
+# runs whatever test's guard excludes) -- no private deps, no secret required.
 # techne runs on workflow_dispatch only: it clones the techne sibling without a
 # token, so it works once techne is public (agora#27).
 on:
@@ -49,7 +50,7 @@ jobs:
   #
   # DAEDALUS_REQUIRE_TECHNE=1 turns the three techne-path files' module-level
   # `pytest.importorskip("techne", ...)` from a quiet skip into a hard failure
-  # (tests/conftest.py) -- this leg exists to run those 92 tests, so a broken
+  # (conftest.py) -- this leg exists to run those 92 tests, so a broken
   # or missing install must fail the build rather than report them skipped (#48).
   techne:
     if: github.event_name == 'workflow_dispatch'
