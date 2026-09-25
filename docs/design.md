@@ -216,17 +216,25 @@ back. Persona constant, transport variable:
   already the human act that grants the reach and re-typing the ID is the
   same permission asked for twice (2026-09-23). Boot says which regime is
   in force (`(slack listening in C1, C2)` vs `(slack listening in every
-  channel the app is invited to)`). Widening *where* changes nothing about
-  *what*: in channels and private groups the tagged-only rule still holds
-  (only an `app_mention`, or a plain message that mentions this bot, is
-  answered), DMs keep full delivery, and bots/subtypes/duplicates are still
-  dropped. Mixed blocks resolve open; the first named channel stays the
-  primary, which is where tier-3 escalation posts land.
+  channel the app is invited to)`). In channels and private groups the
+  tagged-only rule still holds (only an `app_mention`, or a plain message
+  that mentions this bot, is answered), DMs keep full delivery, and
+  bots/subtypes/duplicates are still dropped. Widening *where* does change
+  who could approve: tier-2 reaction approvals follow the channel of the
+  latest event, and until #53 wires an approver allowlist anyone who can
+  react there approves. So an open transport keeps tier-2 **closed**
+  (`DenyAll`) and says so at boot; a listed transport wires reaction
+  approvals as before (2026-09-24). A `channel` key whose value is empty
+  (an unset `${VAR}`) fails boot rather than reading as open. Mixed blocks
+  resolve open. Tier-3 escalations go wherever `approvals.escalation.route`
+  says (`slack:<channel>` for Slack), never to the first named channel.
 
   The read-only companion, `tools.slack_read`, takes the same three-state
   shape: the block absent is **off**, `channels: []` is **on with no
   allowlist** (every invited channel, with Slack's own `not_in_channel` as
-  the refusal), and `channels: [C012ABC]` is on and exactly those.
+  the refusal), and `channels: [C012ABC]` is on and exactly those. Boot
+  prints a line when the lane is open, because a bundle that wrote
+  `channels: []` before 2026-09-23 got the lane off and now gets it on.
 
 FastAPI stays at the edge: nothing below a transport imports it.
 
