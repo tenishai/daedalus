@@ -1097,3 +1097,15 @@ async def test_a_timeout_after_an_OFF_LIST_tick_does_not_claim_there_was_no_reac
 
     assert "off-list" in caplog.text
     assert "no reaction" not in caplog.text
+
+
+async def test_user_turn_carries_the_slack_sender_id():
+    """PR #37 review, issue 2: the learnings lane attributes only to the
+    sender the transport recorded, so the transport must record it."""
+    transport, api, handler = make()
+    await transport.handle_event(event("the gate is manual", ts="400.1", user="U0ALICE"), handler)
+    task = transport._threads[(CH, "400.1")]
+    assert task.history[0].sender == "U0ALICE"
+
+    await transport.handle_event(event("no user field", ts="400.2", user=None), handler)
+    assert transport._threads[(CH, "400.2")].history[0].sender is None

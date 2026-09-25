@@ -99,3 +99,15 @@ async def test_journal_strips_image_bytes_and_leaves_a_marker(tmp_path):
     assert "images" not in entry
     assert "QUFB" not in str(rows[0]["history"])
     assert entry["text"] == "look at this [shared 1 image(s)]"
+
+
+async def test_journal_keeps_the_sender_and_omits_it_when_unknown(tmp_path):
+    agent = make_agent(llm=ScriptedLLM("ok"), memory=FakeMemory(tmp_path / "techne.db"))
+    task = Task.from_text("hi")
+    task.history[0].sender = "U0ALICE"
+
+    await agent.handle_task(task)
+
+    history = recent(tmp_path / "journal.db")[0]["history"]
+    assert history[0] == {"role": "user", "text": "hi", "sender": "U0ALICE"}
+    assert history[1].keys() == {"role", "text"}
