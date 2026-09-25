@@ -43,9 +43,30 @@ class ReasonCode(IntEnum):
     ESCALATION = 704
 
 
+class ImagePart(BaseModel):
+    """One image attached to a Message (agent-vision spec, wave 3).
+
+    `data` is the raw base64 string -- no `data:` URI prefix; the LLM
+    message builder (agent._messages) adds the provider wrapper. The A2A
+    wire format deliberately does NOT carry these (task_to_a2a serializes
+    text only; agent-to-agent image passing is a registered follow-up).
+    """
+
+    data: str
+    media_type: str
+
+
 class Message(BaseModel):
     role: Literal["user", "agent"]
     text: str
+    # None (not []) so every existing Message(role=..., text=...) call site
+    # -- from_text, reply, the cli/a2a/slack transports -- is untouched.
+    images: list[ImagePart] | None = None
+    # Who sent a user turn, as the transport knows them (Slack: the event's
+    # user id, e.g. "U0123ABC"). None when the transport has no identity
+    # to give. The learnings lane attributes candidates only to these ids,
+    # never to a name the model read out of the text.
+    sender: str | None = None
 
 
 class Task(BaseModel):

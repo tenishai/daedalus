@@ -56,7 +56,7 @@ async def test_budget_exhaustion_fails_with_702_and_keeps_checkpoint(tmp_path):
     task = await agent.handle_task(Task.from_text("go"))
     assert task.state is TaskState.FAILED
     assert task.reason_code is ReasonCode.BUDGET_EXHAUSTED
-    assert "budget exhausted (25)" in task.agent_text()
+    assert "token budget (25)" in task.agent_text()
     assert await store.load(task.id) is not None  # kept for re-fund + resume
 
 

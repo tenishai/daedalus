@@ -36,6 +36,35 @@ def split_reasoning(text: str) -> tuple[str, str]:
     return reasoning.replace(_THINK_OPEN, "").strip(), answer.strip()
 
 
+def cache_marked(messages: list[dict], model: str) -> list[dict]:
+    """Anthropic prompt-cache breakpoint on the system message.
+
+    The system block (persona + recalled context + notices) plus the tool
+    schemas are the stable prefix an agent re-sends on EVERY turn of every
+    task -- live traces showed them costing ~20k tokens per turn at full
+    price. Anthropic caches everything up to a cache_control marker, and
+    the provider orders tools BEFORE system in the prefix, so one marker
+    on the system content covers both. Cache reads bill at a tenth of
+    fresh input; within a task every turn after the first hits.
+
+    Only claude-family routes understand the marker (direct, vertex_ai/,
+    bedrock/); every other model gets the messages back untouched. The
+    original list is never mutated -- callers may reuse it.
+    """
+    if "claude" not in model.lower():
+        return messages
+    if not messages or messages[0].get("role") != "system":
+        return messages
+    content = messages[0].get("content")
+    if not isinstance(content, str):
+        return messages
+    marked = dict(messages[0])
+    marked["content"] = [
+        {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+    ]
+    return [marked, *messages[1:]]
+
+
 class LiteLLMClient:
     def __init__(
         self,
@@ -63,7 +92,11 @@ class LiteLLMClient:
         except ImportError as exc:  # pragma: no cover
             raise LLMError("litellm is not installed — pip install daedalus") from exc
 
-        kwargs: dict = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
+        kwargs: dict = {
+            "model": self.model,
+            "messages": cache_marked(messages, self.model),
+            "max_tokens": self.max_tokens,
+        }
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if self.api_key:

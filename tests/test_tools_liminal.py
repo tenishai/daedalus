@@ -80,18 +80,34 @@ async def test_aclose_closes_owned_client():
 @pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not installed")
 async def test_no_auth_mode_sends_placeholder_not_empty_bearer(monkeypatch):
     """Finding #16: empty token -> 'Bearer ' (trailing space) -> httpx
-    'Illegal header value' on real transports. Placeholder when unset."""
+    'Illegal header value' on real transports. Placeholder when unset.
+    The placeholder is set by _refresh_bearer, which tools() and call()
+    run before every use, so the real client is read after one."""
     provider = LiminalToolProvider("http://x")
-    client = provider._ensure()
-    assert client._token() == "no-auth"
+    await provider._refresh_bearer()
+    assert provider._ensure()._token() == "no-auth"
 
     monkeypatch.setenv("LIMINAL_TOKEN", "real-token")
     provider2 = LiminalToolProvider("http://x", token_env="LIMINAL_TOKEN")
+    await provider2._refresh_bearer()
     assert provider2._ensure()._token() == "real-token"
 
     monkeypatch.setenv("LIMINAL_TOKEN", "")
     provider3 = LiminalToolProvider("http://x", token_env="LIMINAL_TOKEN")
+    await provider3._refresh_bearer()
     assert provider3._ensure()._token() == "no-auth"
+
+
+@pytest.mark.parametrize("token_env", [None, "LIM_TOKEN"])
+async def test_static_mode_empty_token_becomes_placeholder_bearer(monkeypatch, token_env):
+    """Finding #16 without liminal installed (CI): an unset or empty token
+    becomes the "no-auth" placeholder bearer before the first call. The
+    fake client never sees the header, so this pins the bearer the real
+    client's token_provider reads, not the header itself."""
+    monkeypatch.setenv("LIM_TOKEN", "")
+    provider = LiminalToolProvider("http://gw", token_env=token_env, client=FakeLiminalClient())
+    await provider.call("scratchpad.set", {})
+    assert provider._bearer == "no-auth"
 
 
 def test_provider_liminal_without_install_fails_at_load(tmp_path):
@@ -213,3 +229,126 @@ async def test_family_reunion_daedalus_agent_uses_liminal_gateway(tmp_path, monk
     assert get_result["role"] == "tool"
     assert "hello liminal" in get_result["content"]
     await provider.aclose()
+
+
+# --- the gateway token exchange (external-MCP arc, C1) ------------------------
+
+
+class _ExchangeResp:
+    def __init__(self, status_code, body=None):
+        self.status_code = status_code
+        self._body = body or {}
+
+    def json(self):
+        return self._body
+
+
+class FakeExchange:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.posts = []  # (url, headers)
+
+    async def post(self, url, headers=None):
+        self.posts.append((url, dict(headers or {})))
+        return self.responses.pop(0)
+
+    async def aclose(self):
+        pass
+
+
+def _exchanging(monkeypatch, responses, colleague="colleague-jwt"):
+    if colleague is None:
+        monkeypatch.delenv("CABAL_COLLEAGUE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("CABAL_COLLEAGUE_TOKEN", colleague)
+    return LiminalToolProvider(
+        "http://gw",
+        token_env="CABAL_COLLEAGUE_TOKEN",
+        client=FakeLiminalClient(),
+        exchange_url="http://cabal/",
+        exchange_client=FakeExchange(responses),
+    )
+
+
+def _minted(expires_in_s):
+    from datetime import UTC, datetime, timedelta
+
+    return _ExchangeResp(200, {
+        "access_token": "liminal-token",
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=expires_in_s)).isoformat(),
+    })
+
+
+async def test_exchange_swaps_the_colleague_token_and_caches(monkeypatch):
+    provider = _exchanging(monkeypatch, [_minted(900)])
+    await provider.call("scratchpad.set", {"k": "v"})
+    await provider.call("scratchpad.get", {})
+    ex = provider._exchange_client
+    # One exchange serves both calls; the colleague token authenticated it,
+    # on the switchboard's exchange route.
+    assert len(ex.posts) == 1
+    url, headers = ex.posts[0]
+    assert url == "http://cabal/auth/liminal-token"
+    assert headers["Authorization"] == "Bearer colleague-jwt"
+    assert provider._bearer == "liminal-token"
+
+
+async def test_near_expiry_re_exchanges(monkeypatch):
+    provider = _exchanging(monkeypatch, [_minted(30), _minted(900)])
+    await provider.call("scratchpad.set", {})
+    await provider.call("scratchpad.get", {})
+    assert len(provider._exchange_client.posts) == 2
+
+
+async def test_refused_exchange_names_the_switchboard(monkeypatch):
+    provider = _exchanging(monkeypatch, [_ExchangeResp(403)])
+    with pytest.raises(RuntimeError, match="http://cabal.*403"):
+        await provider.call("scratchpad.set", {})
+
+
+async def test_missing_colleague_token_reads_as_wiring_error(monkeypatch):
+    provider = _exchanging(monkeypatch, [], colleague=None)
+    with pytest.raises(RuntimeError, match="CABAL_COLLEAGUE_TOKEN"):
+        await provider.tools()
+
+
+async def test_unreadable_expiry_fails_safe_toward_re_exchange(monkeypatch):
+    bad = _ExchangeResp(200, {"access_token": "t1", "expires_at": "whenever"})
+    provider = _exchanging(monkeypatch, [bad, _minted(900)])
+    await provider.call("scratchpad.set", {})
+    await provider.call("scratchpad.get", {})
+    assert len(provider._exchange_client.posts) == 2
+
+
+async def test_static_mode_reads_env_once_and_never_exchanges(monkeypatch):
+    monkeypatch.setenv("LIM_TOKEN", "static-bearer")
+    provider = LiminalToolProvider(
+        "http://gw", token_env="LIM_TOKEN", client=FakeLiminalClient()
+    )
+    await provider.call("scratchpad.set", {})
+    assert provider._bearer == "static-bearer"
+    assert provider._exchange_client is None
+
+
+def test_sidecar_stacks_beside_a_primary(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "liminal", types.ModuleType("liminal"))
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "tools:\n  provider: none\n"
+        "  liminal:\n    url: http://gw\n"
+        "    token_env: CABAL_COLLEAGUE_TOKEN\n"
+        "    exchange_url: http://cabal\n"
+        "  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"))
+    assert isinstance(agent.tools, LiminalToolProvider)
+    assert agent.tools.exchange_url == "http://cabal"
