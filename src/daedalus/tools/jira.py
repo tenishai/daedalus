@@ -34,6 +34,15 @@ _COMMENT_CHARS = 2_000
 _BODY_CHARS = 4_000
 
 
+def _capped_int(value, default: int, cap: int) -> int:
+    """A model-supplied count, capped. Anything int() cannot read ("five",
+    a list) reads as the default rather than raising into the agent loop."""
+    try:
+        return min(int(value or default), cap)
+    except (TypeError, ValueError):
+        return min(default, cap)
+
+
 class JiraToolProvider:
     def __init__(
         self,
@@ -217,7 +226,7 @@ class JiraToolProvider:
     ) -> str:
         if not text or len(text.strip()) < 3:
             return "I need at least a few characters of text to search for."
-        count = min(int(limit or _SEARCH_DEFAULT), _SEARCH_CAP)
+        count = _capped_int(limit, _SEARCH_DEFAULT, _SEARCH_CAP)
         params: dict = {"text": text.strip(), "limit": count}
         if created_after:
             params["created_after"] = created_after
