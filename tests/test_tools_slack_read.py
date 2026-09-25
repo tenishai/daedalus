@@ -285,7 +285,7 @@ def test_tools_listing_says_every_invited_channel_when_open():
     assert "none" not in find["description"].lower()
 
 
-def test_bundle_wiring_opens_the_lane_on_an_empty_channel_list(tmp_path):
+def test_bundle_wiring_opens_the_lane_on_an_empty_channel_list(tmp_path, capsys):
     """`channels: []` written out loud turns the lane ON with no allowlist;
     omitting the block entirely still leaves it OFF."""
     from daedalus.agent import Agent
@@ -308,6 +308,8 @@ def test_bundle_wiring_opens_the_lane_on_an_empty_channel_list(tmp_path):
     opened = _bundle("open", "  slack_read:\n    channels: []\n")
     assert isinstance(opened.tools, SlackReadToolProvider)
     assert opened.tools.channels == []
+    # `channels: []` meant OFF before 2026-09-23; boot says it is now ON.
+    assert "slack read lane open" in capsys.readouterr().out
 
     absent = _bundle("off", "")
     assert not isinstance(absent.tools, SlackReadToolProvider)

@@ -362,12 +362,13 @@ class SlackReactionApprover:
         self.thread_ts: str | None = None  # set per-event by the transport
 
     async def approve(self, action: str, plan: dict) -> bool:
-        # An open transport (no allowlist, so no primary channel) wires this
-        # approver with an empty channel, and the real one is filled in from
-        # each Slack event. A gate tripped by a task from ANOTHER transport
-        # before any Slack event has arrived therefore has nowhere to ask.
-        # Deny, and name the reason: posting to "" would raise out through
-        # the agent loop, which is a crash dressed up as a policy decision.
+        # An approver built with an empty channel has nowhere to ask until a
+        # Slack event fills one in, so a gate tripped by a task from ANOTHER
+        # transport first would post to "". The transport no longer wires one
+        # on an open transport (see _wire_approver), but the approver is
+        # public and an explicit caller can still build it that way. Deny,
+        # and name the reason: posting to "" would raise out through the
+        # agent loop, which is a crash dressed up as a policy decision.
         if not self.channel:
             log.info("tier-2 %s denied: no slack channel to ask in", action)
             return False
@@ -440,7 +441,8 @@ class SlackTransport:
         escalation_route: str | None = None,
         api: SlackApi | None = None,
     ):
-        # `channel` is the PRIMARY channel (escalation posts land there);
+        # `channel` seeds the tier-2 approver before the first event (tier-3
+        # escalations follow `escalation_route`, not this);
         # `channels` is the full allowlist this one transport serves. One
         # transport, one socket, many channels -- Socket Mode load-balances
         # each event to exactly ONE open connection per app, so a second
@@ -576,8 +578,21 @@ class SlackTransport:
 
     def _wire_approver(self, handler: Handler) -> None:
         """Humans are reachable here, so upgrade a fail-closed DenyAll default
-        to reaction approvals — an explicitly chosen approver is respected."""
+        to reaction approvals — an explicitly chosen approver is respected.
+
+        Not on an open transport. The approver follows the channel of the
+        latest event, and until #53 wires `approvers` from config, anyone who
+        can react there approves. With an allowlist that is a channel the
+        bundle named; with none it is any channel a workspace member invites
+        the app to, including one they own. So an open transport keeps tier-2
+        closed until #53 lands (2026-09-24 operator ruling)."""
         if isinstance(getattr(handler, "approver", None), DenyAll):
+            if not self.channels:
+                log.warning(
+                    "slack transport is open (no channel allowlist): tier-2 "
+                    "approvals stay denied until an approver allowlist exists (#53)"
+                )
+                return
             handler.approver = SlackReactionApprover(self._api, self.channel)
 
     async def handle_event(self, event: dict, handler: Handler) -> None:
@@ -598,9 +613,9 @@ class SlackTransport:
             # No allowlist at all skips this gate entirely: the event only
             # reached us because the app is a member of that channel, and
             # membership is the permission. Every filter below still runs --
-            # bots, subtypes, dedupe, and above all the tagged-only rule --
-            # so "any channel" widens WHERE we may answer, never WHAT we
-            # answer.
+            # bots, subtypes, dedupe, and above all the tagged-only rule.
+            # It does widen who could approve a tier-2 action, which is why
+            # _wire_approver keeps tier-2 closed on an open transport.
             return
         if self._not_for_us_in_channel(event):
             # Tagged-only in channels: a message event that does not mention

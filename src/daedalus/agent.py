@@ -353,6 +353,15 @@ class Agent:
         if spec.slack_read.channels is not None:
             from daedalus.tools.slack_read import SlackReadToolProvider
 
+            if not spec.slack_read.channels:
+                # Bundles that wrote `channels: []` got the lane OFF before
+                # 2026-09-23 and get it ON now. Say so at boot, the same way
+                # the transport's listening_line() does for its own reach.
+                print(
+                    "(slack read lane open: every channel the app is invited to)",
+                    flush=True,
+                )
+
             providers.append(
                 SlackReadToolProvider(
                     spec.slack_read.channels,
@@ -1092,6 +1101,17 @@ class Agent:
 
                 options = spec.options()
                 channel = options.get("channel")
+                if "channel" in options and not channel:
+                    # Named but empty -- typically `channel: ${SLACK_CHANNEL}`
+                    # with the variable unset. Omitting the key asks for every
+                    # channel; an empty value is a missing config value, and
+                    # reading it as "open" would hand the agent its widest
+                    # reach on a typo. Fail boot, as a missing channel did
+                    # before the 2026-09-23 ruling.
+                    raise BundleError(
+                        "slack transport names a 'channel' but its value is empty; "
+                        "set it, or omit the key to answer in every invited channel"
+                    )
                 slack_asked = True
                 # `channel` IS OPTIONAL (2026-09-23 operator ruling). A block
                 # that names none asks for every channel the app has been
@@ -1119,7 +1139,9 @@ class Agent:
             # Mixed blocks resolve OPEN: naming one channel and also asking
             # for any channel is a request for any channel, and the narrower
             # reading would silently ignore the block that asked for more.
-            # The named channel still stands as the primary (escalation home).
+            # The first named channel is still passed as `channel`, but on an
+            # open transport nothing reads it: it only seeds the tier-2
+            # approver, which an open transport does not wire.
             built.append(
                 SlackTransport(
                     slack_channels[0] if slack_channels else "",
