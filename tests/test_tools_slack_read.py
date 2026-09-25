@@ -255,3 +255,21 @@ def test_bundle_wiring_composes_the_sidecar(tmp_path):
 
     assert isinstance(agent.tools, P)
     assert agent.tools.channels == ["C0AAA"]
+
+
+@pytest.mark.parametrize("arg", [{"days": "a month"}, {"limit": "five"}, {"days": [30]}])
+def test_unreadable_counts_read_as_defaults_not_errors(monkeypatch, arg):
+    fake = FakeSlack(history_pages=[{"messages": []}])
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(
+        provider.call("slack.find_threads", {"email": "jdoe@acme.io", **arg})
+    )
+    assert "No threads mentioning jdoe@acme.io" in out
+
+
+def test_unreadable_window_reads_as_default(monkeypatch):
+    fake = FakeSlack(history_pages=[{"messages": []}])
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(provider.call("slack.find_threads", {
+        "email": "jdoe@acme.io", "around": "2026-07-10", "window_days": "wide"}))
+    assert "2026-07-10 +/- 7 days" in out

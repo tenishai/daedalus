@@ -211,3 +211,10 @@ def test_find_issues_passes_the_created_window_through(monkeypatch):
     _, _, params = provider._client.sent[0]
     assert params["created_after"] == "2026-07-03"
     assert params["created_before"] == "2026-07-17"
+
+
+def test_find_issues_unreadable_limit_reads_as_default(monkeypatch):
+    provider = _provider([("/jira/search", _Resp(200, {"issues": []}))], monkeypatch)
+    asyncio.run(provider.call("jira.find_issues", {"text": "jdoe@acme.io", "limit": "lots"}))
+    _, _, params = provider._client.sent[0]
+    assert params["limit"] == 10

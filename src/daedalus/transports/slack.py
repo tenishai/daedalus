@@ -4,11 +4,13 @@ Carries the battle scars of two prior production Slack agents as
 requirements, not code:
 - dedupe on (channel, ts): Slack redelivers, and mentions arrive as both
   `message` and `app_mention`
-- tagged-only in channels, enforced runtime-side: the manifest stopped
-  subscribing to channel messages (2026-08-31 ruling: in channels, only an
-  explicit @-mention reaches the agent), but an app created from an OLDER
-  manifest still delivers them -- and then two agents in one channel both
-  answer a mention aimed at one. So the transport enforces the same rule
+- tagged-only in channels, enforced runtime-side (2026-08-31 ruling: in
+  channels, only an explicit @-mention reaches the agent). Any app whose
+  manifest subscribes to channel messages -- this repo's
+  docs/slack-app-manifest.yaml still does (message.channels,
+  message.groups), as do apps created from older manifests -- delivers
+  them, and then two agents in one channel both answer a mention aimed
+  at one. So the transport enforces the same rule
   itself: in a channel or group, respond only when this bot is mentioned
   (an app_mention event is proof by delivery -- Slack sends it only to the
   mentioned app). DMs and group DMs keep full message delivery.
@@ -615,7 +617,15 @@ class SlackTransport:
         # included) stays in history forever and every later turn re-sends
         # it, failing identically each time (thread bricked).
         history_len = len(task.history)
-        task.history.append(Message(role="user", text=text, images=images or None))
+        sender = event.get("user")
+        task.history.append(
+            Message(
+                role="user",
+                text=text,
+                images=images or None,
+                sender=sender if isinstance(sender, str) else None,
+            )
+        )
         task.state = TaskState.SUBMITTED
 
         approver = getattr(handler, "approver", None)
@@ -665,10 +675,11 @@ class SlackTransport:
         """The tagged-only rule, enforced runtime-side. True = drop.
 
         Applies only to plain `message` events in channels and private
-        groups (channel_type "channel"/"group"): those reach us solely
-        through a STALE app manifest (the current one does not subscribe to
-        them), and answering unaddressed ones is how two agents in one
-        channel both reply to a mention aimed at one. An `app_mention`
+        groups (channel_type "channel"/"group"): those reach us only when
+        the app's manifest subscribes to message.channels/message.groups
+        (docs/slack-app-manifest.yaml does), and answering unaddressed
+        ones is how two agents in one channel both reply to a mention
+        aimed at one. An `app_mention`
         event always passes -- Slack delivers it only to the mentioned app,
         which is stronger proof than anything we could compute. DMs and
         group DMs ("im"/"mpim") always pass: messaging an agent directly IS

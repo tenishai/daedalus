@@ -60,8 +60,9 @@ def record(
     now: datetime | None = None,
 ) -> None:
     """Record one completed conversation, upserted per context_id.
-    `history` is a list of {"role": ..., "text": ...} dicts
-    (Message.model_dump() shape). Slack keeps one Task per thread, so
+    `history` is a list of {"role": ..., "text": ...} dicts, plus
+    "sender" when the transport knew who spoke (Message.model_dump()
+    shape). Slack keeps one Task per thread, so
     Task.history accumulates across turns -- each write's history is a
     superset of the last one recorded under the same context_id. Without
     the upsert an N-turn thread would leave N rows, each holding a bigger

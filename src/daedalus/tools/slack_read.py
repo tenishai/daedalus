@@ -47,6 +47,15 @@ _THREAD_CHARS = 8_000
 _PAGE_SIZE = 200
 
 
+def _capped_int(value, default: int, cap: int) -> int:
+    """A model-supplied count, capped. Anything int() cannot read ("five",
+    a list) reads as the default rather than raising into the agent loop."""
+    try:
+        return min(int(value or default), cap)
+    except (TypeError, ValueError):
+        return min(default, cap)
+
+
 def _fmt_ts(ts: str | float | None) -> str:
     try:
         return datetime.fromtimestamp(float(ts or 0), tz=UTC).strftime(
@@ -271,7 +280,7 @@ class SlackReadToolProvider:
         channel_id, refusal = self._resolve_channel(channel)
         if refusal is not None:
             return refusal
-        count = min(int(limit or _FIND_DEFAULT), _FIND_CAP)
+        count = _capped_int(limit, _FIND_DEFAULT, _FIND_CAP)
 
         # The window is enforced by the Slack API itself (history's
         # oldest/latest bounds), never by walking pages until they age out
@@ -289,12 +298,12 @@ class SlackReadToolProvider:
                     f"I could not read {around!r} as a date -- use ISO form, "
                     'e.g. "2026-07-10".'
                 )
-            half = min(int(window_days or _WINDOW_DEFAULT), _WINDOW_CAP) * 86400
+            half = _capped_int(window_days, _WINDOW_DEFAULT, _WINDOW_CAP) * 86400
             oldest_bound = anchor.timestamp() - half
             latest_bound = anchor.timestamp() + half
             reach = f"{around} +/- {half // 86400} days"
         else:
-            span = min(int(days or _DAYS_DEFAULT), _DAYS_CAP)
+            span = _capped_int(days, _DAYS_DEFAULT, _DAYS_CAP)
             oldest_bound = self._now() - span * 86400
             latest_bound = None
             reach = f"the last {span} days"

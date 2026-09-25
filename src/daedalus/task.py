@@ -62,6 +62,11 @@ class Message(BaseModel):
     # None (not []) so every existing Message(role=..., text=...) call site
     # -- from_text, reply, the cli/a2a/slack transports -- is untouched.
     images: list[ImagePart] | None = None
+    # Who sent a user turn, as the transport knows them (Slack: the event's
+    # user id, e.g. "U0123ABC"). None when the transport has no identity
+    # to give. The learnings lane attributes candidates only to these ids,
+    # never to a name the model read out of the text.
+    sender: str | None = None
 
 
 class Task(BaseModel):

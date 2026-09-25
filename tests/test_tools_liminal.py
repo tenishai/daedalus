@@ -80,18 +80,34 @@ async def test_aclose_closes_owned_client():
 @pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not installed")
 async def test_no_auth_mode_sends_placeholder_not_empty_bearer(monkeypatch):
     """Finding #16: empty token -> 'Bearer ' (trailing space) -> httpx
-    'Illegal header value' on real transports. Placeholder when unset."""
+    'Illegal header value' on real transports. Placeholder when unset.
+    The placeholder is set by _refresh_bearer, which tools() and call()
+    run before every use, so the real client is read after one."""
     provider = LiminalToolProvider("http://x")
-    client = provider._ensure()
-    assert client._token() == "no-auth"
+    await provider._refresh_bearer()
+    assert provider._ensure()._token() == "no-auth"
 
     monkeypatch.setenv("LIMINAL_TOKEN", "real-token")
     provider2 = LiminalToolProvider("http://x", token_env="LIMINAL_TOKEN")
+    await provider2._refresh_bearer()
     assert provider2._ensure()._token() == "real-token"
 
     monkeypatch.setenv("LIMINAL_TOKEN", "")
     provider3 = LiminalToolProvider("http://x", token_env="LIMINAL_TOKEN")
+    await provider3._refresh_bearer()
     assert provider3._ensure()._token() == "no-auth"
+
+
+@pytest.mark.parametrize("token_env", [None, "LIM_TOKEN"])
+async def test_static_mode_empty_token_becomes_placeholder_bearer(monkeypatch, token_env):
+    """Finding #16 without liminal installed (CI): an unset or empty token
+    becomes the "no-auth" placeholder bearer before the first call. The
+    fake client never sees the header, so this pins the bearer the real
+    client's token_provider reads, not the header itself."""
+    monkeypatch.setenv("LIM_TOKEN", "")
+    provider = LiminalToolProvider("http://gw", token_env=token_env, client=FakeLiminalClient())
+    await provider.call("scratchpad.set", {})
+    assert provider._bearer == "no-auth"
 
 
 def test_provider_liminal_without_install_fails_at_load(tmp_path):

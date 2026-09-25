@@ -542,7 +542,9 @@ class Agent:
                 # image bytes would balloon storage (megabytes per row) and mean
                 # nothing to the summarizer. Strip them; a marker keeps the fact
                 # that images were shared visible to the day's summary.
-                entry = message.model_dump(exclude={"images"})
+                # exclude_none: a message with no sender journals exactly
+                # the {"role", "text"} shape it always did.
+                entry = message.model_dump(exclude={"images"}, exclude_none=True)
                 if message.images:
                     entry["text"] = (
                         f"{entry['text']} [shared {len(message.images)} image(s)]".strip()
@@ -671,7 +673,9 @@ class Agent:
                 state=TaskState.FAILED,
                 reason=ReasonCode.TOOL_BLOCKED,
             )
-        candidates = learnings.parse_candidates(response.text or "")
+        candidates = learnings.parse_candidates(
+            response.text or "", turns=learnings.turns_by_speaker(messages[-1]["content"])
+        )
         self._emit("learnings_proposed", count=len(candidates))
         return task.reply(json.dumps({"candidates": candidates}))
 
