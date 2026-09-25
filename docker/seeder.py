@@ -256,7 +256,12 @@ def sync(
             by_kind[kind][key] += n
             return n
 
-        for filename in set(state) - set(current):
+        # Sorted, not just set-differenced: iteration order over a set of
+        # strings varies with the process's hash seed. An unsorted order
+        # would make which removal lands first (and so what a refusal
+        # blocks) a coin flip from one run to the next -- both at boot and
+        # in a test asserting on it. Sorting pins it.
+        for filename in sorted(set(state) - set(current)):
             row = state[filename]
             if row["lane"] == "live" and row["deleted"]:
                 # A fast-lane delete's tombstone, and the image no longer
@@ -273,13 +278,16 @@ def sync(
                 for entry_id in row["entry_ids"]:
                     delete_fn(techne_db, entry_id)
             except Exception:
-                # The store refused one of this file's entries (live,
-                # 2026-09-24: a foreign key from an edge another entry drew
-                # to it). Raising here made the whole seeder, and with it the
-                # agent's boot, fail on one retired row for two days. The
-                # ledger row is kept so the next boot tries again, and the
-                # rest of the sync goes on: a stale seed entry is a smaller
-                # wrong than an agent that never starts.
+                # The store could not remove one of this file's entries
+                # (live, 2026-09-24: a foreign key from an edge another
+                # entry drew to it) -- or something else entirely raised
+                # (a locked db, a bug); either way, treating it as an
+                # unremovable entry and retrying later is the safer
+                # default. Raising here made the whole seeder, and with it
+                # the agent's boot, fail on one retired row for two days.
+                # The ledger row is kept so the next boot tries again, and
+                # the rest of the sync goes on: a stale seed entry is a
+                # smaller wrong than an agent that never starts.
                 log.warning(
                     "seed: could not remove the entries of %s; keeping its ledger row "
                     "to retry at the next boot",
@@ -442,8 +450,24 @@ def sync(
                 unchanged += _tally(filename, "unchanged")
                 continue
 
-            for entry_id in prior["entry_ids"]:
-                delete_fn(techne_db, entry_id)
+            try:
+                for entry_id in prior["entry_ids"]:
+                    delete_fn(techne_db, entry_id)
+            except Exception:
+                # Same refusal as the removal pass above, but here the file
+                # was edited, not deleted -- reseeding now would store fresh
+                # content while the refused old entry lingers with no
+                # ledger row pointing at it. Keep the prior row instead (its
+                # sha256 and entry_ids describe the last content that fully
+                # made it in) and retry the whole delete-then-reseed at the
+                # next boot, rather than leave the file half-migrated.
+                log.warning(
+                    "seed: could not remove the prior entries of %s; keeping its "
+                    "ledger row to retry at the next boot",
+                    filename,
+                    exc_info=True,
+                )
+                continue
             seeded += _tally(filename, "seeded", _reseed(filename, path, digest))
 
         result = {"seeded": seeded, "removed": removed, "unchanged": unchanged}
