@@ -8,7 +8,7 @@ Instructions for AI coding agents working in this repo. Claude Code loads this v
 ```bash
 make install    # pip install -e .[dev]
 make test       # pytest -q
-make lint       # ruff check src tests docker
+make lint       # ruff check src tests docker conftest.py
 make check      # lint + test
 ```
 
