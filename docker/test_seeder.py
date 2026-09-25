@@ -201,6 +201,74 @@ def test_a_refused_delete_is_retried_on_the_next_sync(tmp_path):
     assert 1 not in fake.rows
 
 
+def test_a_refused_delete_logs_a_warning(tmp_path, caplog):
+    """The docstring above says a refusal 'is logged'; nothing enforced
+    that a silent swallow -- log.warning deleted, continue left standing --
+    would still pass."""
+    kdir, fake = _bundle(tmp_path), RefusingDelete(refuse_id=1)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    (kdir / "facts.md").unlink()
+    (kdir / "gotchas.md").unlink()
+
+    caplog.set_level(logging.WARNING, logger="seeder")
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert "facts.md" in caplog.text
+    assert "keeping its ledger row" in caplog.text
+
+
+def test_an_edit_the_store_refuses_does_not_stop_the_sync(tmp_path):
+    """Same failure as the removal case above, but for an edit rather than
+    a delete: the changed-file path ran delete_fn over a file's old entries
+    with no guard, so a refusal there raised straight out of sync() --
+    the same crash-loop this PR fixes for a removed file, reproduced for
+    an edited one instead."""
+    kdir, fake = _bundle(tmp_path), RefusingDelete(refuse_id=1)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    facts_row_before = _seed_state_row(state, "facts.md")
+
+    (kdir / "facts.md").write_text("## C\ngamma revised\n")
+    (kdir / "gotchas.md").write_text("## A2\nalpha revised\n\n## B\nbeta\n")
+
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    # gotchas.md's edit went through (both its sections); facts.md's could
+    # not, and wasn't counted as seeded.
+    assert fake.refused == 1
+    assert result["seeded"] == 2
+    assert 1 in fake.rows  # facts.md's original entry is still there, untouched
+    assert fake.rows[1][0] == "## C\ngamma"
+    assert any(
+        c.startswith("## A2") for c, _, s in fake.rows.values() if s == "seed:gotchas.md"
+    )
+    # facts.md's ledger row is untouched -- still the OLD sha/entry_ids --
+    # so the next sync sees it as changed again and retries the
+    # delete-then-reseed, rather than treating the refusal as done.
+    assert _seed_state_row(state, "facts.md") == facts_row_before
+
+
+def test_a_refused_edit_is_retried_on_the_next_sync(tmp_path):
+    kdir, fake = _bundle(tmp_path), RefusingDelete(refuse_id=1)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    (kdir / "facts.md").write_text("## C\ngamma revised\n")
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+    assert 1 in fake.rows  # still refused, still there
+
+    fake.refuse_id = -1  # the store can delete it now
+    result = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete)
+
+    assert result["seeded"] == 1
+    assert 1 not in fake.rows
+    assert any(
+        c.startswith("## C\ngamma revised")
+        for c, _, s in fake.rows.values()
+        if s == "seed:facts.md"
+    )
+
+
 def test_state_survives_in_sqlite(tmp_path):
     kdir, fake = _bundle(tmp_path), FakeStore()
     state = tmp_path / "seed_state.db"
