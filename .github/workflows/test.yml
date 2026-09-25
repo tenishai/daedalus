@@ -1,6 +1,6 @@
 name: test
 
-# test/fork-pr run on every push and PR -- no private deps, no secret required.
+# test/fork-pr run on every push to main and every PR -- no private deps, no secret required.
 # techne runs on workflow_dispatch only: it clones the techne sibling without a
 # token, so it works once techne is public (agora#27).
 on:
