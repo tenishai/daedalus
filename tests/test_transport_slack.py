@@ -44,6 +44,9 @@ class FakeApi:
         self.unreacts: list[tuple[str, str]] = []
         self._reactions_script = list(reactions_script or [])
         self._ts = 0
+        self.downloaded: list[str] = []
+        self.downloads_return: bytes = b""
+        self.downloads_raise: Exception | None = None
 
     async def post(self, channel, text, thread_ts=None):
         self.posts.append((channel, text, thread_ts))
@@ -66,12 +69,20 @@ class FakeApi:
         step = self._reactions_script.pop(0) if self._reactions_script else []
         return [item if isinstance(item, tuple) else (item, ["U-someone"]) for item in step]
 
+    async def download_file(self, url):
+        self.downloaded.append(url)
+        if self.downloads_raise is not None:
+            raise self.downloads_raise
+        return self.downloads_return
+
 
 class EchoHandler:
     def __init__(self):
         self.approver = DenyAll()
+        self.tasks: list[Task] = []
 
     async def handle_task(self, task: Task) -> Task:
+        self.tasks.append(task)
         return task.reply(f"echo: {task.user_text()}")
 
 
@@ -128,7 +139,7 @@ async def test_thread_continuity_one_task_per_thread():
     transport, api, handler = make()
     await transport.handle_event(event("first", ts="50.0"), handler)
     await transport.handle_event(event("second", ts="51.0", thread="50.0"), handler)
-    task = transport._threads["50.0"]
+    task = transport._threads[(CH, "50.0")]
     assert [m.text for m in task.history] == ["first", "echo: first", "second", "echo: second"]
     assert len(transport._threads) == 1
 
@@ -274,6 +285,181 @@ async def test_tool_blocked_task_gets_x_reaction_and_reply_text():
     await transport.handle_event(event("deploy", ts="200.0"), handler)
     assert ("200.0", "x") in api.reacts
     assert _reply_text(api) == "A rule stopped this task: blocked by z.py: nope."
+
+
+def _file(name="pic.png", mimetype="image/png", size=1024, url="https://files.example/pic"):
+    return {"name": name, "mimetype": mimetype, "size": size, "url_private": url}
+
+
+async def test_image_attachment_reaches_the_task_as_base64():
+    transport, api, handler = make()
+    api.downloads_return = b"hello"
+    await transport.handle_event(event("what is this?", ts="200.1", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.text == "what is this?"
+    assert message.images is not None
+    assert message.images[0].media_type == "image/png"
+    assert message.images[0].data == "aGVsbG8="  # base64("hello")
+    assert api.downloaded == ["https://files.example/pic"]
+
+
+async def test_image_only_message_still_reaches_the_agent():
+    transport, api, handler = make()
+    api.downloads_return = b"x"
+    await transport.handle_event(event("", ts="200.2", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.text == "(image)"
+    assert message.images is not None
+
+
+async def test_non_image_file_is_skipped_with_a_note():
+    transport, api, handler = make()
+    pdf = _file(name="report.pdf", mimetype="application/pdf")
+    await transport.handle_event(
+        event("see attached", ts="200.3", files=[pdf]),
+        handler,
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(attached file report.pdf skipped -- not an image)" in message.text
+    assert api.downloaded == []
+
+
+async def test_oversized_image_is_skipped_before_download():
+    transport, api, handler = make()
+    await transport.handle_event(
+        event("big one", ts="200.4", files=[_file(size=4 * 1024 * 1024)]), handler
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image pic.png skipped -- larger than the 3.5 MB limit)" in message.text
+    assert api.downloaded == []
+
+
+async def test_fifth_image_is_dropped_with_a_count_note():
+    transport, api, handler = make()
+    api.downloads_return = b"x"
+    files = [_file(name=f"p{i}.png", url=f"https://files.example/p{i}") for i in range(5)]
+    await transport.handle_event(event("album", ts="200.5", files=files), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is not None and len(message.images) == 4
+    assert "(1 additional image(s) skipped -- max 4 per message)" in message.text
+
+
+async def test_download_failure_skips_that_image_with_a_note():
+    transport, api, handler = make()
+    api.downloads_raise = RuntimeError("403")
+    await transport.handle_event(event("broken", ts="200.6", files=[_file()]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image pic.png could not be fetched)" in message.text
+
+
+async def test_metadata_size_lie_is_caught_after_download():
+    """The event's own file metadata is sender-influenced and can lie (or
+    be missing) -- the real ceiling is enforced against the bytes actually
+    downloaded, not just the claimed size."""
+    transport, api, handler = make()
+    api.downloads_return = b"x" * (int(3.5 * 1024 * 1024) + 1)
+    await transport.handle_event(
+        event("big lie", ts="200.61", files=[_file(size=1024)]), handler
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image pic.png skipped -- larger than the 3.5 MB limit)" in message.text
+
+
+async def test_unsupported_image_mimetype_gets_a_format_note():
+    transport, api, handler = make()
+    heic = _file(name="photo.heic", mimetype="image/heic")
+    await transport.handle_event(event("look", ts="200.62", files=[heic]), handler)
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(image photo.heic skipped -- unsupported image format)" in message.text
+
+
+async def test_file_with_no_mimetype_could_not_be_read():
+    transport, api, handler = make()
+    await transport.handle_event(
+        event("mystery", ts="200.63", files=[{"id": "F123"}]), handler
+    )
+
+    message = handler.tasks[-1].history[0]
+    assert message.images is None
+    assert "(attached file file could not be read)" in message.text
+
+
+async def test_download_file_refuses_non_slack_host():
+    import pytest
+
+    from daedalus.transports.slack import SlackApi
+
+    api = SlackApi(object())
+    with pytest.raises(ValueError, match="non-Slack host"):
+        await api.download_file("https://evil.example.com/steal")
+
+
+async def test_failed_turn_is_rolled_back_so_the_thread_never_bricks():
+    """A handler that raises must not leave the rejected message (and any
+    images it carried) stuck in history forever -- otherwise every later
+    turn re-sends it and fails identically."""
+
+    class RaisesOnce:
+        def __init__(self):
+            self.approver = DenyAll()
+            self.calls = 0
+
+        async def handle_task(self, task):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("rejected")
+            task.state = TaskState.COMPLETED
+            return task
+
+    handler = RaisesOnce()
+    transport, api, _ = make(handler=handler)
+    await transport.handle_event(event("bad image", ts="300.1"), handler)
+    task = transport._threads[(CH, "300.1")]
+    assert task.history == []
+
+    await transport.handle_event(event("plain text", ts="300.2", thread="300.1"), handler)
+    task = transport._threads[(CH, "300.1")]
+    assert len(task.history) == 1
+    assert task.history[0].text == "plain text"
+
+
+async def test_note_alone_still_forms_a_message():
+    transport, api, handler = make()
+    await transport.handle_event(
+        event("", ts="200.7", files=[_file(name="notes.txt", mimetype="text/plain")]), handler
+    )
+    # A skipped non-image with no text is still a contentless message... except
+    # the skip NOTE is content the sender should see. Ruling: notes alone DO
+    # form a message (the agent explains what it could not read), so the task
+    # exists and its text is the note.
+    message = handler.tasks[-1].history[0]
+    assert "(attached file notes.txt skipped -- not an image)" in message.text
+
+
+async def test_empty_text_and_no_files_is_genuinely_ignored():
+    """Unlike the note-alone case above, an event with NO attachments at
+    all and no text carries nothing to react to or gather -- this is the
+    one truly-empty case, and it must never reach the handler or leave a
+    reaction behind."""
+    transport, api, handler = make()
+    await transport.handle_event(event("", ts="200.71"), handler)
+    assert handler.tasks == []
+    assert api.reacts == []
+    assert api.unreacts == []
+    assert api.posts == []
 
 
 def test_serve_without_tokens_is_a_clean_error():
@@ -516,6 +702,263 @@ def test_update_failure_still_lands_the_reply_as_a_post():
     assert any("echo" in text for text in replies)
 
 
+# ---- shared-channel addressing (two agents, one channel) -------------------
+#
+# The manifest is tagged-only in channels (2026-08-31 ruling): current apps
+# receive only app_mention there. But an app created from an OLDER manifest
+# still delivers channel messages -- observed live as two agents in one
+# channel both answering a mention aimed at one. The transport now enforces
+# the ruling itself: in "channel"/"group", a plain message event is answered
+# only when this bot is mentioned; app_mention always passes (Slack delivers
+# it only to the mentioned app); "im"/"mpim" keep full delivery. Unknown self
+# fails to app_mention-only, so the failure mode is one answer, never two.
+
+SELF_ID = "USELF"
+OTHER = "UBOTX"
+
+
+class AddressingApi(FakeApi):
+    async def auth_test(self):
+        return SELF_ID
+
+
+def make_addressed():
+    api = AddressingApi()
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=api)
+    transport.user_id = SELF_ID
+    handler = EchoHandler()
+    return transport, api, handler
+
+
+async def test_channel_mention_of_someone_else_is_ignored():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(
+        event(f"<@{OTHER}> what do you do?", channel_type="channel"), handler
+    )
+    assert api.posts == []
+
+
+async def test_channel_mention_of_self_is_answered():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> what do you do?", channel_type="channel"), handler
+    )
+    assert len(api.posts) == 1
+
+
+async def test_channel_message_with_no_mention_is_ignored():
+    """Tagged-only: an unaddressed channel message only ever arrives through
+    a stale app manifest, and answering it is how every agent in the channel
+    piles on. Silence is the ruling."""
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event("plain question", channel_type="channel"), handler)
+    assert api.posts == []
+
+
+async def test_channel_mention_of_self_among_others_is_answered():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> <@{OTHER}> both?", channel_type="channel"), handler
+    )
+    assert len(api.posts) == 1
+
+
+async def test_private_group_follows_the_same_rule():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event("hello?", channel_type="group"), handler)
+    assert api.posts == []
+
+
+async def test_app_mention_always_passes_even_with_unknown_self():
+    transport, api, handler = make_addressed()
+    transport.user_id = None
+    await transport.handle_event(
+        event(f"<@{OTHER}> hi", channel_type="channel", type="app_mention"), handler
+    )
+    assert len(api.posts) == 1
+
+
+async def test_unknown_self_drops_plain_channel_messages():
+    """auth.test failed: a channel message cannot be verified as ours. The
+    mentioned agent still answers via its own app_mention -- one answer,
+    never two."""
+    transport, api, handler = make_addressed()
+    transport.user_id = None
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> hi", channel_type="channel"), handler
+    )
+    assert api.posts == []
+
+
+async def test_dm_and_group_dm_keep_full_delivery():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event("direct ask", ts="6.1", channel_type="im"), handler)
+    await transport.handle_event(event("group ask", ts="6.2", channel_type="mpim"), handler)
+    assert len(api.posts) == 2
+
+
+async def test_events_without_channel_type_keep_the_old_behavior():
+    transport, api, handler = make_addressed()
+    await transport.handle_event(event("legacy shaped event"), handler)
+    assert len(api.posts) == 1
+
+
+async def test_gated_message_is_not_marked_seen():
+    """A gated message must not consume its dedupe slot -- the app_mention
+    for the same ts still gets answered."""
+    transport, api, handler = make_addressed()
+    await transport.handle_event(
+        event(f"<@{OTHER}> hi", ts="4.2", channel_type="channel"), handler
+    )
+    assert api.posts == []
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> hi", ts="4.2", channel_type="channel", type="app_mention"),
+        handler,
+    )
+    assert len(api.posts) == 1
+
+
+# --- one transport, many channels (2026-09-04, the second-channel outage) -----
+
+CH2 = "C0SECOND"
+
+
+def make_multi(api=None, handler=None):
+    api = api or FakeApi()
+    transport = SlackTransport(
+        CH, channels=[CH, CH2], bot_token="xoxb", app_token="xapp", api=api
+    )
+    transport.user_id = "UBOT"
+    return transport, api, handler or EchoHandler()
+
+
+async def test_second_channel_mention_is_answered_in_its_own_channel():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> audit please", ts="20.1", channel=CH2, channel_type="channel"),
+        handler,
+    )
+    # The placeholder, the reply, and both reactions all landed in CH2 --
+    # never the primary channel.
+    assert api.posts[0][0] == CH2
+    assert api.updates[-1][0] == CH2
+    assert "echo:" in api.updates[-1][2]
+
+
+async def test_unlisted_channel_is_still_dropped():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> hello", ts="21.1", channel="C0EVIL", channel_type="channel"),
+        handler,
+    )
+    assert not api.posts and not api.reacts
+
+
+async def test_dm_passes_without_being_listed():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("hello", ts="22.1", channel="D0DM", channel_type="im"), handler
+    )
+    assert api.posts[0][0] == "D0DM"
+    assert api.updates[-1][0] == "D0DM"
+
+
+async def test_same_thread_ts_in_two_channels_stay_separate_tasks():
+    transport, api, handler = make_multi()
+    await transport.handle_event(
+        event("<@UBOT> one", ts="30.5", channel=CH, channel_type="channel"), handler
+    )
+    await transport.handle_event(
+        event("<@UBOT> two", ts="30.5", channel=CH2, channel_type="channel"), handler
+    )
+    # Same ts, different channels: two tasks, two replies, no dedupe collision.
+    assert len(api.updates) == 2
+    assert {u[0] for u in api.updates} == {CH, CH2}
+    assert len(transport._threads) == 2
+
+
+def test_channels_default_and_dedupe():
+    lone = SlackTransport("C1", bot_token="x", app_token="y", api=FakeApi())
+    assert lone.channels == ["C1"]
+    multi = SlackTransport(
+        "C1", channels=["C1", "C1", "C2"], bot_token="x", app_token="y", api=FakeApi()
+    )
+    assert multi.channels == ["C1", "C2"]
+
+
+def test_runner_folds_every_slack_block_into_one_transport(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        "transports:\n"
+        "- kind: slack\n  channel: C0MAIN\n"
+        "- kind: slack\n  channel: C0SECOND\n"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(
+        Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([])
+    )
+    transports = agent.transports()
+    slack = [t for t in transports if isinstance(t, SlackTransport)]
+    assert len(slack) == 1
+    assert slack[0].channels == ["C0MAIN", "C0SECOND"]
+    assert slack[0].channel == "C0MAIN"  # primary: approver + escalation home
+
+# --- markdown tables -> monospace blocks (2026-09-05) -------------------------
+
+
+def test_table_run_renders_as_aligned_monospace():
+    from daedalus.transports.slack import to_mrkdwn
+
+    text = (
+        "Here is the summary:\n"
+        "| Grant | Ticket | Status |\n"
+        "|-------|--------|--------|\n"
+        "| **BigQuery** | AREQ-1074 | Compliant |\n"
+        "| Product USA team | No ticket | Gap |\n"
+        "Done."
+    )
+    out = to_mrkdwn(text)
+    assert "```" in out
+    block = out.split("```")[1]
+    lines = block.strip().split("\n")
+    # Separator row dropped, bold sigils stripped, columns padded to align.
+    assert lines[0].startswith("Grant")
+    assert "----" not in block
+    assert "**" not in block
+    assert lines[1].startswith("BigQuery")
+    assert lines[0].index("Ticket") == lines[1].index("AREQ-1074")
+    assert "Here is the summary:" in out and "Done." in out
+
+
+def test_long_cells_truncate_with_ellipsis():
+    from daedalus.transports.slack import to_mrkdwn
+
+    text = (
+        "| Group | Actor |\n"
+        "| engineering_operations_search_personalization_global | user@example.com |\n"
+    )
+    out = to_mrkdwn(text)
+    assert "…" in out
+    assert "engineering_operations_search_personalization_global" not in out
+
+
+def test_single_pipe_line_and_fenced_tables_pass_through():
+    from daedalus.transports.slack import to_mrkdwn
+
+    lone = "a | b | c"
+    assert to_mrkdwn(lone) == lone
+    fenced = "```\n| raw | table |\n| kept | as-is |\n```"
+    assert to_mrkdwn(fenced) == fenced
 async def test_the_approver_allowlist_ignores_a_reaction_from_outside_it():
     """#46: who approved was not merely unchecked, it was UNAVAILABLE.
 
@@ -654,3 +1097,15 @@ async def test_a_timeout_after_an_OFF_LIST_tick_does_not_claim_there_was_no_reac
 
     assert "off-list" in caplog.text
     assert "no reaction" not in caplog.text
+
+
+async def test_user_turn_carries_the_slack_sender_id():
+    """PR #37 review, issue 2: the learnings lane attributes only to the
+    sender the transport recorded, so the transport must record it."""
+    transport, api, handler = make()
+    await transport.handle_event(event("the gate is manual", ts="400.1", user="U0ALICE"), handler)
+    task = transport._threads[(CH, "400.1")]
+    assert task.history[0].sender == "U0ALICE"
+
+    await transport.handle_event(event("no user field", ts="400.2", user=None), handler)
+    assert transport._threads[(CH, "400.2")].history[0].sender is None

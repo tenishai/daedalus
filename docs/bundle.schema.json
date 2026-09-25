@@ -73,6 +73,48 @@
       "title": "CeilingSpec",
       "type": "object"
     },
+    "CloudTrailSpec": {
+      "additionalProperties": true,
+      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`. Absent role_arn = the block is off.",
+      "properties": {
+        "role_arn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role Arn"
+        },
+        "event_data_store": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Data Store"
+        },
+        "region": {
+          "default": "us-east-2",
+          "title": "Region",
+          "type": "string"
+        },
+        "group_prefix": {
+          "default": "engineering_",
+          "title": "Group Prefix",
+          "type": "string"
+        }
+      },
+      "title": "CloudTrailSpec",
+      "type": "object"
+    },
     "ColleaguesSpec": {
       "additionalProperties": true,
       "properties": {
@@ -191,6 +233,50 @@
       "title": "GitHubSpec",
       "type": "object"
     },
+    "JiraSpec": {
+      "additionalProperties": true,
+      "description": "The room broker's issue-tracker read lane (2026-09-04). Same custody\nshape as `github`: the room holds the tracker credential, this block\nonly names where the broker lives and how the agent proves itself.\nAbsent broker_url = the block is off.",
+      "properties": {
+        "broker_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Broker Url"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        },
+        "self": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Self"
+        }
+      },
+      "title": "JiraSpec",
+      "type": "object"
+    },
     "LiminalSpec": {
       "additionalProperties": true,
       "properties": {
@@ -217,6 +303,18 @@
           ],
           "default": null,
           "title": "Token Env"
+        },
+        "exchange_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exchange Url"
         }
       },
       "title": "LiminalSpec",
@@ -317,6 +415,31 @@
       "title": "ModelSpec",
       "type": "object"
     },
+    "SlackReadSpec": {
+      "additionalProperties": true,
+      "description": "A read-only SIDECAR block (2026-09-04): the agent may read\nconversation threads from exactly the channels listed here, using the\npod's own Slack bot token (the transport's env). Slack's channel\nmembership is the second wall -- history reads fail until a human\ninvites the bot. Absent channels = the block is off.",
+      "properties": {
+        "channels": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Channels",
+          "type": "array"
+        },
+        "token_env": {
+          "default": "SLACK_BOT_TOKEN",
+          "title": "Token Env",
+          "type": "string"
+        },
+        "scan_limit": {
+          "default": 2000,
+          "title": "Scan Limit",
+          "type": "integer"
+        }
+      },
+      "title": "SlackReadSpec",
+      "type": "object"
+    },
     "ToolsSpec": {
       "additionalProperties": true,
       "properties": {
@@ -347,6 +470,15 @@
         },
         "github": {
           "$ref": "#/$defs/GitHubSpec"
+        },
+        "cloudtrail": {
+          "$ref": "#/$defs/CloudTrailSpec"
+        },
+        "slack_read": {
+          "$ref": "#/$defs/SlackReadSpec"
+        },
+        "jira": {
+          "$ref": "#/$defs/JiraSpec"
         },
         "builtin": {
           "additionalProperties": {
