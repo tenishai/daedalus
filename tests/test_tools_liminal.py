@@ -99,9 +99,11 @@ async def test_no_auth_mode_sends_placeholder_not_empty_bearer(monkeypatch):
 
 
 @pytest.mark.parametrize("token_env", [None, "LIM_TOKEN"])
-async def test_static_mode_empty_token_sends_placeholder(monkeypatch, token_env):
+async def test_static_mode_empty_token_becomes_placeholder_bearer(monkeypatch, token_env):
     """Finding #16 without liminal installed (CI): an unset or empty token
-    becomes the "no-auth" placeholder before the first call goes out."""
+    becomes the "no-auth" placeholder bearer before the first call. The
+    fake client never sees the header, so this pins the bearer the real
+    client's token_provider reads, not the header itself."""
     monkeypatch.setenv("LIM_TOKEN", "")
     provider = LiminalToolProvider("http://gw", token_env=token_env, client=FakeLiminalClient())
     await provider.call("scratchpad.set", {})

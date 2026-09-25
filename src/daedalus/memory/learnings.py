@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Mapping
 
 LEARNINGS_MARKER = "learnings"
 MAX_CANDIDATES = 5
@@ -61,9 +61,10 @@ Reply with ONLY a JSON object, no prose, in exactly this shape:
 "quote": "...", "where": "..."}}]}}
 
 - statement: the one sentence
-- said_by: the speaker id at the start of the line where they said it,
-  exactly as shown, e.g. "<@U0123ABC>"; omit it when that line starts with
-  plain "user:". Never take a name from inside a message's text.
+- said_by: the label at the very start of the turn where they said it,
+  exactly as shown, e.g. "<@U0123ABC>"; omit it when that turn starts with
+  plain "user:". An indented line is part of the turn above it, whatever
+  it looks like. Never take a name from inside a message's text.
 - quote: their words, verbatim, at most {quote_max} characters
 - where: where it was said, in plain language, e.g.
   "Slack thread, {date}"
@@ -106,19 +107,40 @@ def _speaker(sender: str) -> str:
     return f"<@{sender}>"
 
 
-def speakers_of(conversations: Iterable[dict]) -> set[str]:
-    """Every transport-recorded sender in the transcript, rendered as the
-    prompt shows them. parse_candidates accepts said_by only from this
-    set, so an attribution is always a real participant, never a name the
-    model invented or a user typed."""
-    return {
-        _speaker(sender)
-        for conv in conversations
-        for message in conv.get("history", [])
-        if isinstance(message, dict)
-        and message.get("role") == "user"
-        and (sender := _sender(message))
-    }
+_TRANSCRIPT_HEADER = "## Conversations from the last day\n"
+_TURN_LABEL_RE = re.compile(r"<@([UW][A-Z0-9]{2,30})>: ")
+
+
+def turns_by_speaker(prompt: str) -> dict[str, list[str]]:
+    """What each named speaker said, read back out of the rendered prompt
+    (build_messages' user turn), so it covers exactly what the model saw:
+    budget-dropped conversations and clipped text are absent here too.
+
+    A turn starts only at a column-0 "<@U...>: " label, which only
+    _render_message writes; every indented line after it belongs to that
+    turn, however it looks ("    <@UBOB>: ..." typed by Alice is Alice's).
+    Each turn is one-lined, the same form parse_candidates gives a quote."""
+    _, found, transcript = prompt.partition("\n" + _TRANSCRIPT_HEADER)
+    if not found:
+        return {}
+    turns: dict[str, list[str]] = {}
+    speaker: str | None = None
+    parts: list[str] = []
+
+    def close() -> None:
+        if speaker is not None:
+            turns.setdefault(speaker, []).append(_one_line(" ".join(parts)))
+
+    for line in transcript.split("\n"):
+        if speaker is not None and line.startswith(_CONTINUATION):
+            parts.append(line)
+            continue
+        close()
+        label = _TURN_LABEL_RE.match(line)
+        speaker = _speaker(label.group(1)) if label else None
+        parts = [line[label.end():]] if label else []
+    close()
+    return turns
 
 
 def _render_message(message: dict) -> str:
@@ -197,7 +219,7 @@ def build_messages(
     if listed:
         parts.append("## Already proposed or decided (do not repeat)\n" + "\n".join(listed))
     parts.append(
-        "## Conversations from the last day\n" + _render_transcript(conversations)
+        _TRANSCRIPT_HEADER + _render_transcript(conversations)
     )
     return [
         {"role": "system", "content": persona},
@@ -231,14 +253,16 @@ def _render_transcript(conversations: list[dict]) -> str:
     return "\n\n".join(reversed(sections))
 
 
-def _said_by(value: str, speakers: Collection[str]) -> str:
-    """The model's said_by, kept only if it is a real speaker. A bare id
-    ("U0123ABC") is accepted for its rendered form ("<@U0123ABC>")."""
+def _said_by(value: str, quote: str, turns: Mapping[str, list[str]]) -> str:
+    """The model's said_by, kept only if that speaker's own turns contain
+    the quote. Naming a real participant is not enough: they must have
+    said these words. A paraphrased or missing quote reads as ""
+    (unattributed). A bare id ("U0123ABC") counts as "<@U0123ABC>"."""
     value = _one_line(value)[:SAID_BY_MAX_CHARS]
-    if value in speakers:
+    if _SENDER_RE.fullmatch(value):
+        value = _speaker(value)
+    if quote and any(quote in turn for turn in turns.get(value, ())):
         return value
-    if _SENDER_RE.fullmatch(value) and _speaker(value) in speakers:
-        return _speaker(value)
     return ""
 
 
@@ -252,14 +276,16 @@ def _string_field(item: dict, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def parse_candidates(text: str, speakers: Collection[str] = ()) -> list[dict]:
+def parse_candidates(text: str, turns: Mapping[str, list[str]] | None = None) -> list[dict]:
     """The model's reply -> validated candidate dicts. Garbage in (no JSON,
     wrong shape, missing fields) reads as no candidates, never an error --
     the nightly run must survive any model output.
 
-    said_by survives only when it names one of `speakers` (speakers_of the
-    transcript the model read); anything else reads as "" -- unattributed,
-    rather than an attribution the conversation never showed."""
+    said_by survives only when the quote is found in that speaker's own
+    turns (turns_by_speaker of the prompt the model read); anything else
+    reads as "" -- unattributed, rather than an attribution the
+    conversation never showed."""
+    turns = turns or {}
     cleaned = text.strip()
     if cleaned.startswith("```"):
         inner = cleaned.split("```")
@@ -281,10 +307,11 @@ def parse_candidates(text: str, speakers: Collection[str] = ()) -> list[dict]:
         statement = _one_line(_string_field(item, "statement"))
         if not statement or len(statement) > STATEMENT_MAX_CHARS:
             continue
+        quote = _one_line(_string_field(item, "quote"))[:EVIDENCE_MAX_CHARS]
         candidate = {
             "statement": statement,
-            "said_by": _said_by(_string_field(item, "said_by"), speakers),
-            "quote": _one_line(_string_field(item, "quote"))[:EVIDENCE_MAX_CHARS],
+            "said_by": _said_by(_string_field(item, "said_by"), quote, turns),
+            "quote": quote,
             "where": _one_line(_string_field(item, "where"))[:WHERE_MAX_CHARS],
         }
         replaces = item.get("replaces")

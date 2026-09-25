@@ -674,7 +674,7 @@ class Agent:
                 reason=ReasonCode.TOOL_BLOCKED,
             )
         candidates = learnings.parse_candidates(
-            response.text or "", speakers=learnings.speakers_of(conversations)
+            response.text or "", turns=learnings.turns_by_speaker(messages[-1]["content"])
         )
         self._emit("learnings_proposed", count=len(candidates))
         return task.reply(json.dumps({"candidates": candidates}))
