@@ -117,6 +117,18 @@ def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
     return calls
 
 
+# Appended to a repeated call's result when tools.max_repeats is set (#100).
+_REPEAT_NOTE = (
+    "\n\n[You already made this exact call just before this one. "
+    "Use what you have, or try something different.]"
+)
+
+
+def _arguments_key(arguments: dict) -> str:
+    """Canonical form of a call's arguments, so key order doesn't hide a repeat."""
+    return json.dumps(arguments, sort_keys=True, default=str)
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -813,6 +825,8 @@ class Agent:
 
         last_attempt = ""
         context_limit = self.bundle.spec.tools.context_tokens
+        max_repeats = self.bundle.spec.tools.max_repeats
+        last_key, streak, repeated = None, 0, ""
         exhausted = "steps"
         for _ in range(self.bundle.spec.tools.max_steps):
             await self.checkpoints.save(
@@ -869,12 +883,29 @@ class Agent:
                 self._emit("context_limit", input_tokens=response.input_tokens)
                 exhausted = "context"
                 break
+            # The same call with the same arguments, over and over, is a model stuck
+            # in a loop (#100): each repeat costs a step and returns what it already
+            # has. Count consecutive identical calls, across steps and within one.
+            streaks = []
+            for call in tool_calls:
+                key = (by_munged.get(call.name, call.name), _arguments_key(call.arguments))
+                streak = streak + 1 if key == last_key else 1
+                last_key = key
+                streaks.append(streak)
+                if max_repeats and streak >= max_repeats and not repeated:
+                    repeated = key[0]
+            if repeated:
+                self._emit("repeat_limit", name=repeated, count=max_repeats)
+                exhausted = "repeats"
+                break
 
             messages.append(self._assistant_message(response.text, tool_calls))
-            for call in tool_calls:
+            for call, n in zip(tool_calls, streaks, strict=True):
                 canonical = by_munged.get(call.name, call.name)  # trace speaks canonical
                 self._emit("tool_call", name=canonical, arguments=call.arguments)
                 result = await self._execute(call, by_munged)
+                if max_repeats and n > 1:
+                    result += _REPEAT_NOTE
                 self._emit("tool_result", name=canonical, content=result)
                 last_attempt = f"{canonical} -> {result[:200]}"
                 messages.append(
@@ -884,7 +915,18 @@ class Agent:
         detail = (
             f" The last thing I tried: {last_attempt}." if last_attempt else ""
         )
-        if exhausted == "context":
+        if exhausted == "repeats":
+            why = (
+                f"new things to try (I made the same {repeated} call "
+                f"{max_repeats} times in a row)"
+            )
+            reason = ReasonCode.POLICY_VIOLATION
+            stopped = (
+                "I had to stop before finishing -- I made the same "
+                f"{repeated} call {max_repeats} times in a row.{detail} A narrower "
+                "ask may fit; my operator can raise the limit."
+            )
+        elif exhausted == "context":
             why = f"room in my context ({context_limit} tokens)"
             reason = ReasonCode.BUDGET_EXHAUSTED
             stopped = (

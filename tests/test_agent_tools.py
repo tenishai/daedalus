@@ -556,3 +556,120 @@ async def test_a_truncated_wrap_up_says_so(tmp_path):
     text = task.agent_text()
     assert "[reply truncated: hit the model's max_tokens limit" in text
     assert text.endswith("[partial answer: I ran out of tool steps (10) before finishing]")
+
+
+# tools.max_repeats (#100): the same call with the same arguments, N times in a row,
+# ends the loop like running out of steps. Measured on a 9B reviewing techne PR 1029:
+# 29 identical files.read calls in a row used up the step budget.
+
+
+def _read(i, **arguments):
+    return tool_turn(ToolCall(id=str(i), name="files__read", arguments=arguments))
+
+
+async def test_repeated_call_stops_the_loop_at_max_repeats(tmp_path):
+    llm = ScriptedLLM(*[_read(i, path="/x") for i in range(10)])
+    tools = FakeTools([READ_SPEC], {"files.read": "a fact"})
+    events: list[dict] = []
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  max_repeats: 3\n",
+    )
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.state is TaskState.FAILED
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+    assert len(llm.calls) == 3
+    assert len(tools.calls) == 2  # the third identical call is never run
+    assert task.agent_text().startswith(
+        "I had to stop before finishing -- I made the same files.read call 3 times in a row."
+    )
+    assert {"type": "repeat_limit", "name": "files.read", "count": 3} in events
+
+
+async def test_a_repeat_gets_a_note_and_the_first_call_does_not(tmp_path):
+    llm = ScriptedLLM(_read(1, path="/x"), _read(2, path="/x"), "done")
+    tools = FakeTools([READ_SPEC], {"files.read": "a fact"})
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  max_repeats: 3\n",
+    )
+    task = await agent.handle_task(Task.from_text("read"))
+    assert task.agent_text() == "done"
+    results = [m["content"] for m in llm.calls[-1] if m["role"] == "tool"]
+    assert results[0] == "a fact"
+    assert results[1].startswith("a fact\n\n[You already made this exact call")
+
+
+async def test_different_arguments_never_count_as_a_repeat(tmp_path):
+    llm = ScriptedLLM(*[_read(i, path=f"/{i % 2}") for i in range(10)])
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  max_repeats: 2\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert len(llm.calls) == 10  # ran out of steps, not repeats
+    assert "needed more than the 10 tool steps" in task.agent_text()
+    assert all("[You already made" not in str(m.get("content") or "") for m in llm.calls[-1])
+
+
+async def test_argument_order_does_not_hide_a_repeat(tmp_path):
+    llm = ScriptedLLM(
+        _read(1, path="/x", limit=10), _read(2, limit=10, path="/x"), "unreached"
+    )
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  max_repeats: 2\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert len(llm.calls) == 2
+    assert "same files.read call 2 times in a row" in task.agent_text()
+
+
+async def test_identical_calls_within_one_step_count(tmp_path):
+    twice = LLMResponse(text="", tool_calls=[
+        ToolCall(id="1", name="files__read", arguments={"path": "/x"}),
+        ToolCall(id="2", name="files__read", arguments={"path": "/x"}),
+    ])
+    llm = ScriptedLLM(twice, "unreached")
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  max_repeats: 2\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert len(llm.calls) == 1 and tools.calls == []
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+
+
+async def test_repeat_limit_with_wrap_up(tmp_path):
+    llm = ScriptedLLM(*[_read(i, path="/x") for i in range(3)], "What I found.")
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  max_repeats: 3\n  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert llm.tools_seen[-1] is None
+    assert task.agent_text() == (
+        "What I found.\n\n[partial answer: I ran out of new things to try "
+        "(I made the same files.read call 3 times in a row) before finishing]"
+    )
+
+
+async def test_repeats_are_not_limited_or_noted_by_default(tmp_path):
+    llm = ScriptedLLM(*[_read(i, path="/x") for i in range(10)])
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+    )
+    await agent.handle_task(Task.from_text("loop"))
+    assert len(llm.calls) == 10
+    assert all("[You already made" not in str(m.get("content") or "") for m in llm.calls[-1])
+
+
+@pytest.mark.parametrize("value", ["1", "0"])
+def test_max_repeats_below_two_is_rejected(tmp_path, value):
+    from daedalus.bundle import BundleError
+
+    with pytest.raises((BundleError, ValueError)):
+        make_agent(tmp_path, allow=["files.read"], tools_extra=f"  max_repeats: {value}\n")
