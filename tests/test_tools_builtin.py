@@ -293,8 +293,14 @@ async def test_search_says_when_it_stops_and_when_nothing_matched(tree):
     files = FilesToolProvider([str(tree)])
     out = await files.call("files.search", {"pattern": "run_init", "max_results": "1"})
     assert out.splitlines()[-1] == (
-        "(stopped at 1 matches; narrow the pattern, path or glob to see more)"
+        "(showing the first 1 match; there are more; narrow the pattern, path or glob "
+        "to see them)"
     )
+    # Exactly max_results matches is not "more": no note (Prudence, PR 97 review).
+    exact = await files.call(
+        "files.search", {"pattern": "def run_init", "path": str(tree / "pkg"), "max_results": "1"}
+    )
+    assert exact == f"{tree / 'pkg' / 'cli.py'}:6: def run_init():"
     none = await files.call("files.search", {"pattern": "no_such_name"})
     assert none == f"no matches for 'no_such_name' in {tree}"
 
@@ -303,7 +309,7 @@ async def test_search_caps_max_results(root):
     (root / "many.txt").write_text("hit\n" * 500)
     files = FilesToolProvider([str(root)])
     out = await files.call("files.search", {"pattern": "hit", "max_results": 10_000})
-    assert out.count(":") >= 200 and "stopped at 200 matches" in out
+    assert len(out.splitlines()) == 201 and "showing the first 200 matches" in out
 
 
 async def test_search_never_leaves_the_roots(tree):
@@ -348,3 +354,13 @@ async def test_a_search_inside_a_hidden_directory_covers_its_hidden_names(tree):
         f"{gh / '.cache' / 'c.txt'}:1: run_init cached",
         f"{gh / 'workflows' / 'test.yml'}:1: run: run_init",
     ]
+
+
+async def test_hidden_coverage_does_not_depend_on_root_order(tmp_path):
+    inner = tmp_path / ".b"
+    (inner / "x").mkdir(parents=True)
+    (inner / "x" / ".h.txt").write_text("needle\n")
+    for roots in ([str(inner), str(tmp_path)], [str(tmp_path), str(inner)]):
+        files = FilesToolProvider(roots)
+        out = await files.call("files.search", {"pattern": "needle", "path": str(inner / "x")})
+        assert out == f"{inner / 'x' / '.h.txt'}:1: needle", roots

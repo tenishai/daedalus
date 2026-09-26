@@ -193,10 +193,10 @@ class FilesToolProvider:
                             shown = line.rstrip("\n")
                             if len(shown) > _SEARCH_LINE_CHARS:
                                 shown = shown[:_SEARCH_LINE_CHARS] + " …"
-                            hits.append(f"{path}:{number}: {shown}")
-                            if len(hits) >= limit:
+                            if len(hits) == limit:  # one past the limit: there is more
                                 stopped = True
                                 break
+                            hits.append(f"{path}:{number}: {shown}")
             except OSError:
                 continue
             if stopped:
@@ -206,7 +206,8 @@ class FilesToolProvider:
         notes = []
         if stopped:
             notes.append(
-                f"(stopped at {limit} matches; narrow the pattern, path or glob to see more)"
+                f"(showing the first {_count(limit, 'match', 'matches')}; there are more; "
+                "narrow the pattern, path or glob to see them)"
             )
         if skipped_big:
             notes.append(
@@ -249,11 +250,13 @@ class FilesToolProvider:
                     yield path
 
     def _inside_hidden(self, start: Path) -> bool:
-        """True when start is, or is under, a hidden directory below its root."""
-        for root in self.roots:
-            if start.is_relative_to(root):
-                return any(part.startswith(".") for part in start.relative_to(root).parts)
-        return False
+        """True when start is, or is under, a hidden directory below any root that
+        contains it, so the answer does not depend on the order roots are listed."""
+        return any(
+            any(part.startswith(".") for part in start.relative_to(root).parts)
+            for root in self.roots
+            if start.is_relative_to(root)
+        )
 
     def _read_range(self, raw: str, path: Path, offset: int, limit: int | None) -> str:
         """Lines offset..offset+limit-1, numbered. The byte cap applies to the lines
@@ -317,6 +320,10 @@ def _bounded_lines(handle, cap: int):
         while piece and not piece.endswith("\n"):  # skip the rest of an over-long line
             piece = handle.readline(cap + 1)
         yield None
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
 
 
 def _truthy(value) -> bool:
