@@ -529,6 +529,19 @@
           ],
           "default": null,
           "title": "Context Tokens"
+        },
+        "max_repeats": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Repeats"
         }
       },
       "title": "ToolsSpec",

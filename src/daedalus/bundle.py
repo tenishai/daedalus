@@ -195,6 +195,11 @@ class ToolsSpec(_WarnExtra):
     # and resume() would replay the same over-limit call: it needs a larger
     # context_tokens (or a narrower ask), not more budget.
     context_tokens: int | None = Field(default=None, gt=0)
+    # Count the loop as exhausted when the model makes the same tool call, with the
+    # same arguments, this many times in a row (#100); each repeat before that gets
+    # a note on its result. The stop is handled like running out of steps, so
+    # on_exhausted applies. None = no limit.
+    max_repeats: int | None = Field(default=None, ge=2)
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only
