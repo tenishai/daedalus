@@ -79,3 +79,94 @@ async def test_multi_provider_routes_by_listing(root):
     assert ".PHONY" in await multi.call("files.read", {"path": str(root / "Makefile")})
     with pytest.raises(LookupError):
         await multi.call("nope.nothing", {})
+
+
+# Ranged reads (#93). A small model needs a low max_bytes, and large source files are
+# normal, so the cap must bound what is returned, not whether the file can be read at all.
+
+
+@pytest.fixture
+def big(root):
+    path = root / "big.py"
+    path.write_text("".join(f"line {n}\n" for n in range(1, 1001)))  # ~10 KB
+    return path
+
+
+async def test_ranged_read_of_a_file_over_the_cap(big):
+    files = FilesToolProvider([str(big.parent)], max_bytes=500)
+    out = await files.call("files.read", {"path": str(big), "offset": 100, "limit": 3})
+    assert out.splitlines() == [
+        f"[{big} lines 100-102 of 1000]",
+        "100\tline 100",
+        "101\tline 101",
+        "102\tline 102",
+    ]
+
+
+async def test_oversized_error_names_a_remedy_that_works(big):
+    files = FilesToolProvider([str(big.parent)], max_bytes=500)
+    with pytest.raises(ValueError, match="1000 lines; read it in parts with offset and limit"):
+        await files.call("files.read", {"path": str(big)})
+    # Following the advice succeeds — the guard's remedy is not another dead end.
+    out = await files.call("files.read", {"path": str(big), "offset": 1, "limit": 20})
+    assert out.splitlines()[1] == "1\tline 1"
+
+
+async def test_models_send_numbers_as_strings(big):
+    files = FilesToolProvider([str(big.parent)])
+    out = await files.call("files.read", {"path": str(big), "offset": "999", "limit": "5"})
+    assert out.splitlines() == [
+        f"[{big} lines 999-1000 of 1000]",
+        "999\tline 999",
+        "1000\tline 1000",
+    ]
+
+
+async def test_limit_alone_starts_at_line_one(big):
+    files = FilesToolProvider([str(big.parent)])
+    out = await files.call("files.read", {"path": str(big), "limit": "2"})
+    assert out.splitlines()[1:] == ["1\tline 1", "2\tline 2"]
+
+
+async def test_a_range_over_the_cap_suggests_a_limit_that_fits(big):
+    files = FilesToolProvider([str(big.parent)], max_bytes=500)
+    with pytest.raises(ValueError, match=r"limit counts lines, and (\d+) lines fit") as err:
+        await files.call("files.read", {"path": str(big), "offset": 1, "limit": 900})
+    fits = int(err.value.args[0].rsplit("and ", 1)[1].split()[0])
+    # The suggested window really fits — the remedy is not another refusal.
+    out = await files.call("files.read", {"path": str(big), "offset": 1, "limit": fits})
+    assert out.splitlines()[1] == "1\tline 1"
+
+
+async def test_offset_past_the_end(big):
+    files = FilesToolProvider([str(big.parent)])
+    with pytest.raises(ValueError, match="has 1000 lines; offset 1001 is past the end"):
+        await files.call("files.read", {"path": str(big), "offset": 1001})
+
+
+@pytest.mark.parametrize("bad", [0, -3, "abc", "1.5"])
+async def test_bad_line_arguments_are_refused(big, bad):
+    files = FilesToolProvider([str(big.parent)])
+    with pytest.raises(ValueError, match="'offset' must be"):
+        await files.call("files.read", {"path": str(big), "offset": bad})
+
+
+async def test_schema_offers_offset_and_limit_on_read_only(root):
+    files = FilesToolProvider([str(root)], max_bytes=500)
+    specs = {spec["name"]: spec for spec in await files.tools()}
+    assert set(specs["files.read"]["parameters"]["properties"]) == {"path", "offset", "limit"}
+    assert set(specs["files.list"]["parameters"]["properties"]) == {"path"}
+    assert "500 bytes" in specs["files.read"]["description"]
+
+
+async def test_reading_a_directory_points_at_files_list(root):
+    files = FilesToolProvider([str(root)])
+    with pytest.raises(IsADirectoryError, match="is a directory; use files.list"):
+        await files.call("files.read", {"path": str(root / "sub")})
+
+
+async def test_a_single_line_over_the_cap_says_so(root):
+    (root / "minified.js").write_text("x" * 800 + "\n")
+    files = FilesToolProvider([str(root)], max_bytes=500)
+    with pytest.raises(ValueError, match="line 1 of .* alone exceeds the 500-byte read limit"):
+        await files.call("files.read", {"path": str(root / "minified.js"), "limit": 1})
