@@ -189,7 +189,7 @@ def _count_lines(path: Path) -> int:
         while chunk := handle.read(_CHUNK):
             count += chunk.count(b"\n") + chunk.count(b"\r") - chunk.count(b"\r\n")
             if prev_cr and chunk.startswith(b"\n"):
-                count -= 1  # a \\r\\n split across chunks was counted twice
+                count -= 1  # a \r\n split across chunks was counted twice
             prev_cr = chunk.endswith(b"\r")
             last = chunk[-1:]
     if last and last not in (b"\n", b"\r"):
