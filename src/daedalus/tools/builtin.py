@@ -84,7 +84,7 @@ class FilesToolProvider:
                     lines = _count_lines(path)
                     raise ValueError(
                         f"{raw!r} exceeds the {self.max_bytes}-byte read limit; it has "
-                        f"{lines} lines; read it in parts with offset and limit"
+                        f"{_lines(lines)}; read it in parts with offset and limit"
                     )
                 return path.read_text(errors="replace")
             return self._read_range(raw, path, offset or 1, limit)
@@ -131,7 +131,7 @@ class FilesToolProvider:
             raise ValueError(
                 f"lines {offset}-{offset + len(picked) - 1} of {raw!r} exceed the "
                 f"{self.max_bytes}-byte read limit; limit counts lines, and "
-                f"{fits} lines fit from here"
+                f"{_lines(fits)} fit from here"
             )
         last = offset + len(picked) - 1
         return f"[{raw} lines {offset}-{last} of {total}]\n{body}"
@@ -152,5 +152,11 @@ def _line_arg(payload: dict, key: str) -> int | None:
 
 
 def _count_lines(path: Path) -> int:
-    with path.open("rb") as handle:
+    """Counted the way _read_range numbers lines (text mode, universal newlines), so
+    the count an error advertises is the one the remedy uses."""
+    with path.open(errors="replace") as handle:
         return sum(1 for _ in handle)
+
+
+def _lines(count: int) -> str:
+    return f"{count} line" if count == 1 else f"{count} lines"

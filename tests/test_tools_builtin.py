@@ -130,7 +130,7 @@ async def test_limit_alone_starts_at_line_one(big):
 
 async def test_a_range_over_the_cap_suggests_a_limit_that_fits(big):
     files = FilesToolProvider([str(big.parent)], max_bytes=500)
-    with pytest.raises(ValueError, match=r"limit counts lines, and (\d+) lines fit") as err:
+    with pytest.raises(ValueError, match=r"limit counts lines, and (\d+) lines? fit") as err:
         await files.call("files.read", {"path": str(big), "offset": 1, "limit": 900})
     fits = int(err.value.args[0].rsplit("and ", 1)[1].split()[0])
     # The suggested window really fits — the remedy is not another refusal.
@@ -170,3 +170,14 @@ async def test_a_single_line_over_the_cap_says_so(root):
     files = FilesToolProvider([str(root)], max_bytes=500)
     with pytest.raises(ValueError, match="line 1 of .* alone exceeds the 500-byte read limit"):
         await files.call("files.read", {"path": str(root / "minified.js"), "limit": 1})
+
+
+async def test_line_count_in_the_error_matches_the_remedy_on_cr_only_files(root):
+    # Classic-Mac line endings: the advertised count must be the one ranged reads use.
+    path = root / "old_mac.txt"
+    path.write_bytes(b"a\rb\rc\r")
+    files = FilesToolProvider([str(root)], max_bytes=3)
+    with pytest.raises(ValueError, match="it has 3 lines;"):
+        await files.call("files.read", {"path": str(path)})
+    out = await files.call("files.read", {"path": str(path), "offset": 3, "limit": 1})
+    assert out.splitlines()[0] == f"[{path} lines 3-3 of 3]"
