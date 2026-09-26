@@ -66,7 +66,7 @@ async def test_collision_warns_once_not_every_turn(root):
         await multi.tools()
         await multi.tools()
     dupes = [w for w in caught if "duplicate tool name" in str(w.message)]
-    assert len(dupes) == 2  # files.read + files.list, once each — not once per turn
+    assert len(dupes) == 3  # files.read, .list, .search, once each — not once per turn
 
 
 async def test_multi_provider_routes_by_listing(root):
@@ -74,7 +74,7 @@ async def test_multi_provider_routes_by_listing(root):
     fake = FakeTools([{"name": "git.git_status", "description": "", "parameters": {}}])
     multi = MultiToolProvider([files, fake])
     names = [spec["name"] for spec in await multi.tools()]
-    assert names == ["files.read", "files.list", "git.git_status"]
+    assert names == ["files.read", "files.list", "files.search", "git.git_status"]
     assert "ok: git.git_status" == await multi.call("git.git_status", {})
     assert ".PHONY" in await multi.call("files.read", {"path": str(root / "Makefile")})
     with pytest.raises(LookupError):
@@ -233,3 +233,134 @@ def test_count_lines_across_a_chunk_boundary(tmp_path, monkeypatch):
     path.write_bytes(b"abc\r\nde\r\r\nf")  # the first \r\n straddles bytes 3-4
     with path.open(errors="replace") as handle:
         assert builtin._count_lines(path) == sum(1 for _ in handle) == 4
+
+
+# files.search (#96). One search replaces the page-through reads a small model
+# otherwise spends its steps on.
+
+
+@pytest.fixture
+def tree(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "cli.py").write_text(
+        "import os\n\ndef main():\n    return run_init()\n\ndef run_init():\n    pass\n"
+    )
+    (tmp_path / "pkg" / "notes.md").write_text("run_init is the entry point\n")
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "test.yml").write_text("run: run_init\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.js").write_text("run_init()\n")
+    (tmp_path / "blob.bin").write_bytes(b"run_init\0\x01\x02")
+    return tmp_path
+
+
+async def test_search_returns_absolute_path_line_text(tree):
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": r"def run_init\("})
+    assert out == f"{tree / 'pkg' / 'cli.py'}:6: def run_init():"
+
+
+async def test_search_skips_hidden_dependency_and_binary_files(tree):
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "run_init"})
+    assert ".github" not in out and "node_modules" not in out and "blob.bin" not in out
+    assert out.count("\n") == 2  # cli.py:4, cli.py:6, notes.md:1
+
+
+async def test_search_inside_a_hidden_directory_when_asked(tree):
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "run_init", "path": str(tree / ".github")})
+    assert out == f"{tree / '.github' / 'workflows' / 'test.yml'}:1: run: run_init"
+
+
+async def test_search_glob_and_ignore_case(tree):
+    files = FilesToolProvider([str(tree)])
+    out = await files.call(
+        "files.search", {"pattern": "RUN_INIT", "glob": "*.md", "ignore_case": "true"}
+    )
+    assert out == f"{tree / 'pkg' / 'notes.md'}:1: run_init is the entry point"
+
+
+async def test_invalid_regex_names_the_remedy_and_fixed_works(tree):
+    files = FilesToolProvider([str(tree)])
+    with pytest.raises(ValueError, match="pass fixed: true"):
+        await files.call("files.search", {"pattern": "run_init("})
+    out = await files.call("files.search", {"pattern": "run_init(", "fixed": True})
+    assert out.splitlines()[0].endswith(":4:     return run_init()")
+
+
+async def test_search_says_when_it_stops_and_when_nothing_matched(tree):
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "run_init", "max_results": "1"})
+    assert out.splitlines()[-1] == (
+        "(showing the first 1 match; there are more; narrow the pattern, path or glob "
+        "to see them)"
+    )
+    # Exactly max_results matches is not "more": no note (Prudence, PR 97 review).
+    exact = await files.call(
+        "files.search", {"pattern": "def run_init", "path": str(tree / "pkg"), "max_results": "1"}
+    )
+    assert exact == f"{tree / 'pkg' / 'cli.py'}:6: def run_init():"
+    none = await files.call("files.search", {"pattern": "no_such_name"})
+    assert none == f"no matches for 'no_such_name' in {tree}"
+
+
+async def test_search_caps_max_results(root):
+    (root / "many.txt").write_text("hit\n" * 500)
+    files = FilesToolProvider([str(root)])
+    out = await files.call("files.search", {"pattern": "hit", "max_results": 10_000})
+    assert len(out.splitlines()) == 201 and "showing the first 200 matches" in out
+
+
+async def test_search_never_leaves_the_roots(tree):
+    outside = tree.parent / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("run_init secret\n")
+    os.symlink(outside, tree / "pkg" / "linkdir")
+    os.symlink(outside / "secret.txt", tree / "pkg" / "linkfile.txt")
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "secret"})
+    assert out == f"no matches for 'secret' in {tree}"
+    with pytest.raises(PermissionError):
+        await files.call("files.search", {"pattern": "x", "path": str(outside)})
+
+
+async def test_search_counts_the_big_files_it_skips(root, monkeypatch):
+    import daedalus.tools.builtin as builtin
+
+    monkeypatch.setattr(builtin, "_SEARCH_FILE_BYTES", 10)
+    (root / "big.txt").write_text("needle " * 10)
+    files = FilesToolProvider([str(root)])
+    out = await files.call("files.search", {"pattern": "needle", "path": str(root / "big.txt")})
+    assert out.splitlines() == [
+        f"no matches for 'needle' in {root / 'big.txt'}",
+        "(1 file(s) over 10 bytes were not searched)",
+    ]
+
+
+async def test_a_search_inside_a_hidden_directory_covers_its_hidden_names(tree):
+    # Temperance's probe on 7043d7e: .github/.hidden.yml was skipped even though the
+    # search started inside .github, contradicting "covers it".
+    gh = tree / ".github"
+    (gh / ".hidden.yml").write_text("run_init here\n")
+    (gh / ".cache").mkdir()
+    (gh / ".cache" / "c.txt").write_text("run_init cached\n")
+    (gh / "node_modules").mkdir()
+    (gh / "node_modules" / "dep.js").write_text("run_init()\n")
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "run_init", "path": str(gh)})
+    assert out.splitlines() == [
+        f"{gh / '.hidden.yml'}:1: run_init here",  # a folder's files, then its subfolders
+        f"{gh / '.cache' / 'c.txt'}:1: run_init cached",
+        f"{gh / 'workflows' / 'test.yml'}:1: run: run_init",
+    ]
+
+
+async def test_hidden_coverage_does_not_depend_on_root_order(tmp_path):
+    inner = tmp_path / ".b"
+    (inner / "x").mkdir(parents=True)
+    (inner / "x" / ".h.txt").write_text("needle\n")
+    for roots in ([str(inner), str(tmp_path)], [str(tmp_path), str(inner)]):
+        files = FilesToolProvider(roots)
+        out = await files.call("files.search", {"pattern": "needle", "path": str(inner / "x")})
+        assert out == f"{inner / 'x' / '.h.txt'}:1: needle", roots
