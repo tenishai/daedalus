@@ -6,13 +6,23 @@ Write access never lives here; that's gateway (liminal) territory.
 
 from __future__ import annotations
 
+import fnmatch
+import os
+import re
 from pathlib import Path
 
 _LIST_CAP = 500
+# files.search bounds. Each one is stated in the output when it bites, never silent.
+_SEARCH_DEFAULT = 50
+_SEARCH_CAP = 200
+_SEARCH_FILE_BYTES = 2_000_000  # larger files are skipped, and the skip is counted
+_SEARCH_LINE_CHARS = 300
+_BINARY_SNIFF = 8192
+_SEARCH_SKIP_DIRS = {"node_modules", "__pycache__"}
 
 
 class FilesToolProvider:
-    """files.read / files.list, confined to configured roots.
+    """files.read / files.list / files.search, confined to configured roots.
 
     Paths are resolved (symlinks included) and must land under a root —
     traversal and symlink escapes fail before any I/O.
@@ -57,6 +67,43 @@ class FilesToolProvider:
                 "description": "List a directory under the allowed roots.",
                 "parameters": path_param,
             },
+            {
+                "name": "files.search",
+                "description": (
+                    "Search file contents under the allowed roots for a regular "
+                    "expression. Returns path:line: text for each match; read around a "
+                    "match with files.read offset and limit. Hidden files and "
+                    "directories are skipped unless path points into one."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regular expression, or plain text with fixed.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute directory or file to search. "
+                            "Default: every allowed root.",
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Only files whose name matches, e.g. *.py",
+                        },
+                        "fixed": {
+                            "type": "boolean",
+                            "description": "Treat pattern as plain text.",
+                        },
+                        "ignore_case": {"type": "boolean"},
+                        "max_results": {
+                            "type": "integer",
+                            "description": f"Default {_SEARCH_DEFAULT}, at most {_SEARCH_CAP}.",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
         ]
 
     def _resolve(self, raw: str) -> Path:
@@ -67,6 +114,8 @@ class FilesToolProvider:
         return resolved
 
     async def call(self, name: str, payload: dict) -> str:
+        if name == "files.search":
+            return self._search(payload)
         raw = payload.get("path")
         if not raw:
             raise ValueError("'path' is required")
@@ -101,6 +150,97 @@ class FilesToolProvider:
             return "\n".join(clipped) if clipped else "(empty directory)"
 
         raise LookupError(f"unknown tool {name!r}")
+
+    def _search(self, payload: dict) -> str:
+        """Matches as absolute path:line: text, bounded and confined to the roots.
+
+        Walks without following symlinked directories, and re-checks every file
+        against the roots, so a symlink cannot lead the search outside them."""
+        pattern = payload.get("pattern")
+        if not pattern:
+            raise ValueError("'pattern' is required")
+        flags = re.IGNORECASE if _truthy(payload.get("ignore_case")) else 0
+        text = re.escape(pattern) if _truthy(payload.get("fixed")) else pattern
+        try:
+            regex = re.compile(text, flags)
+        except re.error as exc:
+            raise ValueError(
+                f"{pattern!r} is not a valid regular expression ({exc}); escape special "
+                "characters, or pass fixed: true to search for it as plain text"
+            ) from None
+        limit = _line_arg(payload, "max_results") or _SEARCH_DEFAULT
+        limit = min(limit, _SEARCH_CAP)
+        glob = payload.get("glob") or None
+        starts = [self._resolve(payload["path"])] if payload.get("path") else self.roots
+        for start in starts:
+            if not start.exists():
+                raise FileNotFoundError(f"{str(start)!r} does not exist")
+
+        hits: list[str] = []
+        skipped_big = 0
+        stopped = False
+        for path in self._walk(starts, glob):
+            try:
+                if path.stat().st_size > _SEARCH_FILE_BYTES:
+                    skipped_big += 1
+                    continue
+                with path.open("rb") as sniff:
+                    if b"\0" in sniff.read(_BINARY_SNIFF):
+                        continue
+                with path.open(errors="replace") as handle:
+                    for number, line in enumerate(handle, start=1):
+                        if regex.search(line):
+                            shown = line.rstrip("\n")
+                            if len(shown) > _SEARCH_LINE_CHARS:
+                                shown = shown[:_SEARCH_LINE_CHARS] + " …"
+                            hits.append(f"{path}:{number}: {shown}")
+                            if len(hits) >= limit:
+                                stopped = True
+                                break
+            except OSError:
+                continue
+            if stopped:
+                break
+
+        where = ", ".join(str(start) for start in starts)
+        notes = []
+        if stopped:
+            notes.append(
+                f"(stopped at {limit} matches; narrow the pattern, path or glob to see more)"
+            )
+        if skipped_big:
+            notes.append(
+                f"({skipped_big} file(s) over {_SEARCH_FILE_BYTES} bytes were not searched)"
+            )
+        if not hits:
+            return "\n".join([f"no matches for {pattern!r} in {where}", *notes])
+        return "\n".join([*hits, *notes])
+
+    def _walk(self, starts: list[Path], glob: str | None):
+        for start in starts:
+            if start.is_file():
+                candidates = [start]
+            else:
+                candidates = []
+                for folder, dirs, files in os.walk(start):  # followlinks=False
+                    # Hidden and dependency directories are skipped below the start;
+                    # a search that starts inside one (e.g. .github) still covers it.
+                    dirs[:] = sorted(
+                        d for d in dirs if not d.startswith(".") and d not in _SEARCH_SKIP_DIRS
+                    )
+                    candidates.extend(
+                        Path(folder) / name for name in sorted(files) if not name.startswith(".")
+                    )
+            for path in candidates:
+                if glob and not fnmatch.fnmatch(path.name, glob):
+                    continue
+                resolved = path.resolve()
+                if path.is_symlink() and not any(
+                    resolved.is_relative_to(root) for root in self.roots
+                ):
+                    continue
+                if resolved.is_file():
+                    yield path
 
     def _read_range(self, raw: str, path: Path, offset: int, limit: int | None) -> str:
         """Lines offset..offset+limit-1, numbered. The byte cap applies to the lines
@@ -164,6 +304,11 @@ def _bounded_lines(handle, cap: int):
         while piece and not piece.endswith("\n"):  # skip the rest of an over-long line
             piece = handle.readline(cap + 1)
         yield None
+
+
+def _truthy(value) -> bool:
+    """Booleans from models arrive as true, "true" or "1"."""
+    return value is True or str(value).lower() in ("true", "1", "yes")
 
 
 def _line_arg(payload: dict, key: str) -> int | None:
