@@ -184,6 +184,17 @@ class ToolsSpec(_WarnExtra):
     builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
+    # When the loop runs out of steps or context (#98): "stop" replies with the
+    # step/context message; "wrap_up" makes one last call, with no tools offered,
+    # for the best partial answer from what was found. The task stays FAILED with
+    # the same reason code either way, so callers keying on state see no change.
+    on_exhausted: Literal["stop", "wrap_up"] = "stop"
+    # Count the loop as exhausted once a model call's prompt reaches this many input
+    # tokens, e.g. below a small local server's memory ceiling. None = no limit.
+    # A task stopped here fails with 702 like an exhausted budget, but re-funding
+    # and resume() would replay the same over-limit call: it needs a larger
+    # context_tokens (or a narrower ask), not more budget.
+    context_tokens: int | None = Field(default=None, gt=0)
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only

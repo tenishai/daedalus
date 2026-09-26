@@ -812,6 +812,8 @@ class Agent:
         budget = self._budget()
 
         last_attempt = ""
+        context_limit = self.bundle.spec.tools.context_tokens
+        exhausted = "steps"
         for _ in range(self.bundle.spec.tools.max_steps):
             await self.checkpoints.save(
                 task.id,
@@ -862,6 +864,11 @@ class Agent:
                         f"limit ({self.bundle.spec.model.max_tokens})]"
                     )
                 return task.reply(text)
+            if context_limit and response.input_tokens >= context_limit:
+                # Stop before the tool results grow the context further (#98).
+                self._emit("context_limit", input_tokens=response.input_tokens)
+                exhausted = "context"
+                break
 
             messages.append(self._assistant_message(response.text, tool_calls))
             for call in tool_calls:
@@ -877,14 +884,65 @@ class Agent:
         detail = (
             f" The last thing I tried: {last_attempt}." if last_attempt else ""
         )
-        return task.reply(
-            "I had to stop before finishing -- this task needed more than "
-            f"the {self.bundle.spec.tools.max_steps} tool steps I'm allowed "
-            f"in one go.{detail} A narrower ask may fit; my operator can "
-            "raise the limit.",
-            state=TaskState.FAILED,
-            reason=ReasonCode.POLICY_VIOLATION,
+        if exhausted == "context":
+            why = f"room in my context ({context_limit} tokens)"
+            reason = ReasonCode.BUDGET_EXHAUSTED
+            stopped = (
+                "I had to stop before finishing -- this task reached my context "
+                f"limit of {context_limit} tokens.{detail} A narrower ask may fit; "
+                "my operator can raise the limit."
+            )
+        else:
+            why = f"tool steps ({self.bundle.spec.tools.max_steps})"
+            reason = ReasonCode.POLICY_VIOLATION
+            stopped = (
+                "I had to stop before finishing -- this task needed more than "
+                f"the {self.bundle.spec.tools.max_steps} tool steps I'm allowed "
+                f"in one go.{detail} A narrower ask may fit; my operator can "
+                "raise the limit."
+            )
+        # A spent per_task_tokens budget is a hard stop: the wrap-up is one more model
+        # call, so it only runs while budget remains (NoBudget reports None).
+        if self.bundle.spec.tools.on_exhausted == "wrap_up" and budget.remaining() != 0:
+            partial = await self._wrap_up(messages, why, budget)
+            if partial:
+                return task.reply(partial, state=TaskState.FAILED, reason=reason)
+        return task.reply(stopped, state=TaskState.FAILED, reason=reason)
+
+    async def _wrap_up(self, messages: list[dict], why: str, budget) -> str | None:
+        """One last call with no tools offered: the best answer from what the loop
+        already found, marked partial (#98). None when it fails or says nothing,
+        so the caller falls back to the plain stop message."""
+        from daedalus.llm import LLMError
+
+        ask = (
+            f"You have run out of {why} for this task, so this is your last turn and "
+            "you cannot call any tools. Using only what you have already found, give "
+            "your best answer now, and say plainly what you did not get to."
         )
+        try:
+            response = await self.llm.complete(
+                [*messages, {"role": "user", "content": ask}], tools=None
+            )
+        except LLMError as exc:
+            self._emit("wrap_up", ok=False, error=str(exc)[:200])
+            return None
+        budget.spend(response.input_tokens + response.output_tokens)
+        if response.reasoning:
+            self._emit("reasoning", text=response.reasoning)
+        text = response.text.strip()
+        self._emit("wrap_up", ok=bool(text))
+        if not text:
+            return None
+        if response.finish_reason == "length":
+            # Same as the loop's own final reply (finding #27): a cut-off answer must
+            # not read as complete, least of all at a small model's context ceiling.
+            self._emit("truncated", max_tokens=self.bundle.spec.model.max_tokens)
+            text += (
+                f"\n\n[reply truncated: hit the model's max_tokens limit "
+                f"({self.bundle.spec.model.max_tokens})]"
+            )
+        return f"{text}\n\n[partial answer: I ran out of {why} before finishing]"
 
     async def _allowed_tools(self) -> list[dict]:
         """Tier-1 ceiling, enforced at listing: the model never sees a tool it
