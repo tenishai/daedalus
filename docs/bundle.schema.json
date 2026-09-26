@@ -507,6 +507,28 @@
           "default": 10,
           "title": "Max Steps",
           "type": "integer"
+        },
+        "on_exhausted": {
+          "default": "stop",
+          "enum": [
+            "stop",
+            "wrap_up"
+          ],
+          "title": "On Exhausted",
+          "type": "string"
+        },
+        "context_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Tokens"
         }
       },
       "title": "ToolsSpec",

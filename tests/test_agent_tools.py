@@ -7,6 +7,8 @@ can see — never as crashes.
 
 from pathlib import Path
 
+import pytest
+
 from daedalus.agent import Agent
 from daedalus.bundle import Bundle
 from daedalus.protocols import LLMResponse, ToolCall
@@ -23,11 +25,13 @@ def tool_turn(*calls: ToolCall) -> LLMResponse:
     return LLMResponse(text="", tool_calls=list(calls))
 
 
-def make_agent(tmp_path, *, allow, gates="", llm=None, tools=None, approver=None) -> Agent:
+def make_agent(
+    tmp_path, *, allow, gates="", llm=None, tools=None, approver=None, tools_extra=""
+) -> Agent:
     allow_yaml = "".join(f"    - {p}\n" for p in allow)
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\n"
-        "tools:\n  provider: none\n  allow:\n" + (allow_yaml or "    []\n")
+        "tools:\n  provider: none\n" + tools_extra + "  allow:\n" + (allow_yaml or "    []\n")
         + (f"approvals:\n  gates:\n{gates}" if gates else "")
     )
     (tmp_path / "agent-card.json").write_text("{}")
@@ -405,3 +409,117 @@ async def test_provider_exception_becomes_a_tool_result_not_a_crash(tmp_path):
     task = await agent.handle_task(Task.from_text("read"))
     assert task.state is TaskState.COMPLETED
     assert "tool error: connection reset" in llm.calls[1][-1]["content"]
+
+
+# Wrap-up (#98): when steps or context run out, one tool-less call for the best
+# partial answer. State and reason are unchanged from "stop", so callers keying on
+# them see no difference; only the text improves.
+
+
+class FailingLastLLM(ScriptedLLM):
+    """Scripted, but the call with no tools offered raises, as a server might."""
+
+    async def complete(self, messages, tools=None):
+        if tools is None:
+            from daedalus.llm import LLMError
+
+            self.calls.append(messages)
+            raise LLMError("m: insufficient memory")
+        return await super().complete(messages, tools=tools)
+
+
+def _loop_forever(n=10):
+    return [tool_turn(ToolCall(id=str(i), name="files__read", arguments={})) for i in range(n)]
+
+
+async def test_wrap_up_answers_from_what_was_found_when_steps_run_out(tmp_path):
+    llm = ScriptedLLM(*_loop_forever(), "Here is what I found so far.")
+    tools = FakeTools([READ_SPEC], {"files.read": "a fact"})
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.state is TaskState.FAILED
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+    assert len(llm.calls) == 11 and llm.tools_seen[-1] is None
+    assert "you cannot call any tools" in llm.calls[-1][-1]["content"]
+    assert llm.calls[-1][-2]["role"] == "tool"  # it saw the last tool result
+    assert task.agent_text() == (
+        "Here is what I found so far.\n\n"
+        "[partial answer: I ran out of tool steps (10) before finishing]"
+    )
+
+
+@pytest.mark.parametrize("last", ["", "   "])
+async def test_an_empty_wrap_up_falls_back_to_the_stop_message(tmp_path, last):
+    llm = ScriptedLLM(*_loop_forever(), last)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.agent_text().startswith("I had to stop before finishing -- this task needed more")
+
+
+async def test_a_failed_wrap_up_falls_back_to_the_stop_message(tmp_path):
+    llm = FailingLastLLM(*_loop_forever())
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+    assert len(llm.calls) == 11
+    assert task.agent_text().startswith("I had to stop before finishing -- this task needed more")
+
+
+async def test_context_limit_stops_before_running_the_tools(tmp_path):
+    big = LLMResponse(
+        text="",
+        tool_calls=[ToolCall(id="1", name="files__read", arguments={})],
+        input_tokens=5000,
+    )
+    llm = ScriptedLLM(big)
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  context_tokens: 4000\n",
+    )
+    task = await agent.handle_task(Task.from_text("big"))
+    assert task.state is TaskState.FAILED
+    assert task.reason_code is ReasonCode.BUDGET_EXHAUSTED
+    assert len(llm.calls) == 1 and tools.calls == []
+    assert "reached my context limit of 4000 tokens" in task.agent_text()
+
+
+async def test_context_limit_with_wrap_up(tmp_path):
+    small = LLMResponse(
+        text="", tool_calls=[ToolCall(id="1", name="files__read", arguments={})],
+        input_tokens=1000,
+    )
+    big = LLMResponse(
+        text="", tool_calls=[ToolCall(id="2", name="files__read", arguments={})],
+        input_tokens=4000,
+    )
+    llm = ScriptedLLM(small, big, "Partial review.")
+    tools = FakeTools([READ_SPEC])
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools,
+        tools_extra="  context_tokens: 4000\n  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("big"))
+    assert task.reason_code is ReasonCode.BUDGET_EXHAUSTED
+    assert len(tools.calls) == 1  # the first call's tool ran; the second's did not
+    assert llm.tools_seen[-1] is None
+    assert task.agent_text() == (
+        "Partial review.\n\n"
+        "[partial answer: I ran out of room in my context (4000 tokens) before finishing]"
+    )
+
+
+def test_context_tokens_must_be_positive(tmp_path):
+    from daedalus.bundle import BundleError
+
+    with pytest.raises((BundleError, ValueError)):
+        make_agent(tmp_path, allow=["files.read"], tools_extra="  context_tokens: 0\n")
