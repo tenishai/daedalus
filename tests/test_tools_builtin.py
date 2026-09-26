@@ -88,7 +88,7 @@ async def test_multi_provider_routes_by_listing(root):
 @pytest.fixture
 def big(root):
     path = root / "big.py"
-    path.write_text("".join(f"line {n}\n" for n in range(1, 1001)))  # ~10 KB
+    path.write_text("".join(f"line {n}\n" for n in range(1, 1001)))  # 8,893 bytes
     return path
 
 
