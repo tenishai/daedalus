@@ -107,9 +107,11 @@ class FilesToolProvider:
         returned (the one-line header is not counted), so a small model can walk a big
         file a window at a time.
 
-        Memory and time stay bounded by the cap, not the file (PR #94 review): the
-        line count is taken in binary chunks, lines are read with a size bound, and
-        reading stops as soon as the window is full or over the cap."""
+        Memory stays bounded by the cap, not the file (PR #94 review): the line count
+        is taken in binary chunks, lines are read with a size bound, and reading stops
+        as soon as the window is full or over the cap. Time is not bounded: counting
+        is one pass over the whole file, and reaching offset reads every line before
+        it."""
         total = _count_lines(path)
         if total == 0:
             return f"[{raw} is empty: 0 lines]"
