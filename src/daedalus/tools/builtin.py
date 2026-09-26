@@ -128,9 +128,12 @@ class FilesToolProvider:
                     continue
                 if number > last:
                     break
-                entry = None if line is None else f"{number}\t{line}"
-                size = None if entry is None else len(entry.encode()) + (1 if picked else 0)
-                if size is None or used + size > self.max_bytes:
+                if line is None:  # a line longer than the cap: over it by definition
+                    entry, size = "", self.max_bytes + 1
+                else:
+                    entry = f"{number}\t{line}"
+                    size = len(entry.encode()) + (1 if picked else 0)
+                if used + size > self.max_bytes:
                     if not picked:
                         raise ValueError(
                             f"line {offset} of {raw!r} alone exceeds the "
