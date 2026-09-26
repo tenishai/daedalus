@@ -330,3 +330,21 @@ async def test_search_counts_the_big_files_it_skips(root, monkeypatch):
         f"no matches for 'needle' in {root / 'big.txt'}",
         "(1 file(s) over 10 bytes were not searched)",
     ]
+
+
+async def test_a_search_inside_a_hidden_directory_covers_its_hidden_names(tree):
+    # Temperance's probe on 7043d7e: .github/.hidden.yml was skipped even though the
+    # search started inside .github, contradicting "covers it".
+    gh = tree / ".github"
+    (gh / ".hidden.yml").write_text("run_init here\n")
+    (gh / ".cache").mkdir()
+    (gh / ".cache" / "c.txt").write_text("run_init cached\n")
+    (gh / "node_modules").mkdir()
+    (gh / "node_modules" / "dep.js").write_text("run_init()\n")
+    files = FilesToolProvider([str(tree)])
+    out = await files.call("files.search", {"pattern": "run_init", "path": str(gh)})
+    assert out.splitlines() == [
+        f"{gh / '.hidden.yml'}:1: run_init here",  # a folder's files, then its subfolders
+        f"{gh / '.cache' / 'c.txt'}:1: run_init cached",
+        f"{gh / 'workflows' / 'test.yml'}:1: run: run_init",
+    ]

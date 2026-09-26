@@ -221,15 +221,21 @@ class FilesToolProvider:
             if start.is_file():
                 candidates = [start]
             else:
+                # Hidden names are skipped, unless the search starts inside a hidden
+                # directory (e.g. .github): then everything below it is covered.
+                # Dependency directories are skipped either way.
+                skip_hidden = not self._inside_hidden(start)
                 candidates = []
                 for folder, dirs, files in os.walk(start):  # followlinks=False
-                    # Hidden and dependency directories are skipped below the start;
-                    # a search that starts inside one (e.g. .github) still covers it.
                     dirs[:] = sorted(
-                        d for d in dirs if not d.startswith(".") and d not in _SEARCH_SKIP_DIRS
+                        d
+                        for d in dirs
+                        if d not in _SEARCH_SKIP_DIRS and not (skip_hidden and d.startswith("."))
                     )
                     candidates.extend(
-                        Path(folder) / name for name in sorted(files) if not name.startswith(".")
+                        Path(folder) / name
+                        for name in sorted(files)
+                        if not (skip_hidden and name.startswith("."))
                     )
             for path in candidates:
                 if glob and not fnmatch.fnmatch(path.name, glob):
@@ -241,6 +247,13 @@ class FilesToolProvider:
                     continue
                 if resolved.is_file():
                     yield path
+
+    def _inside_hidden(self, start: Path) -> bool:
+        """True when start is, or is under, a hidden directory below its root."""
+        for root in self.roots:
+            if start.is_relative_to(root):
+                return any(part.startswith(".") for part in start.relative_to(root).parts)
+        return False
 
     def _read_range(self, raw: str, path: Path, offset: int, limit: int | None) -> str:
         """Lines offset..offset+limit-1, numbered. The byte cap applies to the lines
