@@ -103,38 +103,62 @@ class FilesToolProvider:
         raise LookupError(f"unknown tool {name!r}")
 
     def _read_range(self, raw: str, path: Path, offset: int, limit: int | None) -> str:
-        """Lines offset..offset+limit-1, numbered. The byte cap applies to what is
-        returned, so a small model can walk a big file a window at a time."""
-        picked: list[str] = []
-        total = 0
-        with path.open(errors="replace") as handle:
-            for number, line in enumerate(handle, start=1):
-                total = number
-                if number >= offset and (limit is None or number < offset + limit):
-                    picked.append(f"{number}\t{line.rstrip(chr(10))}")
+        """Lines offset..offset+limit-1, numbered. The byte cap applies to the lines
+        returned (the one-line header is not counted), so a small model can walk a big
+        file a window at a time.
+
+        Memory and time stay bounded by the cap, not the file (PR #94 review): the
+        line count is taken in binary chunks, lines are read with a size bound, and
+        reading stops as soon as the window is full or over the cap."""
+        total = _count_lines(path)
+        if total == 0:
+            return f"[{raw} is empty: 0 lines]"
         if offset > total:
-            raise ValueError(f"{raw!r} has {total} lines; offset {offset} is past the end")
-        body = "\n".join(picked)
-        size = len(body.encode())
-        if size > self.max_bytes:
-            fits, used = 0, 0
-            for entry in picked:
-                used += len(entry.encode()) + (1 if fits else 0)
-                if used > self.max_bytes:
-                    break
-                fits += 1
-            if fits == 0:
-                raise ValueError(
-                    f"line {offset} of {raw!r} alone exceeds the {self.max_bytes}-byte "
-                    "read limit; it cannot be read with this tool"
-                )
             raise ValueError(
-                f"lines {offset}-{offset + len(picked) - 1} of {raw!r} exceed the "
-                f"{self.max_bytes}-byte read limit; limit counts lines, and "
-                f"{_lines(fits)} fit from here"
+                f"{raw!r} has {_lines(total)}; offset {offset} is past the end"
             )
-        last = offset + len(picked) - 1
+        last = total if limit is None else min(total, offset + limit - 1)
+        picked: list[str] = []
+        used = 0
+        with path.open(errors="replace") as handle:
+            for number, line in enumerate(_bounded_lines(handle, self.max_bytes), start=1):
+                if number < offset:
+                    continue
+                if number > last:
+                    break
+                entry = None if line is None else f"{number}\t{line}"
+                size = None if entry is None else len(entry.encode()) + (1 if picked else 0)
+                if size is None or used + size > self.max_bytes:
+                    if not picked:
+                        raise ValueError(
+                            f"line {offset} of {raw!r} alone exceeds the "
+                            f"{self.max_bytes}-byte read limit; it cannot be read "
+                            "with this tool"
+                        )
+                    raise ValueError(
+                        f"lines {offset}-{last} of {raw!r} exceed the "
+                        f"{self.max_bytes}-byte read limit; limit counts lines, and "
+                        f"{_lines(len(picked))} fit from here"
+                    )
+                picked.append(entry)
+                used += size
+        body = "\n".join(picked)
         return f"[{raw} lines {offset}-{last} of {total}]\n{body}"
+
+
+def _bounded_lines(handle, cap: int):
+    """Each line without its newline, or None for a line longer than cap characters.
+    No line is ever held in full beyond cap + 1 characters."""
+    while True:
+        piece = handle.readline(cap + 1)
+        if not piece:
+            return
+        if piece.endswith("\n") or len(piece) <= cap:
+            yield piece.rstrip("\n")
+            continue
+        while piece and not piece.endswith("\n"):  # skip the rest of an over-long line
+            piece = handle.readline(cap + 1)
+        yield None
 
 
 def _line_arg(payload: dict, key: str) -> int | None:
@@ -151,11 +175,26 @@ def _line_arg(payload: dict, key: str) -> int | None:
     return number
 
 
+_CHUNK = 1 << 20
+
+
 def _count_lines(path: Path) -> int:
-    """Counted the way _read_range numbers lines (text mode, universal newlines), so
-    the count an error advertises is the one the remedy uses."""
-    with path.open(errors="replace") as handle:
-        return sum(1 for _ in handle)
+    """Lines as _read_range numbers them (universal newlines: \\n, \\r\\n and a bare
+    \\r each end one), counted in binary chunks so a huge or newline-free file costs
+    one pass of I/O and no more memory than a chunk."""
+    count = 0
+    prev_cr = False
+    last = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(_CHUNK):
+            count += chunk.count(b"\n") + chunk.count(b"\r") - chunk.count(b"\r\n")
+            if prev_cr and chunk.startswith(b"\n"):
+                count -= 1  # a \\r\\n split across chunks was counted twice
+            prev_cr = chunk.endswith(b"\r")
+            last = chunk[-1:]
+    if last and last not in (b"\n", b"\r"):
+        count += 1  # a final line with no newline
+    return count
 
 
 def _lines(count: int) -> str:

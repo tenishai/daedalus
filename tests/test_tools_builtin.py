@@ -181,3 +181,55 @@ async def test_line_count_in_the_error_matches_the_remedy_on_cr_only_files(root)
         await files.call("files.read", {"path": str(path)})
     out = await files.call("files.read", {"path": str(path), "offset": 3, "limit": 1})
     assert out.splitlines()[0] == f"[{path} lines 3-3 of 3]"
+
+
+# Bounded cost (PR #94 review): a refused or ranged read of a huge file must not load
+# it. Prudence measured 1.6-2.7 GB and 3-5 s on a 300 MB newline-free file before this.
+
+
+async def test_huge_newline_free_file_is_refused_without_loading_it(root):
+    import tracemalloc
+
+    path = root / "blob.min.js"
+    path.write_bytes(b"x" * (5 << 20))  # 5 MB, one line
+    files = FilesToolProvider([str(root)], max_bytes=40_000)
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="it has 1 line;"):
+            await files.call("files.read", {"path": str(path)})
+        with pytest.raises(ValueError, match="alone exceeds"):
+            await files.call("files.read", {"path": str(path), "limit": 1})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 3 << 20, f"peak {peak} bytes; the 5 MB file was materialized"
+
+
+async def test_a_ranged_read_of_an_empty_file_is_not_a_refusal(root):
+    (root / "empty.txt").write_text("")
+    files = FilesToolProvider([str(root)])
+    out = await files.call("files.read", {"path": str(root / "empty.txt"), "limit": 10})
+    assert out == f"[{root / 'empty.txt'} is empty: 0 lines]"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"a\r\nb\rc\nd", b"\r\r\n\n", b"no newline", b"x\n", b"\r", b"a\r\n" * 3],
+)
+def test_count_lines_matches_text_mode(tmp_path, data):
+    from daedalus.tools.builtin import _count_lines
+
+    path = tmp_path / "f"
+    path.write_bytes(data)
+    with path.open(errors="replace") as handle:
+        assert _count_lines(path) == sum(1 for _ in handle)
+
+
+def test_count_lines_across_a_chunk_boundary(tmp_path, monkeypatch):
+    import daedalus.tools.builtin as builtin
+
+    monkeypatch.setattr(builtin, "_CHUNK", 4)
+    path = tmp_path / "f"
+    path.write_bytes(b"abc\r\nde\r\r\nf")  # the first \r\n straddles bytes 3-4
+    with path.open(errors="replace") as handle:
+        assert builtin._count_lines(path) == sum(1 for _ in handle) == 4
