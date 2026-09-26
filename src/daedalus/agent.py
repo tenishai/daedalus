@@ -901,7 +901,9 @@ class Agent:
                 f"in one go.{detail} A narrower ask may fit; my operator can "
                 "raise the limit."
             )
-        if self.bundle.spec.tools.on_exhausted == "wrap_up":
+        # A spent per_task_tokens budget is a hard stop: the wrap-up is one more model
+        # call, so it only runs while budget remains (NoBudget reports None).
+        if self.bundle.spec.tools.on_exhausted == "wrap_up" and budget.remaining() != 0:
             partial = await self._wrap_up(messages, why, budget)
             if partial:
                 return task.reply(partial, state=TaskState.FAILED, reason=reason)
@@ -926,10 +928,20 @@ class Agent:
             self._emit("wrap_up", ok=False, error=str(exc)[:200])
             return None
         budget.spend(response.input_tokens + response.output_tokens)
+        if response.reasoning:
+            self._emit("reasoning", text=response.reasoning)
         text = response.text.strip()
         self._emit("wrap_up", ok=bool(text))
         if not text:
             return None
+        if response.finish_reason == "length":
+            # Same as the loop's own final reply (finding #27): a cut-off answer must
+            # not read as complete, least of all at a small model's context ceiling.
+            self._emit("truncated", max_tokens=self.bundle.spec.model.max_tokens)
+            text += (
+                f"\n\n[reply truncated: hit the model's max_tokens limit "
+                f"({self.bundle.spec.model.max_tokens})]"
+            )
         return f"{text}\n\n[partial answer: I ran out of {why} before finishing]"
 
     async def _allowed_tools(self) -> list[dict]:

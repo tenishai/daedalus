@@ -191,6 +191,9 @@ class ToolsSpec(_WarnExtra):
     on_exhausted: Literal["stop", "wrap_up"] = "stop"
     # Count the loop as exhausted once a model call's prompt reaches this many input
     # tokens, e.g. below a small local server's memory ceiling. None = no limit.
+    # A task stopped here fails with 702 like an exhausted budget, but re-funding
+    # and resume() would replay the same over-limit call: it needs a larger
+    # context_tokens (or a narrower ask), not more budget.
     context_tokens: int | None = Field(default=None, gt=0)
 
 

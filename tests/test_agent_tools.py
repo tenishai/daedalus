@@ -523,3 +523,36 @@ def test_context_tokens_must_be_positive(tmp_path):
 
     with pytest.raises((BundleError, ValueError)):
         make_agent(tmp_path, allow=["files.read"], tools_extra="  context_tokens: 0\n")
+
+
+async def test_wrap_up_respects_a_spent_token_budget(tmp_path):
+    # Prudence, PR 99 r1: with per_task_tokens spent by the last step, the wrap-up
+    # made one more call. A spent budget is a hard stop; the plain message stands.
+    spend_it = LLMResponse(
+        text="", tool_calls=[ToolCall(id="1", name="files__read", arguments={})],
+        input_tokens=900, output_tokens=200,
+    )
+    llm = ScriptedLLM(spend_it, "should never be asked")
+    (tmp_path / "b").mkdir()
+    agent = make_agent(
+        tmp_path / "b", allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  max_steps: 1\n  on_exhausted: wrap_up\n",
+    )
+    agent.bundle.spec.model.budget.per_task_tokens = 1000
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert len(llm.calls) == 1
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+    assert task.agent_text().startswith("I had to stop before finishing")
+
+
+async def test_a_truncated_wrap_up_says_so(tmp_path):
+    cut = LLMResponse(text="Half a review", finish_reason="length")
+    llm = ScriptedLLM(*_loop_forever(), cut)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra="  on_exhausted: wrap_up\n",
+    )
+    task = await agent.handle_task(Task.from_text("loop"))
+    text = task.agent_text()
+    assert "[reply truncated: hit the model's max_tokens limit" in text
+    assert text.endswith("[partial answer: I ran out of tool steps (10) before finishing]")
