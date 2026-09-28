@@ -64,14 +64,19 @@ class _BearerAuth:
 class ToolBridge:
     """Serve one turn's tools and approvals over loopback MCP, for the turn's length.
 
-        async with ToolBridge(turn, server_name="daedalus") as bridge:
+        async with ToolBridge(turn) as bridge:
             config = bridge.mcp_config()        # for claude --mcp-config
             prompt_tool = bridge.approve_tool   # for --permission-prompt-tool
     """
 
-    def __init__(self, turn: EngineTurn, *, server_name: str = "daedalus"):
+    def __init__(self, turn: EngineTurn, *, server_name: str | None = None):
         self.turn = turn
-        self.server_name = server_name
+        # A fresh name per run: Claude Code names our tools mcp__<server>__<tool>, and a
+        # foreign server named "<ours>__files" with a tool "read" would produce exactly
+        # our mcp__<ours>__files__read. With an unguessable server name nothing can
+        # collide on purpose. (The engine also passes --strict-mcp-config, so no other
+        # server loads at all.) No underscores, so the name can't itself split.
+        self.server_name = server_name or f"daedalus-{secrets.token_hex(4)}"
         self.token = secrets.token_urlsafe(32)
         self.url: str | None = None
         self._by_munged = {_munge(t["name"]): t for t in turn.tools}
@@ -140,9 +145,9 @@ class ToolBridge:
         prefix = f"mcp__{self.server_name}__"
         if tool_name.startswith(prefix) and tool_name[len(prefix):] in self._by_munged:
             # One of the tools this bridge serves: call_tool applies the allowlist and
-            # gates on the call itself. Checked by membership, not prefix: another MCP
-            # server whose name starts with ours (e.g. "daedalus__x") must not inherit
-            # an automatic allow for its tools.
+            # gates on the call itself. Checked by membership, not prefix, so a name that
+            # merely starts with ours goes to the gate; an exact collision needs the
+            # per-run server name (see __init__).
             return {"behavior": "allow", "updatedInput": tool_input}
         if self.turn.approve is None:
             refusal = f"{tool_name}: nobody can approve it in this run"

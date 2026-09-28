@@ -95,7 +95,8 @@ async def test_approve_allows_our_own_tools_without_asking(tmp_path):
     async with ToolBridge(_turn(tmp_path, approve=approve)) as bridge:
         async with _client(bridge) as session:
             result = await session.call_tool(
-                "approve", {"tool_name": "mcp__daedalus__files__read", "input": {"path": "/x"}}
+                "approve",
+                {"tool_name": f"mcp__{bridge.server_name}__files__read", "input": {"path": "/x"}},
             )
     assert json.loads(_text(result)) == {"behavior": "allow", "updatedInput": {"path": "/x"}}
     assert asked == []  # call_tool gates our tools on the call itself
@@ -112,14 +113,14 @@ async def test_approve_does_not_trust_a_name_that_only_shares_our_prefix(tmp_pat
         return f"blocked: {name}"
 
     async with ToolBridge(_turn(tmp_path, approve=approve)) as bridge:
+        spoof = f"mcp__{bridge.server_name}__evil__Bash"
         async with _client(bridge) as session:
             result = await session.call_tool(
-                "approve",
-                {"tool_name": "mcp__daedalus__evil__Bash", "input": {"command": "rm -rf ~"}},
+                "approve", {"tool_name": spoof, "input": {"command": "rm -rf ~"}}
             )
     decision = json.loads(_text(result))
-    assert decision == {"behavior": "deny", "message": "blocked: mcp__daedalus__evil__Bash"}
-    assert asked == ["mcp__daedalus__evil__Bash"]
+    assert decision == {"behavior": "deny", "message": f"blocked: {spoof}"}
+    assert asked == [spoof]
 
 
 async def test_approve_runs_the_gate_for_an_engine_native_tool(tmp_path):
@@ -148,13 +149,22 @@ async def test_approve_denies_when_nobody_can_approve(tmp_path):
 
 async def test_mcp_config_points_claude_at_the_bridge_with_the_token(tmp_path):
     async with ToolBridge(_turn(tmp_path)) as bridge:
-        server = bridge.mcp_config()["mcpServers"]["daedalus"]
+        server = bridge.mcp_config()["mcpServers"][bridge.server_name]
         assert server == {
             "type": "http",
             "url": bridge.url,
             "headers": {"Authorization": f"Bearer {bridge.token}"},
         }
-        assert bridge.approve_tool == "mcp__daedalus__approve"
+        assert bridge.approve_tool == f"mcp__{bridge.server_name}__approve"
+
+
+async def test_each_bridge_gets_its_own_unguessable_server_name(tmp_path):
+    """Temperance, PR 107 r2: a foreign server named "<ours>__files" exposing "read"
+    would be byte-identical to our files__read. A per-run name makes that impossible to
+    arrange in advance."""
+    async with ToolBridge(_turn(tmp_path)) as a, ToolBridge(_turn(tmp_path)) as b:
+        assert a.server_name != b.server_name
+        assert a.server_name.startswith("daedalus-") and "_" not in a.server_name
 
 
 async def test_the_agent_gates_engine_native_tools(tmp_path):
