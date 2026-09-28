@@ -259,7 +259,9 @@ class ClaudeCodeSpec(_WarnExtra):
     """Settings for the Claude Code engine (tenishai/agents#51). Used only when the
     operator runs the bundle with that engine; the LiteLLM engine ignores them."""
 
-    binary: str = "claude"
+    # None = the Claude Code CLI bundled with claude-agent-sdk, else `claude` on PATH
+    # (the SDK's own lookup). Set a path or name only to run a different binary.
+    binary: str | None = None
     # A full model id. None = whatever the Claude Code config dir pins in its
     # settings.json. Never an alias (agents-archive#142).
     model: str | None = None

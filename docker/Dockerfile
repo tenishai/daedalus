@@ -28,18 +28,19 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "liminal @ file:///src/liminal" "/src/daedalus[a2a,slack,aws]" "google-cloud-aiplatform>=1.38"
+RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "liminal @ file:///src/liminal" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --create-home agent
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack,aws]" "techne[vectors]" liminal google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack,aws,claude-code]" "techne[vectors]" liminal google-cloud-aiplatform && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.
 RUN python -c "import daedalus, techne; from techne.core.database import connect, like_escape; from techne.core import knowledge"
+RUN python -c "import claude_agent_sdk"   # the Claude Code engine (--engine claude-code), with its bundled CLI
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
 # Version floor: techne arrives as a named build context, so nothing else

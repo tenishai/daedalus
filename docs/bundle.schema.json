@@ -78,9 +78,16 @@
       "description": "Settings for the Claude Code engine (tenishai/agents#51). Used only when the\noperator runs the bundle with that engine; the LiteLLM engine ignores them.",
       "properties": {
         "binary": {
-          "default": "claude",
-          "title": "Binary",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Binary"
         },
         "model": {
           "anyOf": [
