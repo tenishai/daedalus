@@ -74,8 +74,13 @@ def test_options_keep_workspace_settings_out_and_only_our_tools_pre_approved(tmp
     assert o.max_turns == 10
     assert o.env["DAEDALUS_ENGINE_CHILD"] == "1"
     assert "CLAUDE_CONFIG_DIR" not in o.env
-    assert o.cli_path == "claude"
+    assert o.cli_path is None  # the SDK then uses its bundled CLI (tenishai/agents#51)
     assert o.model is None
+
+
+def test_options_pass_a_configured_binary(tmp_path):
+    o = ClaudeCodeEngine(ClaudeCodeSpec(binary="/opt/claude")).options(_turn(tmp_path), sdk, "p")
+    assert o.cli_path == "/opt/claude"
 
 
 def test_options_pass_the_pinned_model_and_config_dir(tmp_path):
@@ -294,3 +299,18 @@ def test_a_token_budget_is_refused_with_this_engine(tmp_path):
     with pytest.raises(BundleError, match="can't enforce it"):
         Agent(Bundle.load(tmp_path), engine="claude-code")
 
+
+
+@pytest.mark.parametrize("binary, words", [
+    (None, "bundled with claude-agent-sdk"),
+    ("/opt/claude", "can't run `/opt/claude`"),
+])
+async def test_a_missing_cli_names_where_it_looked(tmp_path, binary, words):
+    async def query(*, prompt, options):
+        raise sdk.CLINotFoundError("not found")
+        yield  # pragma: no cover - makes this an async generator
+
+    task = await ClaudeCodeEngine(ClaudeCodeSpec(binary=binary), query=query).run(_turn(tmp_path))
+    assert task.state is TaskState.FAILED
+    assert words in task.agent_text()
+    assert "--engine litellm" in task.agent_text()

@@ -153,9 +153,10 @@ class ClaudeCodeEngine:
             permission_mode=self.spec.permission_mode,
             allowed_tools=[f"mcp__{SERVER}__{safe}" for safe in canonical],
             max_turns=turn.spec.tools.max_steps,
-            cli_path=self.spec.binary,
             env=env,
         )
+        if self.spec.binary:  # else the SDK finds its bundled CLI, then PATH
+            kwargs["cli_path"] = self.spec.binary
         if self.spec.model:
             kwargs["model"] = self.spec.model
         if turn.approve is None:
@@ -203,8 +204,11 @@ class ClaudeCodeEngine:
                         result = message
         except sdk.CLINotFoundError:
             return task.reply(
-                f"The Claude Code engine needs `{self.spec.binary}` on PATH, and it isn't "
-                "there. Install Claude Code, or run with --engine litellm.",
+                (f"The Claude Code engine can't run `{self.spec.binary}`. "
+                 if self.spec.binary else
+                 "The Claude Code engine found no Claude Code CLI (neither the one bundled "
+                 "with claude-agent-sdk nor `claude` on PATH). ")
+                + "Install Claude Code, or run with --engine litellm.",
                 state=TaskState.FAILED,
                 reason=ReasonCode.ESCALATION,
             )
