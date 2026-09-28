@@ -19,9 +19,12 @@ Settings passed explicitly, and why:
 - permission_mode from the bundle: otherwise the operator's own default applies.
 - allowed_tools = only our tools (they are gated on the call). Built-ins are not
   pre-approved here, so a built-in call that needs permission reaches can_use_tool and
-  the bundle's gates. Claude Code still approves some calls itself, and those never
-  reach the gates: read-only commands, what the permission mode auto-approves, and
-  permissions.allow rules in the agent's own (user) settings.
+  the bundle's gates, which name it claude.<Tool> (claude.Bash), as the trace does.
+  Claude Code still approves some calls itself, and those never reach the gates, for
+  example: read-only tools and commands (Read, Grep, Glob in the working directory;
+  ls, echo), what the permission mode auto-approves, permissions.allow rules and
+  PreToolUse hooks in the agent's own (user) settings. Gate what can't be allowed
+  that way by leaving it out of builtin_tools.
 - A built-in the Agent says nobody could approve (turn.withheld: gated, under the
   DenyAll approver) is withheld from the tool list and the model is told why, as the
   Agent does for its own tools (daedalus PR 105), instead of being offered and refused.
@@ -105,10 +108,13 @@ class ClaudeCodeEngine:
         async def can_use_tool(tool_name, tool_input, context):
             if tool_name.startswith(prefix) and tool_name[len(prefix):] in ours:
                 return sdk.PermissionResultAllow(updated_input=tool_input)  # gated on call
-            refusal = await turn.approve(tool_name, tool_input)
+            # Gates and the trace both name a built-in claude.<Tool> (claude.Bash), so a
+            # gate written from what -v shows is the gate that fires.
+            named = f"claude.{tool_name}"
+            refusal = await turn.approve(named, tool_input)
             if refusal is None:
                 return sdk.PermissionResultAllow(updated_input=tool_input)
-            turn.emit("permission_denied", name=tool_name)
+            turn.emit("permission_denied", name=named)
             return sdk.PermissionResultDeny(
                 message=refusal, interrupt=self.spec.on_denied == "stop"
             )
@@ -119,7 +125,7 @@ class ClaudeCodeEngine:
         """The built-ins to offer, and the system prompt. When nobody can approve,
         gated built-ins are withheld and the prompt says so."""
         builtins = list(self.spec.builtin_tools)
-        withheld = [b for b in builtins if turn.withheld and turn.withheld(b)]
+        withheld = [b for b in builtins if turn.withheld and turn.withheld(f"claude.{b}")]
         if not withheld:
             return builtins, system
         turn.emit("tools_withheld", names=[f"claude.{b}" for b in withheld])
@@ -215,17 +221,16 @@ class ClaudeCodeEngine:
         # (agents-archive#142, daedalus#103), so the trace records what happened.
         turn.emit("engine_finished", engine=self.name,
                   models=sorted((result.model_usage or {}).keys()), turns=result.num_turns)
-        usage = result.usage or {}
-        spent = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
-        if spent:
-            turn.budget.spend(spent)
+        # No token budget here: Claude Code runs the whole loop, so per_task_tokens can't
+        # stop it between calls. The Agent refuses to load a bundle that sets one with
+        # this engine rather than ignore it.
         text = str(result.result or "")
         if result.is_error or result.subtype != "success":
             if result.subtype == "error_max_turns":
                 return task.reply(
                     "I had to stop before finishing -- this task needed more than the "
-                    f"{turn.spec.tools.max_steps} tool steps I'm allowed in one go. A "
-                    "narrower ask may fit; my operator can raise the limit.",
+                    f"{turn.spec.tools.max_steps} turns I'm allowed in one go. A narrower "
+                    "ask may fit; my operator can raise the limit.",
                     state=TaskState.FAILED,
                     reason=ReasonCode.POLICY_VIOLATION,
                 )

@@ -105,7 +105,7 @@ async def test_can_use_tool_allows_our_tools_and_gates_everything_else(tmp_path)
 
     async def approve(name, arguments):
         asked.append(name)
-        return None if name == "Bash" else f"blocked: {name}"
+        return None if name == "claude.Bash" else f"blocked: {name}"
 
     events = []
     engine = ClaudeCodeEngine(ClaudeCodeSpec())
@@ -116,9 +116,10 @@ async def test_can_use_tool_allows_our_tools_and_gates_everything_else(tmp_path)
     assert isinstance(ours, sdk.PermissionResultAllow) and ours.updated_input == {"path": "/x"}
     assert isinstance(bash, sdk.PermissionResultAllow)
     assert isinstance(spoof, sdk.PermissionResultDeny)
-    assert spoof.message == "blocked: mcp__daedalus__evil__Bash" and spoof.interrupt is False
-    assert asked == ["Bash", "mcp__daedalus__evil__Bash"]  # ours never asked
-    assert ("permission_denied", {"name": "mcp__daedalus__evil__Bash"}) in events
+    assert spoof.message == "blocked: claude.mcp__daedalus__evil__Bash"
+    assert spoof.interrupt is False
+    assert asked == ["claude.Bash", "claude.mcp__daedalus__evil__Bash"]  # ours never asked
+    assert ("permission_denied", {"name": "claude.mcp__daedalus__evil__Bash"}) in events
 
 
 async def test_on_denied_stop_interrupts_the_run(tmp_path):
@@ -184,7 +185,7 @@ async def test_running_out_of_turns_is_a_policy_stop(tmp_path):
     task = await ClaudeCodeEngine(ClaudeCodeSpec(), query=query).run(_turn(tmp_path))
     assert task.state is TaskState.FAILED
     assert task.reason_code is ReasonCode.POLICY_VIOLATION
-    assert "10 tool steps" in task.agent_text()
+    assert "10 turns" in task.agent_text()
 
 
 async def test_an_error_result_or_no_result_fails_as_escalation(tmp_path):
@@ -236,7 +237,7 @@ def test_with_nobody_to_approve_gated_builtins_are_withheld_and_explained(tmp_pa
     built-ins stay usable (Prudence runs tests with Bash, unattended)."""
     events = []
     turn = _turn(tmp_path, events=events)
-    turn.withheld = lambda name: name == "Bash"  # the Agent's rule, stubbed
+    turn.withheld = lambda name: name == "claude.Bash"  # the Agent's rule, stubbed
     o = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Read", "Bash"])).options(turn, sdk, "p")
     assert o.tools == ["Read"]
     assert "Built-in tools you can't use in this run" in o.system_prompt
@@ -254,12 +255,42 @@ def test_with_an_approver_gated_builtins_stay_offered(tmp_path):
 def test_the_agent_withholds_a_gated_native_tool_only_when_nobody_can_approve(tmp_path):
     from tests.fakes import RecordingApprover
 
-    gates = "    - match: 'Bash'\n      require: human\n"
+    gates = "    - match: 'claude.Bash'\n      require: human\n"
     headless = make_agent(tmp_path, allow=["files.read"], gates=gates)
-    assert headless._withheld_native("Bash") is True
-    assert headless._withheld_native("Read") is False  # no gate
+    assert headless._withheld_native("claude.Bash") is True
+    assert headless._withheld_native("claude.Read") is False  # no gate
     (tmp_path / "b").mkdir()
     wired = make_agent(tmp_path / "b", allow=["files.read"], gates=gates,
                        approver=RecordingApprover(True))
-    assert wired._withheld_native("Bash") is False
+    assert wired._withheld_native("claude.Bash") is False
+
+
+async def test_a_gate_written_from_the_trace_fires(tmp_path):
+    """Prudence, PR 108 r1: the trace says claude.Bash, so a gate on claude.* must catch
+    Bash. Before, gates saw the bare name and claude.* matched nothing (fail open)."""
+    from tests.fakes import RecordingApprover
+
+    approver = RecordingApprover(False)
+    gates = "    - match: 'claude.*'\n      require: human\n"
+    agent = make_agent(tmp_path, allow=["files.read"], gates=gates, approver=approver)
+    engine = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Bash"]))
+    turn = _turn(tmp_path, approve=agent._approve_native)
+    turn.spec = agent.bundle.spec
+    decide = engine.options(turn, sdk, "p").can_use_tool
+    decision = await decide("Bash", {"command": "ls"}, None)
+    assert isinstance(decision, sdk.PermissionResultDeny)
+    assert approver.asked and approver.asked[0][0] == "claude.Bash"
+
+
+def test_a_token_budget_is_refused_with_this_engine(tmp_path):
+    """Prudence, PR 108 r1: per_task_tokens can't stop Claude Code between calls, so
+    loading refuses instead of silently not enforcing it."""
+    make_agent(tmp_path, allow=["files.read"])
+    text = (tmp_path / "agent.yaml").read_text().replace(
+        "model:\n  id: m\n", "model:\n  id: m\n  budget:\n    per_task_tokens: 50000\n"
+    )
+    (tmp_path / "agent.yaml").write_text(text)
+    assert Agent(Bundle.load(tmp_path)).engine_name == "litellm"  # fine there
+    with pytest.raises(BundleError, match="can't enforce it"):
+        Agent(Bundle.load(tmp_path), engine="claude-code")
 

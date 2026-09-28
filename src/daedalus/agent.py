@@ -101,6 +101,13 @@ class Agent:
             raise BundleError(
                 f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
             )
+        if self.engine_name == "claude-code" and bundle.spec.model.budget.per_task_tokens:
+            # Declare the gap and refuse, never degrade silently (#51): Claude Code runs
+            # the whole loop, so a token budget couldn't stop it between calls.
+            raise BundleError(
+                "model.budget.per_task_tokens is set, and the claude-code engine can't "
+                "enforce it; remove it, or run with --engine litellm"
+            )
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os

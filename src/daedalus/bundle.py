@@ -265,10 +265,12 @@ class ClaudeCodeSpec(_WarnExtra):
     model: str | None = None
     # Claude Code built-ins this agent may use (e.g. Read, Grep, Bash). Default none: the
     # agent's tools come from the bundle. A built-in call that needs permission goes
-    # through the bundle's approval gates (can_use_tool); one with no matching gate is
-    # allowed. Calls Claude Code approves itself never reach the gates: read-only
-    # commands, what the permission mode auto-approves, and permissions.allow rules in
-    # the agent's own (user) settings.
+    # through the bundle's approval gates, which name it claude.<Tool> (match:
+    # "claude.Bash", as the trace shows it); one with no matching gate is allowed.
+    # Calls Claude Code approves itself never reach the gates, for example read-only
+    # tools and commands, what the permission mode auto-approves, and permissions.allow
+    # rules or PreToolUse hooks in the agent's own (user) settings. To be sure a
+    # built-in can't run, leave it out of this list.
     builtin_tools: list[str] = Field(default_factory=list)
     # Passed explicitly: otherwise the operator's own default mode applies. "default"
     # asks (through our approval gates) for anything not pre-approved.
