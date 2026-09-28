@@ -105,7 +105,11 @@ async def test_call_outside_ceiling_is_blocked_even_if_model_forges_the_name(tmp
     assert "unknown or disallowed" in llm.calls[1][-1]["content"]
 
 
-async def test_gate_denied_by_default_denyall(tmp_path):
+async def test_gate_with_no_approver_withholds_the_tool_and_says_why(tmp_path):
+    """No approver wired (DenyAll): a gated tool is not offered at all, and the model
+    is told why, instead of being offered it and refused on every call (the retry
+    loop architect pattern 3f170e7aff8d918f warns about). Still fail-closed: a call
+    the model makes anyway (e.g. text-leaked) finds no tool."""
     llm = ScriptedLLM(
         tool_turn(ToolCall(id="1", name="files__write", arguments={"path": "/a"})),
         "could not write",
@@ -113,9 +117,40 @@ async def test_gate_denied_by_default_denyall(tmp_path):
     tools = FakeTools([READ_SPEC, WRITE_SPEC])
     gates = "    - match: 'files.write*'\n      require: plan_approval\n"
     agent = make_agent(tmp_path, allow=["files.*"], gates=gates, llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
     await agent.handle_task(Task.from_text("write it"))
     assert tools.calls == []  # gate held with no approver wired
-    assert "requires approval" in llm.calls[1][-1]["content"]
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["files__read"]
+    system = llm.calls[0][0]["content"]
+    assert "Tools you can't use in this run" in system and "files.write" in system
+    assert {"type": "tools_withheld", "names": ["files.write"]} in events
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+
+
+async def test_a_wired_approver_keeps_gated_tools_offered(tmp_path):
+    llm = ScriptedLLM("done")
+    gates = "    - match: 'files.write*'\n      require: plan_approval\n"
+    agent = make_agent(
+        tmp_path, allow=["files.*"], gates=gates, llm=llm,
+        tools=FakeTools([READ_SPEC, WRITE_SPEC]), approver=RecordingApprover(True),
+    )
+    await agent.handle_task(Task.from_text("hi"))
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["files__read", "files__write"]
+    assert "Tools you can't use" not in llm.calls[0][0]["content"]
+
+
+def test_the_withheld_note_is_added_once():
+    from daedalus.agent import _with_withheld_note
+
+    messages = [{"role": "system", "content": "persona"}, {"role": "user", "content": "x"}]
+    once = _with_withheld_note(messages, {"files.write"})
+    twice = _with_withheld_note(once, {"files.write"})
+    assert twice == once
+    assert once[0]["content"].count("Tools you can't use in this run") == 1
+    assert messages[0]["content"] == "persona"  # the caller's list is not mutated
 
 
 async def test_gate_approved_executes_and_approver_saw_the_plan(tmp_path):
