@@ -255,6 +255,33 @@ class ApprovalsSpec(_WarnExtra):
     escalation: EscalationSpec = Field(default_factory=EscalationSpec)
 
 
+class ClaudeCodeSpec(_WarnExtra):
+    """Settings for the Claude Code engine (tenishai/agents#51). Used only when the
+    operator runs the bundle with that engine; the LiteLLM engine ignores them."""
+
+    binary: str = "claude"
+    # A full model id. None = whatever the Claude Code config dir pins in its
+    # settings.json. Never an alias (agents-archive#142).
+    model: str | None = None
+    # Claude Code built-ins this agent may use (e.g. Read, Grep, Bash). Default none:
+    # the agent's tools come from the bundle, through the bridge. A built-in is still
+    # subject to the bundle's approval gates via --permission-prompt-tool.
+    builtin_tools: list[str] = Field(default_factory=list)
+    # Passed explicitly: otherwise the operator's own default mode applies. "default"
+    # asks (through our approval gates) for anything not pre-approved.
+    permission_mode: Literal["default", "dontAsk", "acceptEdits", "plan"] = "default"
+    # When our gates deny a built-in tool: "continue" tells the model and lets it go
+    # on; "stop" ends the run. An explicit choice, never a fall-through (architect
+    # pattern cfa4619c74d518cb).
+    on_denied: Literal["continue", "stop"] = "continue"
+    # CLAUDE_CONFIG_DIR for the child. None = inherit the operator's environment.
+    config_dir: str | None = None
+
+
+class EngineSpec(_WarnExtra):
+    claude_code: ClaudeCodeSpec = Field(default_factory=ClaudeCodeSpec)
+
+
 class AgentSpec(_WarnExtra):
     """Schema of agent.yaml. Approvals are parsed in v0.1, enforced from v0.2."""
 
@@ -267,6 +294,10 @@ class AgentSpec(_WarnExtra):
     memory: MemorySpec = Field(default_factory=MemorySpec)
     checkpoints: Literal["none", "sqlite"] = "none"
     approvals: ApprovalsSpec = Field(default_factory=ApprovalsSpec)
+    # Per-engine settings. WHICH engine runs the bundle is the operator's choice at
+    # run time (daedalus run --engine), not the bundle's: the same bundle must run for
+    # someone with Claude Code and someone without.
+    engine: EngineSpec = Field(default_factory=EngineSpec)
 
 
 def bundle_schema() -> dict:

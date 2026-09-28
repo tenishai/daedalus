@@ -67,6 +67,10 @@ def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
 
+#: Engines an operator can choose with --engine / DAEDALUS_ENGINE (tenishai/agents#51).
+ENGINES = ("litellm", "claude-code")
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -84,8 +88,19 @@ class Agent:
         checkpoints: CheckpointStore | None = None,
         approver: Approver | None = None,
         on_event: Callable[[dict], None] | None = None,
+        engine: str | None = None,
     ):
         self.bundle = bundle
+        # Which engine runs the bundle is the operator's choice (tenishai/agents#51):
+        # the argument, else DAEDALUS_ENGINE, else litellm. Checked here so a typo fails
+        # at load, not on the first task.
+        import os
+
+        self.engine_name = engine or os.environ.get("DAEDALUS_ENGINE") or "litellm"
+        if self.engine_name not in ENGINES:
+            raise BundleError(
+                f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
+            )
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
@@ -786,6 +801,10 @@ class Agent:
 
     def _engine(self) -> Engine:
         """Built per turn, so a test that swaps `agent.llm` is honoured."""
+        if self.engine_name == "claude-code":
+            from daedalus.engines.claude_code import ClaudeCodeEngine
+
+            return ClaudeCodeEngine(self.bundle.spec.engine.claude_code)
         return LiteLLMEngine(self.llm)
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
