@@ -1,7 +1,10 @@
 """The LiteLLM engine: daedalus's own agent loop over any model LiteLLM routes.
 
-Moved unchanged from Agent._loop (tenishai/agents#51 step 1); tests/test_agent_tools.py
-is its behaviour spec.
+The loop from Agent._loop and _wrap_up, moved with mechanical substitutions (self._emit
+to turn.emit, self.bundle.spec to turn.spec, and so on); tests/test_agent_tools.py is
+its behaviour spec. Tool dispatch is split: this loop maps model-safe names back to
+canonical ones, and turn.call_tool (Agent._call_tool) enforces the allowlist, approval
+gates and provider.
 """
 
 from __future__ import annotations
@@ -102,23 +105,24 @@ def _to_openai(spec: dict) -> dict:
     return {
         "type": "function",
         "function": {
-        "name": _munge(spec["name"]),
-        "description": spec.get("description", ""),
-        "parameters": spec.get("parameters", {"type": "object", "properties": {}}),
+            "name": _munge(spec["name"]),
+            "description": spec.get("description", ""),
+            "parameters": spec.get("parameters", {"type": "object", "properties": {}}),
         },
     }
+
 
 def _assistant_message(text: str, tool_calls: list[ToolCall]) -> dict:
     return {
         "role": "assistant",
         "content": text or None,
         "tool_calls": [
-        {
-            "id": call.id,
-            "type": "function",
-            "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
-        }
-        for call in tool_calls
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
+            }
+            for call in tool_calls
         ],
     }
 
@@ -132,9 +136,8 @@ class LiteLLMEngine:
         self.llm = llm
 
     async def run(self, turn: EngineTurn) -> Task:
-        task, messages, allowed, spec, emit = (
-            turn.task, turn.messages, turn.tools, turn.spec, turn.emit
-        )
+        task, messages, allowed = turn.task, turn.messages, turn.tools
+        spec, emit = turn.spec, turn.emit
         llm_tools = [_to_openai(tool) for tool in allowed] or None
         by_munged = {_munge(tool["name"]): tool["name"] for tool in allowed}
         budget = turn.budget

@@ -1,7 +1,7 @@
 """Conversation journal: the durable record the daily-learnings summarizer
 reads. Checkpoints cannot serve this purpose -- a task's checkpoint row is
-dropped the moment the task completes (agent.py, _loop), and checkpoints
-carry neither timestamps in their payload nor a list API. This journal is
+dropped the moment the task completes (engines/litellm.py, LiteLLMEngine.run),
+and checkpoints carry neither timestamps in their payload nor a list API. This journal is
 the opposite trade: one row per context_id, upserted AT completion, kept
 for RETENTION_DAYS, pruned on every write.
 
