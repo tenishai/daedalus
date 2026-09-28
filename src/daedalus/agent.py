@@ -13,11 +13,10 @@ from pathlib import Path
 from daedalus.bundle import Bundle, BundleError, unmet_requirements
 from daedalus.enforcement import Enforcement
 from daedalus.engines.base import Engine, EngineTurn
-# _SALVAGE_CAP and salvage_tool_calls are re-exported: tests import them from here.
-from daedalus.engines.litellm import (  # noqa: F401
-    _SALVAGE_CAP,
+from daedalus.engines.litellm import (
+    _SALVAGE_CAP,  # noqa: F401  re-exported: tests import it from here
     LiteLLMEngine,
-    salvage_tool_calls,
+    salvage_tool_calls,  # noqa: F401  re-exported: tests import it from here
 )
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
