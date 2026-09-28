@@ -49,6 +49,24 @@ from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 log = logging.getLogger(__name__)
 
 
+_WITHHELD_HEADING = "## Tools you can't use in this run"
+
+
+def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
+    """Tell the model which tools were withheld and why, once (a resumed task's
+    checkpointed system prompt already carries the note)."""
+    system = messages[0]
+    if system.get("role") != "system" or _WITHHELD_HEADING in str(system.get("content")):
+        return messages
+    note = (
+        f"\n\n{_WITHHELD_HEADING}\n"
+        "These tools need approval, and nobody can give it in this run, so they are "
+        f"not available: {', '.join(sorted(withheld))}. Don't try to call them. If the "
+        "task needs one, say what you would have done with it."
+    )
+    return [{**system, "content": system["content"] + note}, *messages[1:]]
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -738,6 +756,14 @@ class Agent:
                 state=TaskState.FAILED,
                 reason=ReasonCode.ESCALATION,
             )
+        withheld = self._unapprovable(allowed)
+        if withheld:
+            # Nobody can approve a gated tool in this run, so don't offer it: a model
+            # offered a tool and refused every time retries a refusal it can't
+            # understand. Tell it why instead (architect pattern 3f170e7aff8d918f).
+            allowed = [spec for spec in allowed if spec["name"] not in withheld]
+            self._emit("tools_withheld", names=sorted(withheld))
+            messages = _with_withheld_note(messages, withheld)
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
 
@@ -760,6 +786,19 @@ class Agent:
     def _engine(self) -> Engine:
         """Built per turn, so a test that swaps `agent.llm` is honoured."""
         return LiteLLMEngine(self.llm)
+
+    def _unapprovable(self, tools: list[dict]) -> set[str]:
+        """Gated tools nobody can approve in this run: the approver is still the
+        fail-closed DenyAll (a headless run; transports that reach a human replace it
+        before any task, see transports/slack.py)."""
+        if not isinstance(self.approver, DenyAll):
+            return set()
+        gates = self.bundle.spec.approvals.gates
+        return {
+            spec["name"]
+            for spec in tools
+            if any(fnmatch(spec["name"], g.match) for g in gates)
+        }
 
     async def _allowed_tools(self) -> list[dict]:
         """Tier-1 ceiling, enforced at listing: the model never sees a tool it
