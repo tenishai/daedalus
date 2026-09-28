@@ -73,11 +73,12 @@ class ToolBridge:
         self.turn = turn
         # A fresh name per run: Claude Code names our tools mcp__<server>__<tool>, and a
         # foreign server named "<ours>__files" with a tool "read" would produce exactly
-        # our mcp__<ours>__files__read. With an unguessable server name nothing can
-        # collide on purpose. The engine that launches Claude Code must also pass
-        # --strict-mcp-config so no other server loads. No underscores in the name, so
-        # it can't itself split.
-        self.server_name = server_name or f"daedalus-{secrets.token_hex(4)}"
+        # our mcp__<ours>__files__read. The name is unpredictable per run (64 random
+        # bits), so such a collision can't be set up in advance. 64 bits, not more,
+        # because the name is part of every tool name Claude Code sees. The engine that
+        # launches Claude Code must also pass --strict-mcp-config so no other server
+        # loads. No underscores in the name, so it can't itself split.
+        self.server_name = server_name or f"daedalus-{secrets.token_hex(8)}"
         self.token = secrets.token_urlsafe(32)
         self.url: str | None = None
         self._by_munged = {_munge(t["name"]): t for t in turn.tools}

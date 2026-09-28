@@ -158,13 +158,15 @@ async def test_mcp_config_points_claude_at_the_bridge_with_the_token(tmp_path):
         assert bridge.approve_tool == f"mcp__{bridge.server_name}__approve"
 
 
-async def test_each_bridge_gets_its_own_unguessable_server_name(tmp_path):
+async def test_each_bridge_gets_its_own_unpredictable_server_name(tmp_path):
     """Temperance, PR 107 r2: a foreign server named "<ours>__files" exposing "read"
-    would be byte-identical to our files__read. A per-run name makes that impossible to
-    arrange in advance."""
+    would be byte-identical to our files__read. A per-run random name (64 bits) means it
+    can't be set up in advance. This test checks the names differ and have the right
+    shape; the randomness itself comes from secrets.token_hex."""
     async with ToolBridge(_turn(tmp_path)) as a, ToolBridge(_turn(tmp_path)) as b:
         assert a.server_name != b.server_name
         assert a.server_name.startswith("daedalus-") and "_" not in a.server_name
+        assert len(a.server_name) == len("daedalus-") + 16
 
 
 async def test_the_agent_gates_engine_native_tools(tmp_path):
