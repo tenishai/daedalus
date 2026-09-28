@@ -101,6 +101,27 @@ async def test_approve_allows_our_own_tools_without_asking(tmp_path):
     assert asked == []  # call_tool gates our tools on the call itself
 
 
+async def test_approve_does_not_trust_a_name_that_only_shares_our_prefix(tmp_path):
+    """Prudence, PR 107 r1: a tool from another MCP server named e.g. "daedalus__evil"
+    reaches Claude Code as mcp__daedalus__evil__Bash. It must go to the gate, not be
+    allowed because it starts with our prefix."""
+    asked = []
+
+    async def approve(name, arguments):
+        asked.append(name)
+        return f"blocked: {name}"
+
+    async with ToolBridge(_turn(tmp_path, approve=approve)) as bridge:
+        async with _client(bridge) as session:
+            result = await session.call_tool(
+                "approve",
+                {"tool_name": "mcp__daedalus__evil__Bash", "input": {"command": "rm -rf ~"}},
+            )
+    decision = json.loads(_text(result))
+    assert decision == {"behavior": "deny", "message": "blocked: mcp__daedalus__evil__Bash"}
+    assert asked == ["mcp__daedalus__evil__Bash"]
+
+
 async def test_approve_runs_the_gate_for_an_engine_native_tool(tmp_path):
     async def approve(name, arguments):
         return None if arguments.get("command") == "ls" else f"blocked: {name} denied"

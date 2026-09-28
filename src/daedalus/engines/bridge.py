@@ -24,6 +24,7 @@ mode must be passed explicitly or the user's default mode applies.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import secrets
 from typing import Any
@@ -41,13 +42,22 @@ class _BearerAuth:
         self.app, self.token = app, token
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers") or [])
-            if headers.get(b"authorization", b"").decode() != f"Bearer {self.token}":
+        if scope["type"] == "lifespan":  # server startup/shutdown, not a request
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        given = headers.get(b"authorization", b"")
+        if scope["type"] != "http" or not hmac.compare_digest(
+            given, f"Bearer {self.token}".encode()
+        ):
+            # Anything but an authenticated HTTP request is refused, websockets included.
+            if scope["type"] == "http":
                 await send({"type": "http.response.start", "status": 401,
                             "headers": [(b"content-type", b"text/plain")]})
                 await send({"type": "http.response.body", "body": b"unauthorized"})
-                return
+            elif scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
         await self.app(scope, receive, send)
 
 
@@ -127,8 +137,12 @@ class ToolBridge:
     async def _decide(self, arguments: dict[str, Any]) -> dict:
         tool_name = str(arguments.get("tool_name", ""))
         tool_input = arguments.get("input") or {}
-        if tool_name.startswith(f"mcp__{self.server_name}__"):
-            # Our own tools: call_tool applies the allowlist and gates on the call.
+        prefix = f"mcp__{self.server_name}__"
+        if tool_name.startswith(prefix) and tool_name[len(prefix):] in self._by_munged:
+            # One of the tools this bridge serves: call_tool applies the allowlist and
+            # gates on the call itself. Checked by membership, not prefix: another MCP
+            # server whose name starts with ours (e.g. "daedalus__x") must not inherit
+            # an automatic allow for its tools.
             return {"behavior": "allow", "updatedInput": tool_input}
         if self.turn.approve is None:
             refusal = f"{tool_name}: nobody can approve it in this run"
