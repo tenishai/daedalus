@@ -74,8 +74,9 @@ class ToolBridge:
         # A fresh name per run: Claude Code names our tools mcp__<server>__<tool>, and a
         # foreign server named "<ours>__files" with a tool "read" would produce exactly
         # our mcp__<ours>__files__read. With an unguessable server name nothing can
-        # collide on purpose. (The engine also passes --strict-mcp-config, so no other
-        # server loads at all.) No underscores, so the name can't itself split.
+        # collide on purpose. The engine that launches Claude Code must also pass
+        # --strict-mcp-config so no other server loads. No underscores in the name, so
+        # it can't itself split.
         self.server_name = server_name or f"daedalus-{secrets.token_hex(4)}"
         self.token = secrets.token_urlsafe(32)
         self.url: str | None = None
