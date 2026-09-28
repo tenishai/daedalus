@@ -789,10 +789,10 @@ class Agent:
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
         """Gated tools nobody can approve in this run: the approver is still the
-        fail-closed DenyAll, whose approve() always returns False. A real approver is
-        wired before any task by the CLI chat (at construction) and by a Slack
-        transport with a channel allowlist (transports/slack.py, _wire_approver); an
-        open Slack transport and a one-shot run keep DenyAll."""
+        fail-closed DenyAll, whose approve() always returns False. Whatever wires a
+        real approver does it before any task (for example CLI chat at construction,
+        or transports/slack.py _wire_approver); any run it doesn't reach keeps
+        DenyAll, and so gets its gated tools withheld."""
         if not isinstance(self.approver, DenyAll):
             return set()
         gates = self.bundle.spec.approvals.gates
