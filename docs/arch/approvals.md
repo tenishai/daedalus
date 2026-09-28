@@ -1,0 +1,25 @@
+---
+card: arch-card:daedalus-approvals
+updated: 2026-09-28
+anchor: src/daedalus/agent.py sha=33ead63ad6346314bb61b03203c17ef3b8d7e262
+anchor: src/daedalus/enforcement.py sha=95b336ce124c57932f89cdd533fdeebaeda48590
+---
+# approvals — what a model may call, and what a reply may say
+
+WHAT / SEAM: two independent layers, both fail-closed.
+1. Tool approval (agent.py): tier 1 = `tools.allow` fnmatch patterns (Agent._allowed_tools, at listing; re-checked in _call_tool at call time). Tier 2 = `approvals.gates[].match` fnmatch → `Approver.approve(name, plan)` with plan {tool, arguments, require}. Engine-native tools (Claude Code built-ins, named `claude.<Tool>`) go through Agent._approve_native (tier 2 only; tier 1 for them is builtin_tools).
+2. Law hooks (enforcement.py `Enforcement`): bundle/tools/*.py modules exposing `pre_task(message)` and/or `post_draft(draft)`, loaded at boot, run by Agent.handle_task around the model loop. kobo stages these files ("Tooling door"); the operator tool lane writes more into `<memory.home>/tools-overlay/`.
+OPS / FLOW: handle_task → system-task markers dispatched first (see a2a-wire) → if Enforcement.locked: FAILED 703 → run_pre_task (block → 703; notices → system prompt) → memory recall → _loop: allowlist → withhold gated tools when approver is DenyAll (+ prompt note, event tools_withheld) → engine → call_tool: not in allowed set → "error: unknown or disallowed tool"; gate denies → "blocked: … requires approval"; provider exception → "tool error: …" → run_post_draft (block → discard draft from history, 703; else text replaced by hook output) → append "_(consulted: …)_" if colleagues were asked but unnamed.
+INVARIANTS:
+- Empty `tools.allow` = no tools at all. The model never sees a tool it can't call; a hallucinated name misses the map.
+- DenyAll is the default approver. Only `chat` (CliApprover) and SlackTransport._wire_approver replace it; headless `run`/a2a stay denied. Approver is process-wide: a Slack-wired approver also gates calls arriving over a2a or cli (design.md §3, by design).
+- Unapprovable gated tools are WITHHELD, not offered-then-refused (#105): a model refused every time retries a refusal it can't understand.
+- Slack reaction approver: ANY reactor's ✅ approves; the `approvers` allowlist exists but nothing wires it from config (#53). An OPEN Slack transport (no channel allowlist) therefore does NOT wire the approver: tier 2 stays closed.
+- Law never half-loads: any hook import failure (image or overlay) locks the Enforcement; every task then fails 703 until fixed. An overlay file shadowing an image hook name is skipped with a warning, not loaded.
+- Hooks run on a dedicated 4-thread pool with a 2.0 s timeout (HOOK_TIMEOUT_S). A timeout/exception/unexpected shape = block. 4 is a LIFETIME budget: 4 wedged hooks since boot and the agent stops answering until restart, on purpose.
+- pre_task denies by raising OR returning {"blocked": True, "reason": …} (#45); allowed keys are notices/blocked/reason only.
+- A blocked post_draft reply is deleted from history, never partially sent: task_to_a2a serializes full history, and persisted tasks feed history back into the model.
+- No hot reload: a hook delivered over the tool lane is inert until the next boot.
+- `approvals.ceiling` and `escalation` beyond Slack routing are parsed but unenforced; do not describe them as controls.
+CONSUMERS: agent.py (all call sites); engines via EngineTurn.call_tool/approve/withheld; transports/slack.py (SlackReactionApprover, escalation reply formatting); cli.py (CliApprover); A2A card gets `enforcement` stamp (Enforcement.card_stamp: version, hooks, locked) in Agent.transports. kobo writes the hook files and ports its validator into memory/tooling.py.
+API: Enforcement.load(tools_dir, overlay_dir), .locked, .active, .run_pre_task → PreTaskResult(blocked, notices, detail), .run_post_draft → PostDraftResult(blocked, text, detail), .card_stamp(). Tests: tests/test_enforcement.py, test_agent_enforcement.py, test_agent_tools.py.
