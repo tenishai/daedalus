@@ -55,6 +55,13 @@ def create(name: str, parent: str) -> None:
     click.echo(f"  edit {root}/persona.md, then: daedalus chat {root}")
 
 
+_ENGINE_HELP = (
+    "What runs the model and agent loop: litellm (default; daedalus's own loop, any "
+    "model LiteLLM routes) or claude-code (Claude Code is the agent; needs Claude Code "
+    "and the claude-code extra). Also DAEDALUS_ENGINE."
+)
+
+
 def _load(bundle_path: str, **overrides) -> Agent:
     try:
         return Agent.load(bundle_path, **overrides)
@@ -125,9 +132,10 @@ def _print_event(event: dict) -> None:
 @click.argument("bundle_path")
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
 @click.option("-v", "--verbose", is_flag=True, help="Trace tool calls, results, and reasoning.")
-def run(bundle_path: str, message: str | None, verbose: bool) -> None:
+@click.option("--engine", default=None, help=_ENGINE_HELP)
+def run(bundle_path: str, message: str | None, verbose: bool, engine: str | None) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
-    agent = _load(bundle_path, on_event=_print_event if verbose else None)
+    agent = _load(bundle_path, on_event=_print_event if verbose else None, engine=engine)
     if message is not None:
 
         async def one_shot():
@@ -155,7 +163,8 @@ def run(bundle_path: str, message: str | None, verbose: bool) -> None:
 @main.command()
 @click.argument("bundle_path")
 @click.option("-v", "--verbose", is_flag=True, help="Trace tool calls, results, and reasoning.")
-def chat(bundle_path: str, verbose: bool) -> None:
+@click.option("--engine", default=None, help=_ENGINE_HELP)
+def chat(bundle_path: str, verbose: bool, engine: str | None) -> None:
     """Interactive chat with the bundle, regardless of its declared transports.
 
     A human is present, so tier-2 gates prompt here; headless `run` keeps
@@ -165,6 +174,7 @@ def chat(bundle_path: str, verbose: bool) -> None:
         bundle_path,
         approver=CliApprover(),
         on_event=_print_event if verbose else None,
+        engine=engine,
     )
 
     async def chat_session():

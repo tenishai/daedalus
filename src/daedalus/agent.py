@@ -67,6 +67,10 @@ def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
 
+#: Engines an operator can choose with --engine / DAEDALUS_ENGINE (tenishai/agents#51).
+ENGINES = ("litellm", "claude-code")
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -84,8 +88,26 @@ class Agent:
         checkpoints: CheckpointStore | None = None,
         approver: Approver | None = None,
         on_event: Callable[[dict], None] | None = None,
+        engine: str | None = None,
     ):
         self.bundle = bundle
+        # Which engine runs the bundle is the operator's choice (tenishai/agents#51):
+        # the argument, else DAEDALUS_ENGINE, else litellm. Checked here so a typo fails
+        # at load, not on the first task.
+        import os
+
+        self.engine_name = engine or os.environ.get("DAEDALUS_ENGINE") or "litellm"
+        if self.engine_name not in ENGINES:
+            raise BundleError(
+                f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
+            )
+        if self.engine_name == "claude-code" and bundle.spec.model.budget.per_task_tokens:
+            # Declare the gap and refuse, never degrade silently (#51): Claude Code runs
+            # the whole loop, so a token budget couldn't stop it between calls.
+            raise BundleError(
+                "model.budget.per_task_tokens is set, and the claude-code engine can't "
+                "enforce it; remove it, or run with --engine litellm"
+            )
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
@@ -781,11 +803,16 @@ class Agent:
                 checkpoints=self.checkpoints,
                 spec=self.bundle.spec,
                 approve=self._approve_native,
+                withheld=self._withheld_native,
             )
         )
 
     def _engine(self) -> Engine:
         """Built per turn, so a test that swaps `agent.llm` is honoured."""
+        if self.engine_name == "claude-code":
+            from daedalus.engines.claude_code import ClaudeCodeEngine
+
+            return ClaudeCodeEngine(self.bundle.spec.engine.claude_code)
         return LiteLLMEngine(self.llm)
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
@@ -814,6 +841,11 @@ class Agent:
             for spec in await self.tools.tools()
             if any(fnmatch(spec["name"], pattern) for pattern in allow)
         ]
+
+    def _withheld_native(self, name: str) -> bool:
+        """A tool an engine runs itself that nobody can approve in this run: the same
+        rule _unapprovable applies to our own tools."""
+        return bool(self._unapprovable([{"name": name}]))
 
     async def _approve_native(self, name: str, arguments: dict) -> str | None:
         """Tier-2 gates for a tool an engine runs itself (not one of ours): None to

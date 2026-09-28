@@ -73,6 +73,70 @@
       "title": "CeilingSpec",
       "type": "object"
     },
+    "ClaudeCodeSpec": {
+      "additionalProperties": true,
+      "description": "Settings for the Claude Code engine (tenishai/agents#51). Used only when the\noperator runs the bundle with that engine; the LiteLLM engine ignores them.",
+      "properties": {
+        "binary": {
+          "default": "claude",
+          "title": "Binary",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "builtin_tools": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Builtin Tools",
+          "type": "array"
+        },
+        "permission_mode": {
+          "default": "default",
+          "enum": [
+            "default",
+            "dontAsk",
+            "acceptEdits",
+            "plan"
+          ],
+          "title": "Permission Mode",
+          "type": "string"
+        },
+        "on_denied": {
+          "default": "continue",
+          "enum": [
+            "continue",
+            "stop"
+          ],
+          "title": "On Denied",
+          "type": "string"
+        },
+        "config_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Config Dir"
+        }
+      },
+      "title": "ClaudeCodeSpec",
+      "type": "object"
+    },
     "CloudTrailSpec": {
       "additionalProperties": true,
       "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`. Absent role_arn = the block is off.",
@@ -156,6 +220,16 @@
         }
       },
       "title": "ColleaguesSpec",
+      "type": "object"
+    },
+    "EngineSpec": {
+      "additionalProperties": true,
+      "properties": {
+        "claude_code": {
+          "$ref": "#/$defs/ClaudeCodeSpec"
+        }
+      },
+      "title": "EngineSpec",
       "type": "object"
     },
     "EscalationSpec": {
@@ -607,6 +681,9 @@
     },
     "approvals": {
       "$ref": "#/$defs/ApprovalsSpec"
+    },
+    "engine": {
+      "$ref": "#/$defs/EngineSpec"
     }
   },
   "required": [
