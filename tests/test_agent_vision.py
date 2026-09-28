@@ -90,7 +90,7 @@ async def test_two_image_bearing_turns_each_keep_their_own_image_part():
 
 
 async def test_checkpoint_never_carries_image_base64(tmp_path):
-    """Checkpoints are written on every loop step (agent._loop) -- a
+    """Checkpoints are written on every loop step (LiteLLMEngine.run) -- a
     multi-step tool-using turn with an image attached must never balloon
     the checkpoint with the same base64 bytes, saved twice over (once from
     task.history, once from the LLM message parts)."""
