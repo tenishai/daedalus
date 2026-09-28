@@ -33,9 +33,10 @@ class EngineTurn:
     # approver. Returns None to allow, or the refusal to show the model. None here means
     # nobody can approve, and an engine must deny.
     approve: Callable[[str, dict], Awaitable[str | None]] | None = None
-    # False when nobody can approve in this run (the approver is the fail-closed DenyAll):
-    # an engine withholds gated tools of its own rather than offer them to be refused.
-    can_approve: bool = True
+    # For a tool the engine runs itself: True when nobody could approve it in this run
+    # (gated, and the approver is the fail-closed DenyAll). The engine withholds such
+    # tools rather than offer them to be refused. The rule lives in the Agent.
+    withheld: Callable[[str], bool] | None = None
 
 
 class Engine(Protocol):

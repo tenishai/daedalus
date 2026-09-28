@@ -796,7 +796,7 @@ class Agent:
                 checkpoints=self.checkpoints,
                 spec=self.bundle.spec,
                 approve=self._approve_native,
-                can_approve=not isinstance(self.approver, DenyAll),
+                withheld=self._withheld_native,
             )
         )
 
@@ -834,6 +834,11 @@ class Agent:
             for spec in await self.tools.tools()
             if any(fnmatch(spec["name"], pattern) for pattern in allow)
         ]
+
+    def _withheld_native(self, name: str) -> bool:
+        """A tool an engine runs itself that nobody can approve in this run: the same
+        rule _unapprovable applies to our own tools."""
+        return bool(self._unapprovable([{"name": name}]))
 
     async def _approve_native(self, name: str, arguments: dict) -> str | None:
         """Tier-2 gates for a tool an engine runs itself (not one of ours): None to

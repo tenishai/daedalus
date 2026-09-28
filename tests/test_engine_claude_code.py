@@ -235,11 +235,8 @@ def test_with_nobody_to_approve_gated_builtins_are_withheld_and_explained(tmp_pa
     built-in on every call. Now it isn't offered, and the model is told; ungated
     built-ins stay usable (Prudence runs tests with Bash, unattended)."""
     events = []
-    gates = "    - match: 'Bash'\n      require: human\n"
-    agent = make_agent(tmp_path, allow=["files.read"], gates=gates)
     turn = _turn(tmp_path, events=events)
-    turn.spec = agent.bundle.spec
-    turn.can_approve = False
+    turn.withheld = lambda name: name == "Bash"  # the Agent's rule, stubbed
     o = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Read", "Bash"])).options(turn, sdk, "p")
     assert o.tools == ["Read"]
     assert "Built-in tools you can't use in this run" in o.system_prompt
@@ -248,32 +245,21 @@ def test_with_nobody_to_approve_gated_builtins_are_withheld_and_explained(tmp_pa
 
 
 def test_with_an_approver_gated_builtins_stay_offered(tmp_path):
-    gates = "    - match: 'Bash'\n      require: human\n"
-    agent = make_agent(tmp_path, allow=["files.read"], gates=gates)
     turn = _turn(tmp_path)
-    turn.spec = agent.bundle.spec
+    turn.withheld = lambda name: False
     o = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Read", "Bash"])).options(turn, sdk, "p")
     assert o.tools == ["Read", "Bash"] and o.system_prompt == "p"
 
 
-async def test_the_agent_tells_the_engine_whether_anyone_can_approve(tmp_path):
+def test_the_agent_withholds_a_gated_native_tool_only_when_nobody_can_approve(tmp_path):
     from tests.fakes import RecordingApprover
 
-    seen = []
-
-    class Capture:
-        name = "capture"
-
-        async def run(self, turn):
-            seen.append(turn.can_approve)
-            return turn.task.reply("ok")
-
-    headless = make_agent(tmp_path, allow=["files.read"])
-    headless._engine = lambda: Capture()
-    await headless.handle_task(Task.from_text("x"))
+    gates = "    - match: 'Bash'\n      require: human\n"
+    headless = make_agent(tmp_path, allow=["files.read"], gates=gates)
+    assert headless._withheld_native("Bash") is True
+    assert headless._withheld_native("Read") is False  # no gate
     (tmp_path / "b").mkdir()
-    wired = make_agent(tmp_path / "b", allow=["files.read"], approver=RecordingApprover(True))
-    wired._engine = lambda: Capture()
-    await wired.handle_task(Task.from_text("x"))
-    assert seen == [False, True]
+    wired = make_agent(tmp_path / "b", allow=["files.read"], gates=gates,
+                       approver=RecordingApprover(True))
+    assert wired._withheld_native("Bash") is False
 

@@ -5,7 +5,8 @@ own `claude` binary. The bundle's persona is the system prompt; the bundle's too
 served in-process through the SDK's MCP server, each call going through
 EngineTurn.call_tool (allowlist, gates, provider); Claude Code's own built-in tools are
 decided by the bundle's gates through the SDK's can_use_tool callback. The engine holds
-no policy of its own (architect pattern 7bccb7380ff3cf03): it only forwards to the turn.
+no policy of its own (architect pattern 7bccb7380ff3cf03): approvals come from
+turn.approve and which built-ins to withhold from turn.withheld, both the Agent's rules.
 
 Claude Code is the agent doing the work, never a completion endpoint for our loop
 (techne knowledge 3555). Shipping this engine for other people's subscriptions waits on
@@ -21,9 +22,9 @@ Settings passed explicitly, and why:
   the bundle's gates. Claude Code still approves some calls itself, and those never
   reach the gates: read-only commands, what the permission mode auto-approves, and
   permissions.allow rules in the agent's own (user) settings.
-- When nobody can approve (turn.can_approve False, the DenyAll approver), gated
-  built-ins are withheld from the tool list and the model is told why, as the Agent
-  does for its own tools (daedalus PR 105), instead of being offered and refused.
+- A built-in the Agent says nobody could approve (turn.withheld: gated, under the
+  DenyAll approver) is withheld from the tool list and the model is told why, as the
+  Agent does for its own tools (daedalus PR 105), instead of being offered and refused.
 - An EngineTurn built with approve=None (no Agent behind it) gets no callback:
   --permission-prompts none, Claude Code's own unattended mode.
 - env: the operator's own (the SDK merges it) plus DAEDALUS_ENGINE_CHILD=1, a recursion
@@ -33,7 +34,6 @@ Settings passed explicitly, and why:
 from __future__ import annotations
 
 import warnings
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -119,10 +119,7 @@ class ClaudeCodeEngine:
         """The built-ins to offer, and the system prompt. When nobody can approve,
         gated built-ins are withheld and the prompt says so."""
         builtins = list(self.spec.builtin_tools)
-        if turn.can_approve:
-            return builtins, system
-        gates = turn.spec.approvals.gates
-        withheld = [b for b in builtins if any(fnmatch(b, g.match) for g in gates)]
+        withheld = [b for b in builtins if turn.withheld and turn.withheld(b)]
         if not withheld:
             return builtins, system
         turn.emit("tools_withheld", names=[f"claude.{b}" for b in withheld])
