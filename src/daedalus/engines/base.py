@@ -29,6 +29,10 @@ class EngineTurn:
     budget: Budget
     checkpoints: CheckpointStore
     spec: AgentSpec  # limits (tools.*) and model settings, read-only
+    # For tools the ENGINE runs itself (Claude Code's built-ins): the bundle's gates and
+    # approver. Returns None to allow, or the refusal to show the model. None here means
+    # nobody can approve, and an engine must deny.
+    approve: Callable[[str, dict], Awaitable[str | None]] | None = None
 
 
 class Engine(Protocol):

@@ -24,6 +24,13 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
+        # 3.12 adds the claude-code extra (mcp 2.x, uvicorn) so the engine bridge's tests
+        # run; 3.11 stays without mcp so the "mcp not installed" paths are tested too.
+        include:
+          - python-version: "3.11"
+            extras: dev
+          - python-version: "3.12"
+            extras: dev,claude-code
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,7 +45,7 @@ jobs:
         run: |
           python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
-      - run: pip install -e .[dev]
+      - run: pip install -e ".[${{ matrix.extras }}]"
       - run: ruff check src tests docker conftest.py
       - run: pytest -q
 

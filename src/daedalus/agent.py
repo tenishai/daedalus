@@ -780,6 +780,7 @@ class Agent:
                 budget=self._budget(),
                 checkpoints=self.checkpoints,
                 spec=self.bundle.spec,
+                approve=self._approve_native,
             )
         )
 
@@ -813,6 +814,19 @@ class Agent:
             for spec in await self.tools.tools()
             if any(fnmatch(spec["name"], pattern) for pattern in allow)
         ]
+
+    async def _approve_native(self, name: str, arguments: dict) -> str | None:
+        """Tier-2 gates for a tool an engine runs itself (not one of ours): None to
+        allow, or the refusal. Tier 1 for those is the engine's own tool list."""
+        gate = next(
+            (g for g in self.bundle.spec.approvals.gates if fnmatch(name, g.match)), None
+        )
+        if gate is None:
+            return None
+        plan = {"tool": name, "arguments": arguments, "require": gate.require}
+        if await self.approver.approve(name, plan):
+            return None
+        return f"blocked: {name} requires approval ({gate.require}) and it was denied"
 
     async def _call_tool(self, name: str, arguments: dict, allowed: set[str]) -> str:
         """Every engine's tool calls come through here: tier-1 re-checked at call
