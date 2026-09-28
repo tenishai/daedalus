@@ -796,6 +796,7 @@ class Agent:
                 checkpoints=self.checkpoints,
                 spec=self.bundle.spec,
                 approve=self._approve_native,
+                can_approve=not isinstance(self.approver, DenyAll),
             )
         )
 

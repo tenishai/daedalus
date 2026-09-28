@@ -14,7 +14,7 @@ from daedalus.engines import EngineTurn  # noqa: E402
 from daedalus.engines.claude_code import ClaudeCodeEngine  # noqa: E402
 from daedalus.protocols import NoBudget, NoCheckpoints  # noqa: E402
 from daedalus.task import ReasonCode, Task, TaskState  # noqa: E402
-from tests.test_agent_tools import READ_SPEC, WRITE_SPEC, make_agent  # noqa: E402
+from tests.test_agent_tools import READ_SPEC, make_agent  # noqa: E402
 
 
 def _turn(tmp_path, *, tools=(READ_SPEC,), approve: object = "unset", events=None, calls=None):
@@ -230,9 +230,50 @@ def test_bundle_rejects_an_unknown_permission_mode(tmp_path):
         Bundle.load(tmp_path)
 
 
-def test_write_spec_is_not_offered_when_not_allowed(tmp_path):
-    """Only the turn's (already allowlisted) tools become SDK tools."""
-    tools, canonical = ClaudeCodeEngine(ClaudeCodeSpec())._our_tools(
-        _turn(tmp_path, tools=(READ_SPEC,)), sdk)
-    assert list(canonical.values()) == ["files.read"]
-    assert WRITE_SPEC["name"] not in canonical.values()
+def test_with_nobody_to_approve_gated_builtins_are_withheld_and_explained(tmp_path):
+    """Temperance, PR 108 r1: with the DenyAll approver the callback refused a gated
+    built-in on every call. Now it isn't offered, and the model is told; ungated
+    built-ins stay usable (Prudence runs tests with Bash, unattended)."""
+    events = []
+    gates = "    - match: 'Bash'\n      require: human\n"
+    agent = make_agent(tmp_path, allow=["files.read"], gates=gates)
+    turn = _turn(tmp_path, events=events)
+    turn.spec = agent.bundle.spec
+    turn.can_approve = False
+    o = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Read", "Bash"])).options(turn, sdk, "p")
+    assert o.tools == ["Read"]
+    assert "Built-in tools you can't use in this run" in o.system_prompt
+    assert "Bash" in o.system_prompt.split("run")[-1]
+    assert ("tools_withheld", {"names": ["claude.Bash"]}) in events
+
+
+def test_with_an_approver_gated_builtins_stay_offered(tmp_path):
+    gates = "    - match: 'Bash'\n      require: human\n"
+    agent = make_agent(tmp_path, allow=["files.read"], gates=gates)
+    turn = _turn(tmp_path)
+    turn.spec = agent.bundle.spec
+    o = ClaudeCodeEngine(ClaudeCodeSpec(builtin_tools=["Read", "Bash"])).options(turn, sdk, "p")
+    assert o.tools == ["Read", "Bash"] and o.system_prompt == "p"
+
+
+async def test_the_agent_tells_the_engine_whether_anyone_can_approve(tmp_path):
+    from tests.fakes import RecordingApprover
+
+    seen = []
+
+    class Capture:
+        name = "capture"
+
+        async def run(self, turn):
+            seen.append(turn.can_approve)
+            return turn.task.reply("ok")
+
+    headless = make_agent(tmp_path, allow=["files.read"])
+    headless._engine = lambda: Capture()
+    await headless.handle_task(Task.from_text("x"))
+    (tmp_path / "b").mkdir()
+    wired = make_agent(tmp_path / "b", allow=["files.read"], approver=RecordingApprover(True))
+    wired._engine = lambda: Capture()
+    await wired.handle_task(Task.from_text("x"))
+    assert seen == [False, True]
+

@@ -263,9 +263,12 @@ class ClaudeCodeSpec(_WarnExtra):
     # A full model id. None = whatever the Claude Code config dir pins in its
     # settings.json. Never an alias (agents-archive#142).
     model: str | None = None
-    # Claude Code built-ins this agent may use (e.g. Read, Grep, Bash). Default none:
-    # the agent's tools come from the bundle, through the bridge. A built-in is still
-    # subject to the bundle's approval gates via --permission-prompt-tool.
+    # Claude Code built-ins this agent may use (e.g. Read, Grep, Bash). Default none: the
+    # agent's tools come from the bundle. A built-in call that needs permission goes
+    # through the bundle's approval gates (can_use_tool); one with no matching gate is
+    # allowed. Calls Claude Code approves itself never reach the gates: read-only
+    # commands, what the permission mode auto-approves, and permissions.allow rules in
+    # the agent's own (user) settings.
     builtin_tools: list[str] = Field(default_factory=list)
     # Passed explicitly: otherwise the operator's own default mode applies. "default"
     # asks (through our approval gates) for anything not pre-approved.

@@ -16,10 +16,16 @@ Settings passed explicitly, and why:
   .mcp.json, which a headless run otherwise uses without a trust prompt (agents#76).
 - strict_mcp_config: no MCP server loads but ours.
 - permission_mode from the bundle: otherwise the operator's own default applies.
-- allowed_tools = only our tools (they are gated on the call). Built-ins are never
-  pre-approved, so every one that needs permission reaches can_use_tool.
-- With nobody to approve, no callback: --permission-prompts none, Claude Code's own
-  unattended mode, which tells the model instead of letting it retry.
+- allowed_tools = only our tools (they are gated on the call). Built-ins are not
+  pre-approved here, so a built-in call that needs permission reaches can_use_tool and
+  the bundle's gates. Claude Code still approves some calls itself, and those never
+  reach the gates: read-only commands, what the permission mode auto-approves, and
+  permissions.allow rules in the agent's own (user) settings.
+- When nobody can approve (turn.can_approve False, the DenyAll approver), gated
+  built-ins are withheld from the tool list and the model is told why, as the Agent
+  does for its own tools (daedalus PR 105), instead of being offered and refused.
+- An EngineTurn built with approve=None (no Agent behind it) gets no callback:
+  --permission-prompts none, Claude Code's own unattended mode.
 - env: the operator's own (the SDK merges it) plus DAEDALUS_ENGINE_CHILD=1, a recursion
   guard for hooks (architect 343f85aad7317a68). No credential is injected.
 """
@@ -27,6 +33,7 @@ Settings passed explicitly, and why:
 from __future__ import annotations
 
 import warnings
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -108,15 +115,35 @@ class ClaudeCodeEngine:
 
         return can_use_tool
 
+    def _builtins(self, turn: EngineTurn, system: str) -> tuple[list[str], str]:
+        """The built-ins to offer, and the system prompt. When nobody can approve,
+        gated built-ins are withheld and the prompt says so."""
+        builtins = list(self.spec.builtin_tools)
+        if turn.can_approve:
+            return builtins, system
+        gates = turn.spec.approvals.gates
+        withheld = [b for b in builtins if any(fnmatch(b, g.match) for g in gates)]
+        if not withheld:
+            return builtins, system
+        turn.emit("tools_withheld", names=[f"claude.{b}" for b in withheld])
+        note = (
+            "\n\n## Built-in tools you can't use in this run\n"
+            "These need approval, and nobody can give it in this run, so they are not "
+            f"available: {', '.join(withheld)}. If the task needs one, say what you "
+            "would have done with it."
+        )
+        return [b for b in builtins if b not in withheld], system + note
+
     def options(self, turn: EngineTurn, sdk, system: str):
         tools, canonical = self._our_tools(turn, sdk)
+        builtins, system = self._builtins(turn, system)
         server = sdk.create_sdk_mcp_server(name=SERVER, tools=tools)
         env = {"DAEDALUS_ENGINE_CHILD": "1"}
         if self.spec.config_dir:
             env["CLAUDE_CONFIG_DIR"] = str(Path(self.spec.config_dir).expanduser())
         kwargs: dict[str, Any] = dict(
             system_prompt=system,
-            tools=list(self.spec.builtin_tools),
+            tools=builtins,
             mcp_servers={SERVER: server},
             strict_mcp_config=True,
             setting_sources=["user"],
