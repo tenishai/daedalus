@@ -44,7 +44,7 @@ from daedalus.protocols import (
     ToolProvider,
     Transport,
 )
-from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
+from daedalus.task import RECALL_KEY, VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 
 log = logging.getLogger(__name__)
 
@@ -466,7 +466,7 @@ class Agent:
                 reason=ReasonCode.TOOL_BLOCKED,
             )
         task.state = TaskState.WORKING
-        recalled = await self.memory.recall(task.user_text())
+        recalled = await self.memory.recall(task.metadata.get(RECALL_KEY) or task.user_text())
         if recalled:
             self._emit("recall", count=len(recalled))
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))

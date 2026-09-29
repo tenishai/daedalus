@@ -133,14 +133,23 @@ def _print_event(event: dict) -> None:
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
 @click.option("-v", "--verbose", is_flag=True, help="Trace tool calls, results, and reasoning.")
 @click.option("--engine", default=None, help=_ENGINE_HELP)
-def run(bundle_path: str, message: str | None, verbose: bool, engine: str | None) -> None:
+@click.option(
+    "--recall",
+    default=None,
+    help="With -m: recall personal memory on this text instead of MESSAGE.",
+)
+def run(
+    bundle_path: str, message: str | None, verbose: bool, engine: str | None, recall: str | None
+) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
+    if recall is not None and message is None:
+        raise click.UsageError("--recall applies to a one-shot run; pass -m too.")
     agent = _load(bundle_path, on_event=_print_event if verbose else None, engine=engine)
     if message is not None:
 
         async def one_shot():
             try:
-                return await run_once(agent, message)
+                return await run_once(agent, message, recall=recall)
             finally:
                 await agent.aclose()
 
