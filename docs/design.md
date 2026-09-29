@@ -87,6 +87,13 @@ tools:
   colleagues:                           # provider=colleagues: switchboard directory
     url: http://cabal:8300              # list_colleagues + ask_colleague over A2A
     token_env: CABAL_AGENT_TOKEN        # unset/empty = degraded, never a boot failure
+  builtin:                              # in-process tool groups
+    files: {roots: ["."]}               # files.read/list/search, read-only, rooted
+    exec:                               # exec.run: a command in the agent's own workspace;
+      roots: ["."]                      # needs approvals.ceiling.exec: true (below).
+      commands: [python, pytest, git]   # optional allowlist of bare program names
+      env: [PIP_INDEX_URL]              # passed through on top of PATH/HOME/locale; the
+      timeout: 300                      # agent's own env isn't passed (not a boundary: same user)
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read
@@ -99,6 +106,9 @@ approvals:
   ceiling:                              # tier 1 — hard capability ceiling
     write: false
     hosts: [github.com]
+    exec: true                          # required when tools.builtin.exec is set, or the
+                                        # bundle won't load; commands run as the agent in
+                                        # its container (not a security boundary)
   gates:                                # tier 2 — plan/diff/apply
     - match: "github.pr_merge"
       require: plan_approval
@@ -240,11 +250,13 @@ FastAPI stays at the edge: nothing below a transport imports it.
 
 ## 3. Approvals — three tiers
 
-1. **Ceiling** (static, tier 1): the `tools.allow` list and
-   `approvals.ceiling` are enforced at both tool-listing and tool-call time —
-   the model never sees tools it can't call, and a hallucinated name can't
-   bypass scope. Runtime context may *narrow* the ceiling, never widen it.
-   Malformed policy fails closed.
+1. **Ceiling** (static, tier 1): the `tools.allow` list is enforced at both
+   tool-listing and tool-call time — the model never sees tools it can't call,
+   and a hallucinated name can't bypass scope. Runtime context may *narrow*
+   the ceiling, never widen it. Malformed policy fails closed.
+   `approvals.ceiling.exec` is checked once, at load: without `true`, a bundle
+   that configures `tools.builtin.exec` fails to load. `approvals.ceiling.write`
+   and `approvals.ceiling.hosts` are parsed but not yet enforced anywhere.
 2. **Gates** (plan/diff/apply, tier 2): matched operations must first render
    a value-free plan (the intended action as reviewable data). The `Approver`
    presents it (CLI prompt, Slack message, or PR when the effect targets a

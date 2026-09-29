@@ -236,14 +236,21 @@ class Agent:
             providers.append(SkillsToolProvider(self.bundle.skills))
 
         for key, config in spec.builtin.items():
-            if key != "files":
-                raise BundleError(f"unknown builtin tool group {key!r} (available: files)")
-            from daedalus.tools.builtin import FilesToolProvider
-
+            if key == "files":
+                from daedalus.tools.builtin import FilesToolProvider as group
+            elif key == "exec":
+                if self.bundle.spec.approvals.ceiling.exec is not True:
+                    raise BundleError(
+                        "tools.builtin.exec runs commands, so it needs "
+                        "approvals.ceiling.exec: true in agent.yaml"
+                    )
+                from daedalus.tools.exec import ExecToolProvider as group
+            else:
+                raise BundleError(f"unknown builtin tool group {key!r} (available: files, exec)")
             try:
-                providers.append(FilesToolProvider(**config))
+                providers.append(group(**config))
             except (TypeError, ValueError) as exc:
-                raise BundleError(f"tools.builtin.files: {exc}") from exc
+                raise BundleError(f"tools.builtin.{key}: {exc}") from exc
 
         if spec.provider == "mcp":
             try:

@@ -33,6 +33,9 @@ RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "limina
 FROM python:3.12-slim
 
 RUN useradd --uid 10001 --create-home agent
+# tini as PID 1 reaps orphans: exec.run's process-group kill can leave grandchildren
+# reparented to PID 1, and daedalus doesn't wait on pids it didn't spawn.
+RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels "daedalus[a2a,slack,aws,claude-code]" "techne[vectors]" liminal google-cloud-aiplatform && rm -rf /wheels
@@ -73,5 +76,5 @@ RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_ge
 # process-singleton and the warm-up's instance would mask a cold cache.
 RUN python -c "from techne.core.embeddings import _get_embedding_model; list(_get_embedding_model(allow_download=False).embed(['build proof']))"
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["/bundle"]

@@ -68,6 +68,18 @@
           ],
           "default": null,
           "title": "Hosts"
+        },
+        "exec": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exec"
         }
       },
       "title": "CeilingSpec",
