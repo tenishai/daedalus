@@ -76,6 +76,17 @@ async def test_empty_recall_key_falls_back_to_the_prompt():
     assert memory.queries == ["hi there"]
 
 
+@pytest.mark.parametrize("value", ["   ", 42, ["title", "paths"], None])
+async def test_blank_or_non_string_recall_key_falls_back_to_the_prompt(value):
+    # A wire-supplied value must degrade, not raise out of handle_task (#40).
+    memory = _QueryMemory()
+    task = Task.from_text("hi there")
+    task.metadata[RECALL_KEY] = value
+    done = await make_agent(memory=memory).handle_task(task)
+    assert memory.queries == ["hi there"]
+    assert done.state is TaskState.COMPLETED
+
+
 async def test_no_memory_default_adds_nothing():
     llm = ScriptedLLM("ok")
     agent = make_agent(llm=llm)

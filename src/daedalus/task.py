@@ -22,7 +22,7 @@ CABAL_REASON_KEY = "cabal_reason_code"
 VERIFIED_SUB_KEY = "_verified_sub"
 # What personal memory recalls on, when the caller knows better than the prompt: a
 # prompt that carries a large payload (a diff, a document) swamps the query with it.
-# Absent or empty, recall uses the prompt text.
+# Absent, blank or not a string, recall uses the prompt text.
 RECALL_KEY = "daedalus_recall"
 
 

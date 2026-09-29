@@ -466,7 +466,12 @@ class Agent:
                 reason=ReasonCode.TOOL_BLOCKED,
             )
         task.state = TaskState.WORKING
-        recalled = await self.memory.recall(task.metadata.get(RECALL_KEY) or task.user_text())
+        # The key rides in from the wire (a2a copies metadata verbatim, #40), so only a
+        # non-blank string replaces the prompt; anything else degrades to it.
+        query = task.metadata.get(RECALL_KEY)
+        if not (isinstance(query, str) and query.strip()):
+            query = task.user_text()
+        recalled = await self.memory.recall(query)
         if recalled:
             self._emit("recall", count=len(recalled))
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
