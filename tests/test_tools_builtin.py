@@ -49,6 +49,22 @@ async def test_size_cap(root):
         await files.call("files.read", {"path": str(root / "big.bin")})
 
 
+async def test_an_interpolated_max_bytes_string_is_a_number(root):
+    # ${PRUDENCE_READ_BYTES:-40000} in agent.yaml arrives as "40000"; reads must work.
+    (root / "small.txt").write_text("hello\n")
+    (root / "big.bin").write_text("x" * 1000)
+    files = FilesToolProvider([str(root)], max_bytes="100")
+    assert "hello" in await files.call("files.read", {"path": str(root / "small.txt")})
+    with pytest.raises(ValueError, match="read limit"):
+        await files.call("files.read", {"path": str(root / "big.bin")})
+
+
+@pytest.mark.parametrize("bad", ["lots", "", "0", -5])
+async def test_a_bad_max_bytes_is_refused_at_load(root, bad):
+    with pytest.raises(ValueError, match="max_bytes must be"):
+        FilesToolProvider([str(root)], max_bytes=bad)
+
+
 async def test_empty_roots_rejected():
     with pytest.raises(ValueError, match="at least one root"):
         FilesToolProvider([])

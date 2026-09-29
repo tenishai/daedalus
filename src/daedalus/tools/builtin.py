@@ -28,11 +28,18 @@ class FilesToolProvider:
     traversal and symlink escapes fail before any I/O.
     """
 
-    def __init__(self, roots: list[str], max_bytes: int = 200_000):
+    def __init__(self, roots: list[str], max_bytes: int | str = 200_000):
         if not roots:
             raise ValueError("files builtin requires at least one root")
         self.roots = [Path(root).resolve() for root in roots]
-        self.max_bytes = max_bytes
+        # ${VAR:-default} in agent.yaml always yields a string, and this config isn't
+        # schema-typed, so take "40000" as 40000 (or refuse it at load).
+        try:
+            self.max_bytes = int(max_bytes)
+        except (TypeError, ValueError):
+            raise ValueError(f"max_bytes must be a whole number, not {max_bytes!r}") from None
+        if self.max_bytes <= 0:
+            raise ValueError(f"max_bytes must be positive, not {self.max_bytes}")
 
     async def tools(self) -> list[dict]:
         path_param = {
