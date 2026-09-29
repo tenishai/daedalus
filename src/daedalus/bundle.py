@@ -294,7 +294,9 @@ class AgentSpec(_WarnExtra):
 
     name: str
     card: str = "agent-card.json"
-    persona: str = "persona.md"
+    # One file, or several joined in order: a base persona plus overlays for how this
+    # bundle runs (e.g. persona.md + review-only.md), with no copy of the base.
+    persona: str | list[str] = "persona.md"
     model: ModelSpec
     transports: list[TransportSpec] = Field(default_factory=lambda: [TransportSpec(kind="cli")])
     tools: ToolsSpec = Field(default_factory=ToolsSpec)
@@ -483,8 +485,11 @@ class Bundle:
         spec = AgentSpec.model_validate(interpolate(raw, env))
 
         card_file = root / spec.card
-        persona_file = root / spec.persona
-        for required in (card_file, persona_file):
+        persona_names = [spec.persona] if isinstance(spec.persona, str) else spec.persona
+        if not persona_names:
+            raise BundleError(f"{wiring}: persona names no files")
+        persona_files = [root / name for name in persona_names]
+        for required in (card_file, *persona_files):
             if not required.is_file():
                 raise BundleError(f"bundle references missing file: {required}")
 
@@ -497,6 +502,6 @@ class Bundle:
             path=root,
             spec=spec,
             card=card,
-            persona=strip_persona_comments(persona_file.read_text()),
+            persona="\n".join(strip_persona_comments(f.read_text()) for f in persona_files),
             skills=load_skills(root),
         )

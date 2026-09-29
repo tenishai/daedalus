@@ -83,6 +83,35 @@ def test_missing_persona_is_a_bundle_error(tmp_path):
         Bundle.load(tmp_path)
 
 
+def test_persona_list_joins_files_in_order(tmp_path):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\npersona: [persona.md, mode.md]\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.\n<!-- note -->\n")
+    (tmp_path / "mode.md").write_text("In this run you only read.\n")
+    persona = Bundle.load(tmp_path).persona
+    assert persona.index("You are x.") < persona.index("In this run you only read.")
+    assert "note" not in persona
+
+
+def test_persona_list_names_a_missing_overlay(tmp_path):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\npersona: [persona.md, mode.md]\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.\n")
+    with pytest.raises(BundleError, match="mode.md"):
+        Bundle.load(tmp_path)
+
+
+def test_empty_persona_list_is_a_bundle_error(tmp_path):
+    (tmp_path / "agent.yaml").write_text("name: x\nmodel:\n  id: m\npersona: []\n")
+    (tmp_path / "agent-card.json").write_text("{}")
+    with pytest.raises(BundleError, match="persona names no files"):
+        Bundle.load(tmp_path)
+
+
 def test_unknown_top_level_field_warns_but_loads(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\nfrom_the_future: true\n"
