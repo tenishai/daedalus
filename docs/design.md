@@ -106,8 +106,9 @@ approvals:
   ceiling:                              # tier 1 — hard capability ceiling
     write: false
     hosts: [github.com]
-    exec: false                         # true lets tools.builtin.exec load; it runs as the
-                                        # agent in its container (not a security boundary)
+    exec: true                          # required when tools.builtin.exec is set, or the
+                                        # bundle won't load; commands run as the agent in
+                                        # its container (not a security boundary)
   gates:                                # tier 2 — plan/diff/apply
     - match: "github.pr_merge"
       require: plan_approval
@@ -249,11 +250,13 @@ FastAPI stays at the edge: nothing below a transport imports it.
 
 ## 3. Approvals — three tiers
 
-1. **Ceiling** (static, tier 1): the `tools.allow` list and
-   `approvals.ceiling` are enforced at both tool-listing and tool-call time —
-   the model never sees tools it can't call, and a hallucinated name can't
-   bypass scope. Runtime context may *narrow* the ceiling, never widen it.
-   Malformed policy fails closed.
+1. **Ceiling** (static, tier 1): the `tools.allow` list is enforced at both
+   tool-listing and tool-call time — the model never sees tools it can't call,
+   and a hallucinated name can't bypass scope. Runtime context may *narrow*
+   the ceiling, never widen it. Malformed policy fails closed.
+   `approvals.ceiling.exec` is checked once, at load: without `true`, a bundle
+   that configures `tools.builtin.exec` fails to load. `approvals.ceiling.write`
+   and `approvals.ceiling.hosts` are parsed but not yet enforced anywhere.
 2. **Gates** (plan/diff/apply, tier 2): matched operations must first render
    a value-free plan (the intended action as reviewable data). The `Approver`
    presents it (CLI prompt, Slack message, or PR when the effect targets a
