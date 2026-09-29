@@ -19,6 +19,25 @@ class MCPError(RuntimeError):
     pass
 
 
+def _argv(name: str, server: dict) -> list[str]:
+    """The server's argv. `command` is a list, or a string plus an optional `args`
+    list, as most MCP client configs write it (daedalus#117)."""
+    command, args = server["command"], server.get("args", [])
+    if isinstance(command, str):
+        command = [command]
+    if not isinstance(command, list) or not all(isinstance(a, str) for a in command):
+        raise MCPError(f"mcp server {name!r}: 'command' must be a string or a list of strings")
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise MCPError(f"mcp server {name!r}: 'args' must be a list of strings")
+    return [*command, *args]
+
+
+def _field(obj, new: str, old: str):
+    """mcp 2.x renamed camelCase fields (inputSchema -> input_schema, isError ->
+    is_error); read whichever this SDK has."""
+    return getattr(obj, new, None) if hasattr(obj, new) else getattr(obj, old, None)
+
+
 class MCPToolProvider:
     """One stdio session per configured server, all started (and stopped)
     inside a single worker task on first use.
@@ -33,7 +52,7 @@ class MCPToolProvider:
             name = server.get("name", f"server{index}")
             if not server.get("command"):
                 raise MCPError(f"mcp server {name!r}: 'command' is required")
-            self._configs[name] = server
+            self._configs[name] = {**server, "command": _argv(name, server)}
         self._sessions: dict = {}
         self._worker: asyncio.Task | None = None
         self._ready: asyncio.Event | None = None
@@ -88,7 +107,7 @@ class MCPToolProvider:
                     {
                         "name": f"{name}.{tool.name}",
                         "description": tool.description or "",
-                        "parameters": tool.inputSchema
+                        "parameters": _field(tool, "input_schema", "inputSchema")
                         or {"type": "object", "properties": {}},
                     }
                 )
@@ -103,7 +122,7 @@ class MCPToolProvider:
         result = await session.call_tool(tool, payload)
         parts = [c.text for c in result.content if getattr(c, "text", None)]
         text = "\n".join(parts) if parts else "(no text content)"
-        if getattr(result, "isError", False):
+        if _field(result, "is_error", "isError"):
             raise MCPError(text)
         return text
 
