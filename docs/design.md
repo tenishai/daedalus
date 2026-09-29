@@ -87,6 +87,13 @@ tools:
   colleagues:                           # provider=colleagues: switchboard directory
     url: http://cabal:8300              # list_colleagues + ask_colleague over A2A
     token_env: CABAL_AGENT_TOKEN        # unset/empty = degraded, never a boot failure
+  builtin:                              # in-process tool groups
+    files: {roots: ["."]}               # files.read/list/search, read-only, rooted
+    exec:                               # exec.run: a command in the agent's own workspace;
+      roots: ["."]                      # needs approvals.ceiling.exec: true (below).
+      commands: [python, pytest, git]   # optional allowlist of bare program names
+      env: [PIP_INDEX_URL]              # passed through on top of PATH/HOME/locale; the
+      timeout: 300                      # agent's own environment never reaches the command
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read
@@ -99,6 +106,8 @@ approvals:
   ceiling:                              # tier 1 — hard capability ceiling
     write: false
     hosts: [github.com]
+    exec: false                         # true lets tools.builtin.exec load; it runs as the
+                                        # agent in its container (not a security boundary)
   gates:                                # tier 2 — plan/diff/apply
     - match: "github.pr_merge"
       require: plan_approval

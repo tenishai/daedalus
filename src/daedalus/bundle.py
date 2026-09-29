@@ -238,6 +238,8 @@ class CeilingSpec(BaseModel):
 
     write: bool | None = None
     hosts: list[str] | None = None
+    # The bundle's consent to run commands: tools.builtin.exec loads only when true.
+    exec: bool | None = None
 
 
 class GateSpec(_WarnExtra):
