@@ -207,8 +207,9 @@ class ExecToolProvider:
                     "Run one command in your workspace and get its exit code and output. "
                     "Pass the command as a list of arguments, not a shell string (no pipes, "
                     "redirects or globs). " + allowed
-                    + f"It runs in `cwd` (default: {self.roots[0]}), which must be under the "
-                    f"allowed roots, for at most {self.timeout}s. Long output keeps its "
+                    + f"It runs in `cwd` (default: {self.roots[0]}; a relative cwd is relative "
+                    "to that), which must be under the allowed roots, for at most "
+                    f"{self.timeout}s. Long output keeps its "
                     f"start and end. Isolation: {self.workspace.isolation}."
                 ),
                 "parameters": {
