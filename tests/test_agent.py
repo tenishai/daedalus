@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from daedalus.agent import Agent
-from daedalus.task import Task, TaskState
+from daedalus.task import RECALL_KEY, Task, TaskState
 from tests.fakes import CannedMemory, ScriptedLLM
 
 GOLDEN = Path(__file__).parent / "golden" / "greeter"
@@ -40,6 +40,51 @@ async def test_recalled_memory_lands_in_system_message():
     agent = make_agent(llm=llm, memory=CannedMemory("shaz prefers short greetings"))
     await agent.handle_task(Task.from_text("hi"))
     assert "shaz prefers short greetings" in llm.calls[0][0]["content"]
+
+
+class _QueryMemory:
+    def __init__(self):
+        self.queries: list[str] = []
+
+    async def recall(self, query: str, k: int = 5) -> list[str]:
+        self.queries.append(query)
+        return []
+
+    async def commit(self, content: str, kind: str = "fact") -> None:
+        pass
+
+
+async def test_recall_uses_the_prompt_by_default():
+    memory = _QueryMemory()
+    await make_agent(memory=memory).handle_task(Task.from_text("hi there"))
+    assert memory.queries == ["hi there"]
+
+
+async def test_recall_key_replaces_the_prompt_as_the_query():
+    memory = _QueryMemory()
+    task = Task.from_text("a long brief with a diff in it")
+    task.metadata[RECALL_KEY] = "fusion ranking src/search.py"
+    await make_agent(memory=memory).handle_task(task)
+    assert memory.queries == ["fusion ranking src/search.py"]
+
+
+async def test_empty_recall_key_falls_back_to_the_prompt():
+    memory = _QueryMemory()
+    task = Task.from_text("hi there")
+    task.metadata[RECALL_KEY] = ""
+    await make_agent(memory=memory).handle_task(task)
+    assert memory.queries == ["hi there"]
+
+
+@pytest.mark.parametrize("value", ["   ", 42, ["title", "paths"], None])
+async def test_blank_or_non_string_recall_key_falls_back_to_the_prompt(value):
+    # A wire-supplied value must degrade, not raise out of handle_task (#40).
+    memory = _QueryMemory()
+    task = Task.from_text("hi there")
+    task.metadata[RECALL_KEY] = value
+    done = await make_agent(memory=memory).handle_task(task)
+    assert memory.queries == ["hi there"]
+    assert done.state is TaskState.COMPLETED
 
 
 async def test_no_memory_default_adds_nothing():

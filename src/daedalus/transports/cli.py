@@ -8,7 +8,7 @@ import select
 import sys
 
 from daedalus.protocols import Handler
-from daedalus.task import Message, Task, TaskState
+from daedalus.task import RECALL_KEY, Message, Task, TaskState
 
 
 def read_message(prompt: str, stream=None) -> str | None:
@@ -51,8 +51,13 @@ class CliApprover:
         return answer.strip().lower() in {"y", "yes"}
 
 
-async def run_once(handler: Handler, text: str, *, context_id: str | None = None) -> Task:
-    return await handler.handle_task(Task.from_text(text, context_id=context_id))
+async def run_once(
+    handler: Handler, text: str, *, context_id: str | None = None, recall: str | None = None
+) -> Task:
+    task = Task.from_text(text, context_id=context_id)
+    if recall:
+        task.metadata[RECALL_KEY] = recall
+    return await handler.handle_task(task)
 
 
 class CliTransport:

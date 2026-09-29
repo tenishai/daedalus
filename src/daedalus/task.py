@@ -20,6 +20,10 @@ CABAL_REASON_KEY = "cabal_reason_code"
 # after token verification and unconditionally discards any wire-supplied
 # value, so handlers can trust it (daedalus.memory.teach gates on it).
 VERIFIED_SUB_KEY = "_verified_sub"
+# What personal memory recalls on, when the caller knows better than the prompt: a
+# prompt that carries a large payload (a diff, a document) swamps the query with it.
+# Absent, blank or not a string, recall uses the prompt text.
+RECALL_KEY = "daedalus_recall"
 
 
 class TaskState(StrEnum):

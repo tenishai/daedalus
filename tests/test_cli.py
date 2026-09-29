@@ -4,6 +4,7 @@ import daedalus
 from daedalus.agent import Agent
 from daedalus.bundle import Bundle
 from daedalus.cli import main
+from daedalus.task import RECALL_KEY
 from tests.fakes import ScriptedLLM
 
 
@@ -123,3 +124,33 @@ def test_the_gate_renderer_ignores_events_that_merely_LOOK_like_it():
 # module is behind a techne `importorskip`, so a CLI rendering test placed
 # there would never run in CI at all (daedalus#48). Nothing about this test
 # needs techne.
+
+
+def test_run_recall_sets_the_recall_query(tmp_path, monkeypatch):
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    real_handle = Agent.handle_task
+    seen = []
+
+    async def spy(self, task):
+        seen.append(task.metadata.get(RECALL_KEY))
+        return await real_handle(self, task)
+
+    real_load = Agent.load.__func__
+
+    def load_with_fake_llm(cls, path, **overrides):
+        overrides.setdefault("llm", ScriptedLLM("ok"))
+        return real_load(cls, path, **overrides)
+
+    monkeypatch.setattr(Agent, "load", classmethod(load_with_fake_llm))
+    monkeypatch.setattr(Agent, "handle_task", spy)
+    args = ["run", str(tmp_path / "scout"), "-m", "big brief", "--recall", "title paths"]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert seen == ["title paths"]
+
+
+def test_run_recall_without_message_is_refused(tmp_path):
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), "--recall", "x"])
+    assert result.exit_code == 2
+    assert "pass -m too" in result.output
