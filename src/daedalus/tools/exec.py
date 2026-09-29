@@ -39,6 +39,7 @@ _BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_MAX_OUTPUT = 20_000  # bytes kept per stream: half head, half tail
 _DRAIN_AFTER_EXIT = 2.0  # seconds to collect output once the process has exited
+_EXIT_POLL = 0.05
 
 
 @dataclass
@@ -117,15 +118,27 @@ class LocalWorkspace:
         pumps = asyncio.gather(pump(proc.stdout, out), pump(proc.stderr, err))
         timed_out = False
         try:
-            await asyncio.wait_for(proc.wait(), timeout)
-        except TimeoutError:
-            timed_out = True
-        _kill_group(proc.pid)  # also reaps a child that outlived its parent holding the pipes
-        await proc.wait()
-        try:
-            await asyncio.wait_for(pumps, _DRAIN_AFTER_EXIT)
-        except TimeoutError:
-            pumps.cancel()
+            # Poll returncode rather than await proc.wait(): since Python 3.12, wait()
+            # also waits for every pipe to close, so a background child that holds
+            # stdout would hide the exit until the timeout.
+            deadline = started + timeout
+            while proc.returncode is None:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                await asyncio.sleep(_EXIT_POLL)
+        finally:
+            # On exit, timeout and cancellation alike: kill whatever is left in the
+            # group, so nothing outlives the call, then collect what was written.
+            _kill_group(proc.pid)
+            try:
+                await asyncio.wait_for(asyncio.shield(pumps), _DRAIN_AFTER_EXIT)
+            except (TimeoutError, asyncio.CancelledError):
+                pumps.cancel()
+            try:
+                await asyncio.wait_for(proc.wait(), _DRAIN_AFTER_EXIT)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
         return ExecResult(
             returncode=None if timed_out else proc.returncode,
             stdout=out.text(),
@@ -219,7 +232,8 @@ class ExecToolProvider:
         ]
 
     def _cwd(self, raw: str | None) -> Path:
-        cwd = Path(raw).resolve() if raw else self.roots[0]
+        # A relative cwd is relative to the first root, as the tool's description says.
+        cwd = (self.roots[0] / raw).resolve() if raw else self.roots[0]
         if not any(cwd.is_relative_to(root) for root in self.roots):
             allowed = ", ".join(str(root) for root in self.roots)
             raise PermissionError(f"cwd {raw!r} is outside the allowed roots ({allowed})")

@@ -157,3 +157,36 @@ async def test_exec_with_the_ceiling_consent_is_offered(tmp_path):
         assert "exec.run" in {t["name"] for t in await agent.tools.tools()}
     finally:
         await agent.aclose()
+
+
+async def test_an_exit_is_seen_even_while_a_background_child_holds_stdout(root):
+    # Prudence on #121: wait() also waits for the pipes, so this used to report a
+    # timeout after the full timeout and lose the exit code.
+    provider = ExecToolProvider([str(root)], timeout=10)
+    started = time.monotonic()
+    out = await run(provider, command=["sh", "-c", "sleep 30 & echo hi; exit 7"])
+    assert out.startswith("exit 7 ("), out[:80]
+    assert "--- stdout ---\nhi" in out
+    assert time.monotonic() - started < 6
+
+
+async def test_cancelling_the_call_kills_the_command(root):
+    import asyncio
+
+    marker = root / "marker"
+    provider = ExecToolProvider([str(root)], timeout=30)
+    script = f"import time, pathlib; time.sleep(2); pathlib.Path({str(marker)!r}).write_text('x')"
+    task = asyncio.create_task(run(provider, command=[PY, "-c", script]))
+    await asyncio.sleep(0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(3)
+    assert not marker.exists(), "the command outlived its cancelled call"
+
+
+async def test_a_relative_cwd_is_relative_to_the_first_root(root, monkeypatch):
+    monkeypatch.chdir("/")
+    here = [PY, "-c", "import os; print(os.getcwd())"]
+    out = await run(ExecToolProvider([str(root)]), command=here, cwd="sub")
+    assert str((root / "sub").resolve()) in out
