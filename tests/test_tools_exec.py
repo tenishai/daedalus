@@ -72,7 +72,7 @@ def test_the_allowlist_takes_bare_names_only(root, bad):
         ExecToolProvider([str(root)], commands=[bad])
 
 
-async def test_the_agents_environment_does_not_reach_the_command(root, monkeypatch):
+async def test_the_agents_environment_is_not_passed_to_the_command(root, monkeypatch):
     monkeypatch.setenv("AGENT_SECRET", "s3cret")
     monkeypatch.setenv("PASSED_ON", "yes")
     provider = ExecToolProvider([str(root)], env=["PASSED_ON"])

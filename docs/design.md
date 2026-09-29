@@ -93,7 +93,7 @@ tools:
       roots: ["."]                      # needs approvals.ceiling.exec: true (below).
       commands: [python, pytest, git]   # optional allowlist of bare program names
       env: [PIP_INDEX_URL]              # passed through on top of PATH/HOME/locale; the
-      timeout: 300                      # agent's own environment never reaches the command
+      timeout: 300                      # agent's own env isn't passed (not a boundary: same user)
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read

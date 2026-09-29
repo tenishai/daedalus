@@ -15,7 +15,11 @@ Guards, all at load or before the process starts:
   allowlist names the programs that may run, as bare names resolved on PATH;
 - the working directory must resolve under the configured roots;
 - the child gets an allowlisted environment (a few basics plus names the bundle
-  lists), never the agent's own, so a command can't read the agent's secrets;
+  lists), never the agent's own. That keeps secrets from being handed to it, but it
+  is not a boundary: the command runs as the same user, so it can read whatever the
+  agent can, including other processes' environments under /proc (measured in the
+  runtime image). Running untrusted code safely needs a workspace that doesn't share
+  the agent's user or secrets;
 - a wall-clock timeout kills the whole process group, and each output stream is
   capped, keeping its head and its tail (test runners print the verdict last).
 Network egress is not controlled here (daedalus#114).
