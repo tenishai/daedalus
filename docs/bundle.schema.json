@@ -466,8 +466,50 @@
       "additionalProperties": true,
       "properties": {
         "id": {
-          "title": "Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "enum": [
+                "cheap",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tier"
+        },
+        "min_tier": {
+          "anyOf": [
+            {
+              "enum": [
+                "cheap",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Tier"
         },
         "max_tokens": {
           "default": 8192,
@@ -502,9 +544,6 @@
           "$ref": "#/$defs/BudgetSpec"
         }
       },
-      "required": [
-        "id"
-      ],
       "title": "ModelSpec",
       "type": "object"
     },

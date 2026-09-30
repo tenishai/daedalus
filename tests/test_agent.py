@@ -149,7 +149,10 @@ def test_a2a_transport_wires_with_card_and_options(tmp_path):
         assert "daedalus[a2a]" in str(exc)
         return
     assert transports[0].port == 9911
-    assert transports[0].card == {"name": "x"}
+    card = transports[0].card
+    assert card["name"] == "x"
+    # The served card also says which model answers (#103); the file on disk is untouched.
+    assert card["daedalus_model"]["id"] == "m" and card["daedalus_model"]["source"] == "id"
 
 
 def test_slack_transport_needs_the_extra_but_no_longer_a_channel(tmp_path):

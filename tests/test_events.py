@@ -54,7 +54,8 @@ async def test_agent_emits_to_its_bus_even_without_on_event(tmp_path):
     (tmp_path / "persona.md").write_text("You are x.")
     agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"))  # no on_event
     replay_before, queue = agent.events.subscribe()
-    assert replay_before == []
+    # Before any task the only event is which model loaded (#103), so a late subscriber sees it.
+    assert [e["type"] for e in replay_before] == ["model_resolved"]
     await agent.handle_task(Task.from_text("hi"))
     types = []
     while queue.qsize():

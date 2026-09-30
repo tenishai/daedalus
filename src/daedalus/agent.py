@@ -45,6 +45,7 @@ from daedalus.protocols import (
     Transport,
 )
 from daedalus.task import RECALL_KEY, VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
+from daedalus.tiers import TIERS_ENV, Resolution, TierError, load_tiers, pick, tiers_path
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +97,11 @@ class Agent:
         # at load, not on the first task.
         import os
 
-        self.engine_name = engine or os.environ.get("DAEDALUS_ENGINE") or "litellm"
+        explicit_engine = engine or os.environ.get("DAEDALUS_ENGINE") or None
+        # A tier becomes a model before anything reads the model (#103); the tier's
+        # engine is the default, and an explicit engine that disagrees is refused.
+        self.model_resolution = self._resolve_model(explicit_engine)
+        self.engine_name = explicit_engine or self.model_resolution.engine
         if self.engine_name not in ENGINES:
             raise BundleError(
                 f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
@@ -133,6 +138,9 @@ class Agent:
         from daedalus.events import EventBus
 
         self.events = EventBus()
+        # Which model this is, always on the record: a tier floats like an alias does.
+        log.info("model: %s", self.model_resolution.as_dict())
+        self._emit("model_resolved", **self.model_resolution.as_dict())
         self._revision_lock = asyncio.Lock()
         # Per-candidate colleague re-ask stamps, alive for this agent's whole
         # process life: revision fires per teach, and without this one stuck
@@ -175,6 +183,51 @@ class Agent:
         self.events.publish(event)
         if self.on_event is not None:
             self.on_event(event)
+
+    def _resolve_model(self, explicit_engine: str | None) -> Resolution:
+        """Turn model.tier into a model, from the deployment's tiers file (#103).
+
+        A non-empty model.id wins and is only recorded. Otherwise the tier is looked up
+        in DAEDALUS_TIERS; the entry fills model.id, the endpoint, the Claude Code model
+        and the model's own limits, but never a value the bundle set itself."""
+        model = self.bundle.spec.model
+        cc = self.bundle.spec.engine.claude_code
+        if model.id is not None:
+            engine = explicit_engine or "litellm"
+            shown = model.id
+            if engine == "claude-code":
+                shown = cc.model or "(the Claude Code default)"
+            return Resolution(tier=model.tier, used=None, engine=engine, id=shown, source="id")
+        path = tiers_path()
+        if path is None:
+            raise BundleError(
+                f"model.tier is {model.tier} and {TIERS_ENV} names no tiers file; set it to "
+                "this deployment's tiers.yaml, or pin model.id"
+            )
+        try:
+            used, entry = pick(model.tier, model.min_tier, load_tiers(path))
+        except TierError as exc:
+            raise BundleError(str(exc)) from exc
+        if explicit_engine and explicit_engine != entry.engine:
+            raise BundleError(
+                f"the {used} tier runs on {entry.engine} in {path}, and the {explicit_engine} "
+                "engine was asked for; drop the engine choice, or pin model.id"
+            )
+        model.id = entry.id
+        for field in ("api_base", "api_key_env", "max_tokens"):
+            value = getattr(entry, field)
+            if value is not None and field not in model.model_fields_set:
+                setattr(model, field, value)
+        tools = self.bundle.spec.tools
+        for field in ("context_tokens", "max_repeats"):
+            value = getattr(entry, field)
+            if value is not None and getattr(tools, field) is None:
+                setattr(tools, field, value)
+        if entry.engine == "claude-code" and not cc.model:
+            cc.model = entry.id
+        return Resolution(
+            tier=model.tier, used=used, engine=entry.engine, id=entry.id, source=str(path)
+        )
 
     def _tool_overlay_dir(self) -> Path | None:
         """The persistent overlay directory for fast-lane-delivered tools
@@ -1023,7 +1076,8 @@ class Agent:
                 from daedalus.transports.a2a import A2aTransport
 
                 options = spec.options()
-                card = self.bundle.card
+                # Which model answers, on the card a caller reads before dispatching (#103).
+                card = {**self.bundle.card, "daedalus_model": self.model_resolution.as_dict()}
                 if self.enforcement.active:
                     # A new dict -- the on-disk card / bundle.card in memory
                     # is never mutated to carry the stamp.
