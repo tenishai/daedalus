@@ -71,7 +71,8 @@ class Resolution:
 
     @property
     def fell_back(self) -> bool:
-        return self.tier is not None and self.used != self.tier
+        # A pinned id has used=None: that is a pin, not a fallback (Prudence, PR 127).
+        return self.used is not None and self.used != self.tier
 
     def as_dict(self) -> dict:
         return {

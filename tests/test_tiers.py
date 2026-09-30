@@ -49,10 +49,11 @@ def test_a_tier_fills_the_model_the_endpoint_and_the_models_limits(tmp_path, tie
     b = bundle(tmp_path, "  tier: medium\n")
     agent = load(b)
     assert agent.engine_name == "litellm"
-    assert b.spec.model.id == "openai/local-9b"
-    assert b.spec.model.api_base == "http://10.0.0.5:8000/v1"
-    assert b.spec.model.api_key_env == "LOCAL_KEY"
-    assert b.spec.tools.context_tokens == 45000 and b.spec.tools.max_repeats == 3
+    s = agent.bundle.spec
+    assert s.model.id == "openai/local-9b"
+    assert s.model.api_base == "http://10.0.0.5:8000/v1"
+    assert s.model.api_key_env == "LOCAL_KEY"
+    assert s.tools.context_tokens == 45000 and s.tools.max_repeats == 3
     r = agent.model_resolution.as_dict()
     assert r == {"tier": "medium", "used": "medium", "engine": "litellm",
                  "id": "openai/local-9b", "fell_back": False, "source": str(tiers)}
@@ -69,7 +70,7 @@ def test_a_claude_code_tier_picks_the_engine_and_its_model(tmp_path, tiers):
     b = bundle(tmp_path, "  tier: high\n")
     agent = load(b)
     assert agent.engine_name == "claude-code"
-    assert b.spec.engine.claude_code.model == "claude-opus-5-5"
+    assert agent.bundle.spec.engine.claude_code.model == "claude-opus-5-5"
 
 
 def test_an_explicit_engine_that_disagrees_with_the_tier_is_refused(tmp_path, tiers):
@@ -80,26 +81,26 @@ def test_an_explicit_engine_that_disagrees_with_the_tier_is_refused(tmp_path, ti
 def test_a_non_empty_id_wins_and_is_recorded_as_pinned(tmp_path, tiers):
     b = bundle(tmp_path, "  id: anthropic/claude-sonnet-5\n  tier: high\n")
     agent = load(b)
-    assert b.spec.model.id == "anthropic/claude-sonnet-5"
+    assert agent.bundle.spec.model.id == "anthropic/claude-sonnet-5"
     assert agent.engine_name == "litellm"
     assert agent.model_resolution.source == "id"
     assert agent.model_resolution.tier == "high"
+    assert agent.model_resolution.fell_back is False  # a pin is not a fallback
 
 
 def test_an_empty_id_counts_as_unset_so_the_tier_applies(tmp_path, tiers, monkeypatch):
     monkeypatch.delenv("MY_MODEL", raising=False)
     b = bundle(tmp_path, '  id: "${MY_MODEL:-}"\n  tier: medium\n')
-    load(b)
-    assert b.spec.model.id == "openai/local-9b"
+    assert load(b).bundle.spec.model.id == "openai/local-9b"
 
 
 def test_values_the_bundle_set_win_over_the_tier_entry(tmp_path, tiers):
     b = bundle(tmp_path, "  tier: medium\n  api_base: http://mine/v1\n",
                "tools:\n  context_tokens: 20000\n")
-    load(b)
-    assert b.spec.model.api_base == "http://mine/v1"
-    assert b.spec.tools.context_tokens == 20000
-    assert b.spec.tools.max_repeats == 3  # not set by the bundle, so the tier's
+    s = load(b).bundle.spec
+    assert s.model.api_base == "http://mine/v1"
+    assert s.tools.context_tokens == 20000
+    assert s.tools.max_repeats == 3  # not set by the bundle, so the tier's
 
 
 def test_an_aliased_tier_resolves_to_its_target(tmp_path, tiers):
@@ -175,3 +176,22 @@ def test_the_shipped_example_tiers_files_load(name):
     table = load_tiers(Path(__file__).parent.parent / "examples" / "tiers" / f"{name}.yaml")
     assert all(table[t] is not None for t in ("cheap", "medium", "high"))
     assert table["high"].id == "claude-opus-5-5"
+
+
+def test_resolving_leaves_the_bundle_unresolved_for_the_next_agent(tmp_path, tiers):
+    b = bundle(tmp_path, "  tier: high\n")
+    load(b)
+    assert b.spec.model.id is None and b.spec.engine.claude_code.model is None
+    with pytest.raises(BundleError, match="the high tier runs on claude-code"):
+        load(b, engine="litellm")  # a reused bundle still gets the engine check
+
+
+def test_the_trace_line_says_pinned_for_a_pinned_id(tmp_path, tiers):
+    from click.testing import CliRunner
+
+    from daedalus.cli import _print_event
+
+    agent = load(bundle(tmp_path, "  id: m\n  tier: high\n"))
+    event = next(e for e in agent.seen if e["type"] == "model_resolved")
+    out = CliRunner().invoke(__import__("click").command()(lambda: _print_event(event)))
+    assert "(pinned)" in out.output and "fell back" not in out.output

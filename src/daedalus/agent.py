@@ -98,6 +98,12 @@ class Agent:
         import os
 
         explicit_engine = engine or os.environ.get("DAEDALUS_ENGINE") or None
+        # Resolve onto a copy: a tier writes into the spec, and a Bundle handed to a second
+        # Agent must still read as unresolved (Prudence, PR 127).
+        import dataclasses
+
+        bundle = dataclasses.replace(bundle, spec=bundle.spec.model_copy(deep=True))
+        self.bundle = bundle
         # A tier becomes a model before anything reads the model (#103); the tier's
         # engine is the default, and an explicit engine that disagrees is refused.
         self.model_resolution = self._resolve_model(explicit_engine)
@@ -111,7 +117,8 @@ class Agent:
             # the whole loop, so a token budget couldn't stop it between calls.
             raise BundleError(
                 "model.budget.per_task_tokens is set, and the claude-code engine can't "
-                "enforce it; remove it, or run with --engine litellm"
+                "enforce it; remove it, or run with --engine litellm (and, if the model "
+                "comes from a tier that runs on claude-code, pin model.id)"
             )
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
