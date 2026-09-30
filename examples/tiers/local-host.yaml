@@ -1,0 +1,19 @@
+# Tiers for a host that serves its own models over an OpenAI-compatible API (vLLM,
+# ollama, mlx_lm.server, mtplx). Fill in what the host runs; set a tier to null if the
+# host has nothing that good, and bundles that need it will refuse to load rather than
+# run on less (unless they declare model.min_tier).
+tiers:
+  high:
+    engine: litellm
+    id: openai/<the largest model the host serves>
+    api_base: http://<host>:<port>/v1
+    api_key_env: LOCAL_API_KEY            # the env var holding the key, never the key
+    context_tokens: <what fits in the host's memory with the prompt and the KV cache>
+  medium: high                            # or its own entry, like high
+  cheap:
+    engine: litellm
+    id: openai/<a small, fast model>
+    api_base: http://<host>:<port>/v1
+    api_key_env: LOCAL_API_KEY
+    context_tokens: <its ceiling on this hardware>
+    max_repeats: 3                        # small models loop; stop them early

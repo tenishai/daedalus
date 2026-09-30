@@ -65,7 +65,9 @@ card: agent-card.json
 persona: persona.md
 
 model:
-  id: anthropic/claude-sonnet-4-5      # any LiteLLM route string
+  id: anthropic/claude-sonnet-4-5      # any LiteLLM route string; or instead:
+  # tier: medium                       # cheap | medium | high, mapped per deployment (§1.2a)
+  # min_tier: cheap                    # how far down it may run; unset = refuse
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192
   budget:
@@ -121,6 +123,42 @@ approvals:
 Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
 don't fail) so old runtimes tolerate new GUI-written fields. `${VAR}` /
 `${VAR:-default}` interpolation on load; secrets never appear in the file.
+
+### 1.2a Model tiers (#103)
+
+A bundle can say how much model it needs instead of naming one: `model.tier: cheap |
+medium | high`. Each deployment maps tiers to models once, in a YAML file named by
+`DAEDALUS_TIERS`, so the same bundle runs on Claude at one site and on a local model at
+another without an edit. Examples are in `examples/tiers/`.
+
+```yaml
+tiers:
+  high:   {engine: claude-code, id: claude-opus-5-5}
+  medium: {engine: claude-code, id: claude-sonnet-5-5}
+  cheap:
+    engine: litellm
+    id: openai/<model>
+    api_base: http://<host>:8000/v1
+    api_key_env: LOCAL_API_KEY
+    context_tokens: 45000              # this model on this hardware
+    max_repeats: 3
+  # a tier can alias another (medium: high), or be null: not offered here
+```
+
+The rules (`src/daedalus/tiers.py`):
+- **A non-empty `model.id` wins**, and the tier is only recorded. An empty id counts as
+  unset, so `id: "${MY_MODEL:-}"` beside a tier lets an operator pin a model.
+- **The tier's engine is the default.** An explicit `--engine` or `DAEDALUS_ENGINE` that
+  disagrees is refused at load, not silently obeyed.
+- **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
+  `max_tokens`, `tools.context_tokens`, `tools.max_repeats`, and the Claude Code model.
+  A value the bundle set wins.
+- **A tier the deployment doesn't offer refuses to load**, unless the bundle names
+  `model.min_tier`: then the next tier down is used, no lower than that floor.
+- **The resolved model is always on the record**, because a tier floats the way the
+  `opus` alias did (agents-archive#142): logged at load, emitted as the `model_resolved`
+  event (shown by `run -v`, replayed on `/events`), and served on the a2a agent card
+  as `daedalus_model`.
 
 ### 1.3 Task envelope
 

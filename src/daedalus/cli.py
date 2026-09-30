@@ -109,6 +109,13 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [think] {_short(event['text'])}")
     elif kind == "salvage":
         click.echo(f"  [salvage] recovered {event['count']} text-leaked tool call(s)")
+    elif kind == "model_resolved":
+        if event.get("source") != "id":
+            fell = f", fell back from {event['tier']}" if event.get("fell_back") else ""
+            used = event.get("used") or event["tier"]
+            click.echo(f"  [model] tier {used} -> {event['engine']} {event['id']}{fell}")
+        else:
+            click.echo(f"  [model] {event['engine']} {event['id']} (pinned)")
     elif kind == "recall":
         click.echo(f"  [memory] recalled {event['count']} item(s)")
     elif kind == "budget":
