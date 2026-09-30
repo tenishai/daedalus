@@ -65,9 +65,8 @@ card: agent-card.json
 persona: persona.md
 
 model:
-  id: anthropic/claude-sonnet-4-5      # any LiteLLM route string; or instead:
-  # tier: balanced                     # fast | balanced | best, mapped per deployment (§1.2a)
-  # min_tier: fast                     # how far down it may run; unset = refuse
+  id: anthropic/claude-sonnet-4-5      # any LiteLLM route string, or a tier word
+                                        # (fast | balanced | best, §1.2a)
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192
   budget:
@@ -124,12 +123,14 @@ Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
 don't fail) so old runtimes tolerate new GUI-written fields. `${VAR}` /
 `${VAR:-default}` interpolation on load; secrets never appear in the file.
 
-### 1.2a Model tiers (#103)
+### 1.2a Model tiers (#103, #129)
 
-A bundle can say how much model it needs instead of naming one: `model.tier: fast |
-balanced | best`. Each deployment maps tiers to models once, in a YAML file named by
+A bundle can say how much model it needs instead of naming one: `model.id` is either a
+concrete model, or (after `${VAR}` expansion) one of the tier words `fast`, `balanced`,
+`best`. Each deployment maps tiers to models once, in a YAML file named by
 `DAEDALUS_TIERS`, so the same bundle runs on Claude at one site and on a local model at
-another without an edit. Examples are in `examples/tiers/`.
+another without an edit — `id: "${PRUDENCE_MODEL:-best}"` lets an operator still pin a
+model while defaulting to the deployment's tier. Examples are in `examples/tiers/`.
 
 ```yaml
 tiers:
@@ -145,20 +146,22 @@ tiers:
   # a tier can alias another (balanced: best), or be null: not offered here
 ```
 
-The rules (`src/daedalus/tiers.py`):
-- **A non-empty `model.id` wins**, and the tier is only recorded. An empty id counts as
-  unset, so `id: "${MY_MODEL:-}"` beside a tier lets an operator pin a model.
+The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
+- **A concrete `model.id` is only recorded.** Any id that isn't `fast`, `balanced` or
+  `best` is a model, unchanged.
 - **The tier's engine is the default.** An explicit `--engine` or `DAEDALUS_ENGINE` that
   disagrees is refused at load, not silently obeyed.
 - **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
   `max_tokens`, `tools.context_tokens`, `tools.max_repeats`, and the Claude Code model.
   A value the bundle set wins.
-- **A tier the deployment doesn't offer refuses to load**, unless the bundle names
-  `model.min_tier`: then the next tier down is used, no lower than that floor.
+- **A tier the deployment doesn't offer refuses to load**, naming the tier and
+  `DAEDALUS_TIERS`; a tier word never reaches LiteLLM as a model name.
 - **The resolved model is always on the record**, because a tier floats the way the
   `opus` alias did (agents-archive#142): logged at load, emitted as the `model_resolved`
   event (shown by `run -v`, replayed on `/events`), and served on the a2a agent card
   as `daedalus_model`.
+- `model.tier` and `model.min_tier` (PR 127) are removed: a bundle that still sets
+  either fails at load, pointing at `model.id`. The tiers *file* format is unchanged.
 
 ### 1.3 Task envelope
 

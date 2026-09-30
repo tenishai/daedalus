@@ -1,0 +1,24 @@
+# Rendered by tenishai/kobo's composer (api/kobo_api/composer.py:_render_agent_yaml),
+# at tenishai/kobo origin/HEAD commit 705988f2523287c21ddec924ebb04502a2f91642, via:
+#
+#   BundleSpec(name="example-agent", persona_body="You are an example agent.",
+#              model_id="balanced", skills=[], runtime_image="...",
+#              vertex_project="...", vertex_location="us-central1")
+#
+# kobo writes model.id as `${AGENT_MODEL:-<tier or model>}` (tenishai/daedalus#129)
+# and validates the result against a vendored copy of docs/bundle.schema.json
+# (composer.py:_VENDOR_SCHEMA_PATH) -- this fixture is that same shape, unedited
+# except for this header (tenishai/daedalus#131).
+name: example-agent
+card: agent-card.json
+persona: persona.md
+model: {id: '${AGENT_MODEL:-balanced}', max_tokens: 8192}
+transports:
+  - {kind: a2a, host: 0.0.0.0, port: 8080}
+tools: {provider: none, allow: []}
+memory: {personal: techne, home: /techne, revision: operator}
+checkpoints: sqlite
+approvals:
+  ceiling: {write: false}
+  gates: [{match: "*", require: plan_approval}]
+  escalation: {route: cli}

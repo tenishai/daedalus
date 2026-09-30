@@ -1,0 +1,7 @@
+# A minimal deployment for the conformance test (tests/test_conformance.py): every
+# tier a fixture bundle's model.id might default to, so resolution succeeds without
+# any *_MODEL env var set (tenishai/daedalus#131).
+tiers:
+  fast: {engine: litellm, id: openai/fixture-fast}
+  balanced: {engine: litellm, id: openai/fixture-balanced}
+  best: {engine: litellm, id: openai/fixture-best}

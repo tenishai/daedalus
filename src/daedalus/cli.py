@@ -28,25 +28,13 @@ def version() -> None:
 
 @main.command()
 @click.option("--out", default=None, help="Write to a file instead of stdout.")
-@click.option(
-    "--tiers", is_flag=True, help="Print the tiers file's schema instead of agent.yaml's."
-)
-def schema(out: str | None, tiers: bool) -> None:
-    """Print the canonical agent.yaml JSON Schema (the published bundle shape).
-
-    With --tiers, print the tiers file's schema (docs/tiers.schema.json) instead.
-    """
+def schema(out: str | None) -> None:
+    """Print the canonical agent.yaml JSON Schema (the published bundle shape)."""
     from pathlib import Path
 
-    if tiers:
-        from daedalus.tiers import tiers_schema
+    from daedalus.bundle import bundle_schema
 
-        payload = tiers_schema()
-    else:
-        from daedalus.bundle import bundle_schema
-
-        payload = bundle_schema()
-    text = json.dumps(payload, indent=2) + "\n"
+    text = json.dumps(bundle_schema(), indent=2) + "\n"
     if out:
         Path(out).write_text(text)
         click.echo(f"wrote {out}")
