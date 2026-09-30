@@ -1,21 +1,21 @@
 """Model tiers (tenishai/daedalus#103): a bundle says how much model it needs, and each
 deployment says which model fills that need.
 
-A bundle declares `model.tier: cheap | medium | high` instead of (or beside) a
+A bundle declares `model.tier: fast | balanced | best` instead of (or beside) a
 `model.id`. The operator maps tiers to models once per deployment, in a YAML file named
 by DAEDALUS_TIERS:
 
     tiers:
-      high:   {engine: claude-code, id: claude-opus-5-5}
-      medium: {engine: claude-code, id: claude-sonnet-5-5}
-      cheap:
+      best:     {engine: claude-code, id: claude-opus-5-5}
+      balanced: {engine: claude-code, id: claude-sonnet-5-5}
+      fast:
         engine: litellm
         id: openai/mtplx-qwen35-9b-optimized-speed
         api_base: http://192.168.10.202:8000/v1
         api_key_env: MTPLX_API_KEY
         context_tokens: 45000      # this model on this hardware
         max_repeats: 3
-      # a tier can alias another (medium: high), or be null: not available here
+      # a tier can alias another (balanced: best), or be null: not available here
 
 Resolution rules:
 - An explicit, non-empty `model.id` wins; the tier is then only recorded.
@@ -38,8 +38,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-TIER_NAMES: tuple[str, ...] = ("cheap", "medium", "high")  # lowest to highest
-Tier = Literal["cheap", "medium", "high"]
+TIER_NAMES: tuple[str, ...] = ("fast", "balanced", "best")  # lowest to highest
+Tier = Literal["fast", "balanced", "best"]
 TIERS_ENV = "DAEDALUS_TIERS"
 
 
@@ -57,6 +57,53 @@ class TierEntry(BaseModel):
     max_tokens: int | None = Field(default=None, gt=0)
     context_tokens: int | None = Field(default=None, gt=0)
     max_repeats: int | None = Field(default=None, ge=2)
+
+
+def tiers_schema() -> dict:
+    """The tiers file's shape as JSON Schema — the published contract for the
+    file DAEDALUS_TIERS names (cabal's bundle reader, editors, an operator
+    hand-writing a deployment's tiers.yaml).
+
+    A top-level `tiers` object with optional keys fast/balanced/best; each
+    value is a TierEntry, a string naming another tier (an alias), or null
+    (not offered here). A test pins docs/tiers.schema.json to this output,
+    mirroring bundle_schema()'s drift guard. Regenerate with
+    `daedalus schema --tiers --out docs/tiers.schema.json`.
+    """
+    import daedalus  # function-local: daedalus/__init__ imports this module
+
+    entry_schema = TierEntry.model_json_schema()
+    defs = entry_schema.pop("$defs", {})
+    defs["TierEntry"] = entry_schema
+    tier_value = {
+        "oneOf": [
+            {"$ref": "#/$defs/TierEntry"},
+            {"type": "string", "enum": list(TIER_NAMES)},
+            {"type": "null"},
+        ]
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/tenishai/daedalus/blob/main/docs/tiers.schema.json",
+        "title": "daedalus tiers file (tiers.yaml)",
+        "version": daedalus.__version__,
+        "description": (
+            "A deployment's tier -> model map, named by DAEDALUS_TIERS (daedalus.tiers, "
+            "tenishai/daedalus#103). Each of fast/balanced/best is a TierEntry, another "
+            "tier's name (an alias), or null (not offered here)."
+        ),
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["tiers"],
+        "properties": {
+            "tiers": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {name: tier_value for name in TIER_NAMES},
+            }
+        },
+        "$defs": defs,
+    }
 
 
 @dataclass(frozen=True)

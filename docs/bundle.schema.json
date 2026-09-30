@@ -481,9 +481,9 @@
           "anyOf": [
             {
               "enum": [
-                "cheap",
-                "medium",
-                "high"
+                "fast",
+                "balanced",
+                "best"
               ],
               "type": "string"
             },
@@ -498,9 +498,9 @@
           "anyOf": [
             {
               "enum": [
-                "cheap",
-                "medium",
-                "high"
+                "fast",
+                "balanced",
+                "best"
               ],
               "type": "string"
             },

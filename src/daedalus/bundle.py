@@ -78,12 +78,12 @@ class BudgetSpec(_WarnExtra):
 class ModelSpec(_WarnExtra):
     # A model id, or a tier the deployment maps to one (daedalus.tiers, #103). A
     # non-empty id wins over the tier. Empty counts as unset, so a bundle can say
-    # `id: "${MY_MODEL:-}"` beside `tier: high` and let an operator pin a model.
+    # `id: "${MY_MODEL:-}"` beside `tier: best` and let an operator pin a model.
     id: str | None = None
-    tier: Literal["cheap", "medium", "high"] | None = None
+    tier: Literal["fast", "balanced", "best"] | None = None
     # How far down this bundle may run when the deployment lacks its tier; unset means
     # refuse to load rather than run on less.
-    min_tier: Literal["cheap", "medium", "high"] | None = None
+    min_tier: Literal["fast", "balanced", "best"] | None = None
     max_tokens: int = 8192
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
@@ -94,7 +94,7 @@ class ModelSpec(_WarnExtra):
         if self.id is not None and not self.id.strip():
             self.id = None
         if self.id is None and self.tier is None:
-            raise ValueError("model needs an id or a tier (cheap, medium or high)")
+            raise ValueError("model needs an id or a tier (fast, balanced or best)")
         if self.min_tier is not None and self.tier is None:
             raise ValueError("model.min_tier needs model.tier")
         return self

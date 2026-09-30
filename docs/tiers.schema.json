@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tenishai/daedalus/blob/main/docs/tiers.schema.json",
+  "title": "daedalus tiers file (tiers.yaml)",
+  "version": "0.4.0",
+  "description": "A deployment's tier -> model map, named by DAEDALUS_TIERS (daedalus.tiers, tenishai/daedalus#103). Each of fast/balanced/best is a TierEntry, another tier's name (an alias), or null (not offered here).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tiers"
+  ],
+  "properties": {
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fast": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TierEntry"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "fast",
+                "balanced",
+                "best"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "balanced": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TierEntry"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "fast",
+                "balanced",
+                "best"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "best": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TierEntry"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "fast",
+                "balanced",
+                "best"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "TierEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "default": "litellm",
+          "enum": [
+            "litellm",
+            "claude-code"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "api_base": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Base"
+        },
+        "api_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key Env"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "context_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Tokens"
+        },
+        "max_repeats": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Repeats"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TierEntry",
+      "type": "object"
+    }
+  }
+}

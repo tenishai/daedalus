@@ -3,14 +3,14 @@
 # host has nothing that good, and bundles that need it will refuse to load rather than
 # run on less (unless they declare model.min_tier).
 tiers:
-  high:
+  best:
     engine: litellm
     id: openai/<the largest model the host serves>
     api_base: http://<host>:<port>/v1
     api_key_env: LOCAL_API_KEY            # the env var holding the key, never the key
     context_tokens: <what fits in the host's memory with the prompt and the KV cache>
-  medium: high                            # or its own entry, like high
-  cheap:
+  balanced: best                          # or its own entry, like best
+  fast:
     engine: litellm
     id: openai/<a small, fast model>
     api_base: http://<host>:<port>/v1

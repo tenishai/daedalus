@@ -2,6 +2,6 @@
 # subscription or ANTHROPIC_API_KEY). Full model ids, never aliases like `opus`, which
 # move when the CLI updates.
 tiers:
-  high:   {engine: claude-code, id: claude-opus-5-5}
-  medium: {engine: claude-code, id: claude-sonnet-5-5}
-  cheap:  {engine: claude-code, id: claude-haiku-4-5-20251001}
+  best:     {engine: claude-code, id: claude-opus-5-5}
+  balanced: {engine: claude-code, id: claude-sonnet-5-5}
+  fast:     {engine: claude-code, id: claude-haiku-4-5-20251001}

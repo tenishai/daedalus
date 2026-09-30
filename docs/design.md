@@ -66,8 +66,8 @@ persona: persona.md
 
 model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string; or instead:
-  # tier: medium                       # cheap | medium | high, mapped per deployment (§1.2a)
-  # min_tier: cheap                    # how far down it may run; unset = refuse
+  # tier: balanced                     # fast | balanced | best, mapped per deployment (§1.2a)
+  # min_tier: fast                     # how far down it may run; unset = refuse
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192
   budget:
@@ -126,23 +126,23 @@ don't fail) so old runtimes tolerate new GUI-written fields. `${VAR}` /
 
 ### 1.2a Model tiers (#103)
 
-A bundle can say how much model it needs instead of naming one: `model.tier: cheap |
-medium | high`. Each deployment maps tiers to models once, in a YAML file named by
+A bundle can say how much model it needs instead of naming one: `model.tier: fast |
+balanced | best`. Each deployment maps tiers to models once, in a YAML file named by
 `DAEDALUS_TIERS`, so the same bundle runs on Claude at one site and on a local model at
 another without an edit. Examples are in `examples/tiers/`.
 
 ```yaml
 tiers:
-  high:   {engine: claude-code, id: claude-opus-5-5}
-  medium: {engine: claude-code, id: claude-sonnet-5-5}
-  cheap:
+  best:     {engine: claude-code, id: claude-opus-5-5}
+  balanced: {engine: claude-code, id: claude-sonnet-5-5}
+  fast:
     engine: litellm
     id: openai/<model>
     api_base: http://<host>:8000/v1
     api_key_env: LOCAL_API_KEY
     context_tokens: 45000              # this model on this hardware
     max_repeats: 3
-  # a tier can alias another (medium: high), or be null: not offered here
+  # a tier can alias another (balanced: best), or be null: not offered here
 ```
 
 The rules (`src/daedalus/tiers.py`):

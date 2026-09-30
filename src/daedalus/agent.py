@@ -91,7 +91,6 @@ class Agent:
         on_event: Callable[[dict], None] | None = None,
         engine: str | None = None,
     ):
-        self.bundle = bundle
         # Which engine runs the bundle is the operator's choice (tenishai/agents#51):
         # the argument, else DAEDALUS_ENGINE, else litellm. Checked here so a typo fails
         # at load, not on the first task.

@@ -13,8 +13,10 @@ from click.testing import CliRunner
 
 from daedalus.bundle import bundle_schema
 from daedalus.cli import main
+from daedalus.tiers import tiers_schema
 
 ARTIFACT = Path(__file__).parents[1] / "docs" / "bundle.schema.json"
+TIERS_ARTIFACT = Path(__file__).parents[1] / "docs" / "tiers.schema.json"
 
 
 def test_committed_schema_cannot_drift_from_the_runtime():
@@ -22,6 +24,14 @@ def test_committed_schema_cannot_drift_from_the_runtime():
     assert committed == bundle_schema(), (
         "docs/bundle.schema.json is stale — regenerate with "
         "`daedalus schema --out docs/bundle.schema.json`"
+    )
+
+
+def test_committed_tiers_schema_cannot_drift_from_the_runtime():
+    committed = json.loads(TIERS_ARTIFACT.read_text())
+    assert committed == tiers_schema(), (
+        "docs/tiers.schema.json is stale — regenerate with "
+        "`daedalus schema --tiers --out docs/tiers.schema.json`"
     )
 
 
@@ -72,3 +82,9 @@ def test_cli_schema_prints_valid_json():
     result = CliRunner().invoke(main, ["schema"])
     assert result.exit_code == 0
     assert json.loads(result.output)["title"] == "daedalus agent bundle (agent.yaml)"
+
+
+def test_cli_schema_tiers_prints_the_tiers_schema():
+    result = CliRunner().invoke(main, ["schema", "--tiers"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["title"] == "daedalus tiers file (tiers.yaml)"
