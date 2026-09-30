@@ -93,13 +93,17 @@ def test_a_placeholder_is_accepted_for_every_non_string_scalar_field():
     schema = bundle_schema()
 
     def leaf_types(node: dict) -> set[str]:
-        if "anyOf" in node:
-            return {branch.get("type") for branch in node["anyOf"] if "type" in branch}
-        if "enum" in node:
-            return {"enum"}
-        return {node["type"]} if "type" in node else set()
+        # An enum branch also carries "type": "string", so check "enum" first, per branch.
+        types = set()
+        for branch in node.get("anyOf", [node]):
+            if "enum" in branch:
+                types.add("enum")
+            elif "type" in branch:
+                types.add(branch["type"])
+        return types
 
     checked = 0
+    enums = 0
     for defn in [schema, *schema.get("$defs", {}).values()]:
         for name, field_schema in defn.get("properties", {}).items():
             types = leaf_types(field_schema)
@@ -108,7 +112,9 @@ def test_a_placeholder_is_accepted_for_every_non_string_scalar_field():
                 placeholder = [b for b in branches if b.get("pattern") == _PLACEHOLDER_PATTERN]
                 assert placeholder, f"{name}: no placeholder branch ({field_schema})"
                 checked += 1
+                enums += "enum" in types
     assert checked >= 5  # at least the five fields issue #130 measured
+    assert enums >= 2  # memory.personal and tools.on_exhausted, from issue #130's five
 
 
 def test_bundles_with_placeholders_in_non_string_fields_validate(tmp_path):

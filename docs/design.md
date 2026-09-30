@@ -154,8 +154,9 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
 - **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
   `max_tokens`, `tools.context_tokens`, `tools.max_repeats`, and the Claude Code model.
   A value the bundle set wins.
-- **A tier the deployment doesn't offer refuses to load**, naming the tier and
-  `DAEDALUS_TIERS`; a tier word never reaches LiteLLM as a model name.
+- **A tier word never reaches LiteLLM as a model name.** With no tiers file named, load
+  refuses naming the tier and `DAEDALUS_TIERS`; with a tiers file that doesn't offer the
+  tier, load refuses naming the tier and the tiers the file does offer.
 - **The resolved model is always on the record**, because a tier floats the way the
   `opus` alias did (agents-archive#142): logged at load, emitted as the `model_resolved`
   event (shown by `run -v`, replayed on `/events`), and served on the a2a agent card
