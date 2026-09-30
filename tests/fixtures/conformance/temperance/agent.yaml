@@ -1,0 +1,55 @@
+# Copied verbatim from tenishai/agents, branch feat/tier-names, commit
+# 0975c8619e728c9f3b442e53022de9ac928afbc2 (tenishai/agents#106): temperance/agent.yaml
+# as it reads after folding model.tier into model.id (tenishai/daedalus#129).
+# This header is the only edit; everything below is unedited (tenishai/daedalus#131).
+# Temperance as a daedalus bundle (Fates design step 4): the pre-pass, on any model or
+# on Claude Code. temperance/prepass-daedalus.sh clones the pull request, sets the
+# TEMPERANCE_* variables and runs it. `daedalus run temperance` directly loads with no
+# TEMPERANCE_MODEL: model.id defaults to the tier word "balanced", resolved through
+# DAEDALUS_TIERS if it names a deployment's tiers file (daedalus.tiers,
+# tenishai/daedalus#129); otherwise it needs TEMPERANCE_MODEL pinned. Her judgment is
+# persona.md; what this run gives her to work with is prepass-only.md, which the
+# launcher puts first in the brief.
+name: temperance
+card: agent-card.json
+persona: persona.md
+model:
+  # A LiteLLM route, a full Claude Code model id, or a tier word (fast/balanced/best),
+  # resolved through DAEDALUS_TIERS. The claude-code engine reads
+  # engine.claude_code.model instead, and only records this.
+  id: "${TEMPERANCE_MODEL:-balanced}"
+  max_tokens: "${TEMPERANCE_MAX_TOKENS:-16384}"
+transports:
+  - kind: cli
+tools:
+  builtin:
+    files:
+      roots: ["${TEMPERANCE_CHECKOUT:-.}"]
+      max_bytes: "${TEMPERANCE_READ_BYTES:-40000}"
+    exec:
+      # Read-only probes. She runs no suite and installs nothing (persona.md), so no test
+      # runner, package manager or shell is on this list. Not a boundary: python3 and git
+      # can still write, but only into a throwaway clone.
+      roots: ["${TEMPERANCE_CHECKOUT:-.}"]
+      commands: [git, grep, sed, awk, find, ls, cat, head, tail, wc, sort, uniq, diff, sqlite3, python3]
+      timeout: "${TEMPERANCE_EXEC_TIMEOUT:-60}"
+  allow: ["files.read", "files.list", "files.search", "exec.run"]
+  max_steps: "${TEMPERANCE_MAX_STEPS:-60}"
+  on_exhausted: "${TEMPERANCE_ON_EXHAUSTED:-wrap_up}"
+  context_tokens: "${TEMPERANCE_CONTEXT_TOKENS:-1000000000}"
+memory:
+  # Her own lessons, from techne at TECHNE_HOME (the image: its /techne volume),
+  # recalled on the PR's title and changed paths (prepass-daedalus.sh, --recall).
+  personal: "${TEMPERANCE_MEMORY:-none}"
+  team: none
+approvals:
+  ceiling:
+    write: false
+    exec: true
+engine:
+  claude_code:
+    builtin_tools: []   # her tools are the ones above; Claude Code's own stay off
+    # Empty so tier mode can leave this unset and let daedalus fill it from the tier's
+    # entry; prepass-daedalus.sh sets TEMPERANCE_CLAUDE_MODEL itself (a full Claude
+    # model id, never an alias) in pinned or default mode.
+    model: "${TEMPERANCE_CLAUDE_MODEL:-}"

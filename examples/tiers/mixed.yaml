@@ -1,9 +1,9 @@
-# Claude for the tiers that need judgment, a LAN model for the cheap one. This is the
+# Claude for the tiers that need judgment, a LAN model for the fast one. This is the
 # shape of the tenish deployment on mash1.
 tiers:
-  high:   {engine: claude-code, id: claude-opus-5-5}
-  medium: {engine: claude-code, id: claude-sonnet-5-5}
-  cheap:
+  best:     {engine: claude-code, id: claude-opus-5-5}
+  balanced: {engine: claude-code, id: claude-sonnet-5-5}
+  fast:
     engine: litellm
     id: openai/mtplx-qwen35-9b-optimized-speed
     api_base: http://192.168.10.202:8000/v1

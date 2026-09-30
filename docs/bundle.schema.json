@@ -30,6 +30,10 @@
             },
             {
               "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
             }
           ],
           "default": null,
@@ -49,6 +53,10 @@
             },
             {
               "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
             }
           ],
           "default": null,
@@ -76,6 +84,10 @@
             },
             {
               "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
             }
           ],
           "default": null,
@@ -121,24 +133,40 @@
           "type": "array"
         },
         "permission_mode": {
-          "default": "default",
-          "enum": [
-            "default",
-            "dontAsk",
-            "acceptEdits",
-            "plan"
+          "anyOf": [
+            {
+              "enum": [
+                "default",
+                "dontAsk",
+                "acceptEdits",
+                "plan"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "Permission Mode",
-          "type": "string"
+          "default": "default"
         },
         "on_denied": {
-          "default": "continue",
-          "enum": [
-            "continue",
-            "stop"
+          "anyOf": [
+            {
+              "enum": [
+                "continue",
+                "stop"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "On Denied",
-          "type": "string"
+          "default": "continue"
         },
         "config_dir": {
           "anyOf": [
@@ -417,13 +445,21 @@
       "additionalProperties": true,
       "properties": {
         "personal": {
-          "default": "none",
-          "enum": [
-            "none",
-            "techne"
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "techne"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "Personal",
-          "type": "string"
+          "default": "none"
         },
         "home": {
           "anyOf": [
@@ -438,13 +474,21 @@
           "title": "Home"
         },
         "team": {
-          "default": "none",
-          "enum": [
-            "none",
-            "outbox"
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "outbox"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "Team",
-          "type": "string"
+          "default": "none"
         },
         "revision": {
           "anyOf": [
@@ -477,44 +521,18 @@
           "default": null,
           "title": "Id"
         },
-        "tier": {
-          "anyOf": [
-            {
-              "enum": [
-                "cheap",
-                "medium",
-                "high"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Tier"
-        },
-        "min_tier": {
-          "anyOf": [
-            {
-              "enum": [
-                "cheap",
-                "medium",
-                "high"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Min Tier"
-        },
         "max_tokens": {
-          "default": 8192,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
           "title": "Max Tokens",
-          "type": "integer"
+          "default": 8192
         },
         "api_base": {
           "anyOf": [
@@ -545,7 +563,21 @@
         }
       },
       "title": "ModelSpec",
-      "type": "object"
+      "type": "object",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "tier"
+            ]
+          },
+          {
+            "required": [
+              "min_tier"
+            ]
+          }
+        ]
+      }
     },
     "SlackReadSpec": {
       "additionalProperties": true,
@@ -572,9 +604,17 @@
           "type": "string"
         },
         "scan_limit": {
-          "default": 2000,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
           "title": "Scan Limit",
-          "type": "integer"
+          "default": 2000
         }
       },
       "title": "SlackReadSpec",
@@ -584,15 +624,23 @@
       "additionalProperties": true,
       "properties": {
         "provider": {
-          "default": "none",
-          "enum": [
-            "none",
-            "mcp",
-            "liminal",
-            "colleagues"
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "mcp",
+                "liminal",
+                "colleagues"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "Provider",
-          "type": "string"
+          "default": "none"
         },
         "servers": {
           "items": {
@@ -636,18 +684,34 @@
           "type": "array"
         },
         "max_steps": {
-          "default": 10,
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
           "title": "Max Steps",
-          "type": "integer"
+          "default": 10
         },
         "on_exhausted": {
-          "default": "stop",
-          "enum": [
-            "stop",
-            "wrap_up"
+          "anyOf": [
+            {
+              "enum": [
+                "stop",
+                "wrap_up"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
           ],
           "title": "On Exhausted",
-          "type": "string"
+          "default": "stop"
         },
         "context_tokens": {
           "anyOf": [
@@ -657,6 +721,10 @@
             },
             {
               "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
             }
           ],
           "default": null,
@@ -670,6 +738,10 @@
             },
             {
               "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
             }
           ],
           "default": null,
@@ -696,7 +768,7 @@
     }
   },
   "additionalProperties": true,
-  "description": "Wiring for a daedalus agent bundle \u2014 a directory that IS an agent (agent.yaml + persona.md + agent-card.json). Unknown fields load with a warning, never silently.",
+  "description": "Wiring for a daedalus agent bundle \u2014 a directory that IS an agent (agent.yaml + persona.md + agent-card.json). Unknown fields load with a warning, never silently. A non-string field may also be written as a ${VAR} / ${VAR:-default} placeholder, expanded from the environment before this shape applies.",
   "properties": {
     "name": {
       "title": "Name",
@@ -729,13 +801,21 @@
       "$ref": "#/$defs/MemorySpec"
     },
     "checkpoints": {
-      "default": "none",
-      "enum": [
-        "none",
-        "sqlite"
+      "anyOf": [
+        {
+          "enum": [
+            "none",
+            "sqlite"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+        }
       ],
       "title": "Checkpoints",
-      "type": "string"
+      "default": "none"
     },
     "approvals": {
       "$ref": "#/$defs/ApprovalsSpec"
