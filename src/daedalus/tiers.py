@@ -7,7 +7,7 @@ by DAEDALUS_TIERS:
 
     tiers:
       high:   {engine: claude-code, id: claude-opus-5-5}
-      medium: {engine: claude-code, id: claude-sonnet-5}
+      medium: {engine: claude-code, id: claude-sonnet-5-5}
       cheap:
         engine: litellm
         id: openai/mtplx-qwen35-9b-optimized-speed

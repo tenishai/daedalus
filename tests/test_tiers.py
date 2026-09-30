@@ -79,9 +79,9 @@ def test_an_explicit_engine_that_disagrees_with_the_tier_is_refused(tmp_path, ti
 
 
 def test_a_non_empty_id_wins_and_is_recorded_as_pinned(tmp_path, tiers):
-    b = bundle(tmp_path, "  id: anthropic/claude-sonnet-5\n  tier: high\n")
+    b = bundle(tmp_path, "  id: anthropic/claude-sonnet-5-5\n  tier: high\n")
     agent = load(b)
-    assert agent.bundle.spec.model.id == "anthropic/claude-sonnet-5"
+    assert agent.bundle.spec.model.id == "anthropic/claude-sonnet-5-5"
     assert agent.engine_name == "litellm"
     assert agent.model_resolution.source == "id"
     assert agent.model_resolution.tier == "high"

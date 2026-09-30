@@ -134,7 +134,7 @@ another without an edit. Examples are in `examples/tiers/`.
 ```yaml
 tiers:
   high:   {engine: claude-code, id: claude-opus-5-5}
-  medium: {engine: claude-code, id: claude-sonnet-5}
+  medium: {engine: claude-code, id: claude-sonnet-5-5}
   cheap:
     engine: litellm
     id: openai/<model>
