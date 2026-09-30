@@ -10,6 +10,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from daedalus.bundle import _PLACEHOLDER_PATTERN, bundle_schema
@@ -129,3 +130,17 @@ tools:
   on_exhausted: "${PRUDENCE_ON_EXHAUSTED:-wrap_up}"
 """)
     jsonschema.validate(raw, bundle_schema())
+
+
+def test_schema_refuses_removed_model_tier_fields():
+    # #129 removed model.tier and model.min_tier; load refuses them, so the published
+    # schema must too, or a consumer validating against it (kobo) accepts a bundle
+    # that daedalus won't load.
+    import jsonschema
+
+    schema = bundle_schema()
+    for extra in ({"tier": "best"}, {"min_tier": "fast"}):
+        bad = {"name": "x", "model": {"id": "best", **extra}}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, schema)
+    jsonschema.validate({"name": "x", "model": {"id": "best"}}, schema)

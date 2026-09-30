@@ -563,7 +563,21 @@
         }
       },
       "title": "ModelSpec",
-      "type": "object"
+      "type": "object",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "tier"
+            ]
+          },
+          {
+            "required": [
+              "min_tier"
+            ]
+          }
+        ]
+      }
     },
     "SlackReadSpec": {
       "additionalProperties": true,

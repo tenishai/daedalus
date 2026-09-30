@@ -78,9 +78,10 @@ class BudgetSpec(_WarnExtra):
 class ModelSpec(_WarnExtra):
     # A concrete model id, or (after ${VAR} expansion) one of the tier words
     # fast/balanced/best, resolved through DAEDALUS_TIERS (daedalus.tiers,
-    # tenishai/daedalus#129). Empty counts as unset, so a bundle can say
-    # `id: "${MY_MODEL:-best}"` and let an operator pin a model while defaulting to
-    # the deployment's tier.
+    # tenishai/daedalus#129). A bundle can say `id: "${MY_MODEL:-best}"`: the default
+    # applies only while MY_MODEL is unset, so an operator pins a model by setting it.
+    # MY_MODEL set to an empty string expands to "" and fails to load ("model needs an
+    # id"); it does not fall back to the tier.
     id: str | None = None
     max_tokens: int = 8192
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
@@ -411,6 +412,12 @@ def bundle_schema() -> dict:
         ),
     }
     _allow_placeholders(schema)
+    # model.tier and model.min_tier were removed (#129) and load refuses them, but
+    # ModelSpec allows unknown keys, so say so here too: a consumer validating against
+    # this schema (kobo's vendored copy) then refuses what Bundle.load refuses.
+    schema["$defs"]["ModelSpec"]["not"] = {
+        "anyOf": [{"required": ["tier"]}, {"required": ["min_tier"]}]
+    }
     return schema
 
 
