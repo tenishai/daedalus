@@ -2,10 +2,19 @@
 #   FROM <ar>/daedalus-runtime:<tag>
 #   COPY bundle/ /bundle
 #
-# techne and liminal are not on PyPI; they are supplied as named build contexts:
+# techne and liminal are not on PyPI. Two ways to supply them, same image:
 #   docker build -f docker/Dockerfile \
 #     --build-context techne=../techne --build-context liminal=../liminal \
-#     -t daedalus-runtime .
+#     -t daedalus-runtime .                                (sibling checkouts)
+#   docker build -f docker/Dockerfile \
+#     --build-arg EXTRA_INDEX_URL=https://<index>/simple/ [--build-arg AR_TOKEN=…] \
+#     -t daedalus-runtime .                                (a package index)
+# AR_TOKEN authenticates a private Artifact Registry index; it is the token
+# Gojira's generated CI passes to every build (2026-09-30). The arg is not
+# called PIP_EXTRA_INDEX_URL: pip reads that name from the environment and a
+# build ARG is environment for every later RUN of the stage. Either context
+# may be given alone; whatever is missing comes from the index. Neither given
+# for a package: the build stops and says which.
 #
 # Build stage: wheels only. Both source trees (including techne's .git history,
 # which .dockerignore cannot reach since it's a separate named build context)
@@ -18,7 +27,14 @@
 #   transports: [{ kind: a2a, host: 0.0.0.0, port: 8080 }]
 # host 0.0.0.0 so probes/Service can reach it; port 8080 to match this
 # platform's APP_PORT (see EXPOSE below).
+# Empty stages that `--build-context techne=` / `--build-context liminal=`
+# override by name; left alone they copy nothing (see the header).
+FROM scratch AS techne
+FROM scratch AS liminal
+
 FROM python:3.12-slim AS build
+ARG EXTRA_INDEX_URL=""
+ARG AR_TOKEN=""
 
 COPY --from=techne / /src/techne
 COPY --from=liminal / /src/liminal
@@ -28,7 +44,12 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN pip wheel --wheel-dir /wheels "techne[vectors] @ file:///src/techne" "liminal @ file:///src/liminal" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
+RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="techne[vectors] @ file:///src/techne"; else TECHNE="techne[vectors]>=0.16.1"; fi \
+ && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="liminal @ file:///src/liminal"; else LIMINAL="liminal>=0.2.0"; fi \
+ && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
+      echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
+ && if [ -n "$AR_TOKEN" ]; then EXTRA_INDEX_URL="$(echo "$EXTRA_INDEX_URL" | sed "s#://#://oauth2accesstoken:${AR_TOKEN}@#")"; fi \
+ && PIP_EXTRA_INDEX_URL="$EXTRA_INDEX_URL" pip wheel --wheel-dir /wheels "$TECHNE" "$LIMINAL" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
 
@@ -46,8 +67,8 @@ RUN python -c "import daedalus, techne; from techne.core.database import connect
 RUN python -c "import claude_agent_sdk"   # the Claude Code engine (--engine claude-code), with its bundled CLI
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
-# Version floor: techne arrives as a named build context, so nothing else
-# pins it. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
+# Version floor: techne may arrive as a named build context, which nothing
+# else pins. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
 # drop every lexical hit -- the exact failure use_vectors=True was gated
 # on. A 0.16.0 checkout passes every other proof here and ships that bug.
 RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 16, 1), f'techne {techne.__version__} < 0.16.1: the #827 fusion bug ships with use_vectors=True'"
