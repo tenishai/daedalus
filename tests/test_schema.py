@@ -7,11 +7,13 @@ is regenerated (`daedalus schema --out docs/bundle.schema.json`).
 """
 
 import json
+import re
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
-from daedalus.bundle import bundle_schema
+from daedalus.bundle import _PLACEHOLDER_PATTERN, bundle_schema
 from daedalus.cli import main
 
 ARTIFACT = Path(__file__).parents[1] / "docs" / "bundle.schema.json"
@@ -72,3 +74,79 @@ def test_cli_schema_prints_valid_json():
     result = CliRunner().invoke(main, ["schema"])
     assert result.exit_code == 0
     assert json.loads(result.output)["title"] == "daedalus agent bundle (agent.yaml)"
+
+
+def test_a_placeholder_matches_the_pattern_the_loader_actually_expands():
+    """bundle_schema()'s placeholder branch must accept exactly what
+    daedalus.bundle.interpolate() expands (tenishai/daedalus#130) — checked
+    against real examples rather than assumed to match the source regex."""
+    for text in ("${PRUDENCE_MODEL}", "${PRUDENCE_MAX_TOKENS:-16384}", "${X:-}"):
+        assert re.fullmatch(_PLACEHOLDER_PATTERN, text), text
+    for text in ("16384", "${1NOPE}", "not-a-var", "${OK}-suffix", "prefix-${OK}"):
+        assert not re.fullmatch(_PLACEHOLDER_PATTERN, text), text
+
+
+def test_a_placeholder_is_accepted_for_every_non_string_scalar_field():
+    """Every int/bool/enum field also accepts a bare placeholder string, mirroring
+    the loader's own expansion (#130) — walk every field in the published schema,
+    not just the five fields issue #130 measured."""
+    schema = bundle_schema()
+
+    def leaf_types(node: dict) -> set[str]:
+        # An enum branch also carries "type": "string", so check "enum" first, per branch.
+        types = set()
+        for branch in node.get("anyOf", [node]):
+            if "enum" in branch:
+                types.add("enum")
+            elif "type" in branch:
+                types.add(branch["type"])
+        return types
+
+    checked = 0
+    enums = 0
+    for defn in [schema, *schema.get("$defs", {}).values()]:
+        for name, field_schema in defn.get("properties", {}).items():
+            types = leaf_types(field_schema)
+            if types & {"integer", "number", "boolean", "enum"}:
+                branches = field_schema.get("anyOf", [])
+                placeholder = [b for b in branches if b.get("pattern") == _PLACEHOLDER_PATTERN]
+                assert placeholder, f"{name}: no placeholder branch ({field_schema})"
+                checked += 1
+                enums += "enum" in types
+    assert checked >= 5  # at least the five fields issue #130 measured
+    assert enums >= 2  # memory.personal and tools.on_exhausted, from issue #130's five
+
+
+def test_bundles_with_placeholders_in_non_string_fields_validate(tmp_path):
+    """The exact five failures issue #130 measured against main 61fed2d, raw
+    (unexpanded) against the published schema (jsonschema, a dev dependency)."""
+    import jsonschema
+    import yaml
+
+    raw = yaml.safe_load("""
+name: prudence
+model:
+  id: "${PRUDENCE_MODEL:-best}"
+  max_tokens: "${PRUDENCE_MAX_TOKENS:-16384}"
+memory:
+  personal: "${PRUDENCE_MEMORY:-none}"
+tools:
+  max_steps: "${PRUDENCE_MAX_STEPS:-80}"
+  context_tokens: "${PRUDENCE_CONTEXT_TOKENS:-1000000000}"
+  on_exhausted: "${PRUDENCE_ON_EXHAUSTED:-wrap_up}"
+""")
+    jsonschema.validate(raw, bundle_schema())
+
+
+def test_schema_refuses_removed_model_tier_fields():
+    # #129 removed model.tier and model.min_tier; load refuses them, so the published
+    # schema must too, or a consumer validating against it (kobo) accepts a bundle
+    # that daedalus won't load.
+    import jsonschema
+
+    schema = bundle_schema()
+    for extra in ({"tier": "best"}, {"min_tier": "fast"}):
+        bad = {"name": "x", "model": {"id": "best", **extra}}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, schema)
+    jsonschema.validate({"name": "x", "model": {"id": "best"}}, schema)

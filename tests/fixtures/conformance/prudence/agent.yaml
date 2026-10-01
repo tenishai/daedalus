@@ -1,0 +1,69 @@
+# Copied verbatim from tenishai/agents, branch feat/tier-names, commit
+# 0975c8619e728c9f3b442e53022de9ac928afbc2 (tenishai/agents#106): prudence/agent.yaml
+# as it reads after folding model.tier into model.id (tenishai/daedalus#129).
+# This header is the only edit; everything below is unedited (tenishai/daedalus#131).
+# Prudence as a daedalus bundle (tenishai/agents#51, Fates design step 1): she reads
+# files and runs the PR's tests (exec.run), on either engine. prudence/review-daedalus.sh
+# sets the PRUDENCE_* variables and runs it. `daedalus run prudence` directly loads with
+# no PRUDENCE_MODEL: model.id defaults to the tier word "best", resolved through
+# DAEDALUS_TIERS if it names a deployment's tiers file (daedalus.tiers,
+# tenishai/daedalus#129); otherwise it needs PRUDENCE_MODEL pinned.
+name: prudence
+card: agent-card.json
+# Her judgment. What she can do in this bundle (review-only.md) arrives in the brief,
+# until persona.md is split into judgment and Claude Code seat instructions.
+persona: persona.md
+model:
+  # A LiteLLM route, a full Claude Code model id, or a tier word (fast/balanced/best),
+  # resolved through the deployment's DAEDALUS_TIERS file. The claude-code engine reads
+  # engine.claude_code.model instead, and only records this. review-daedalus.sh sets
+  # PRUDENCE_MODEL itself in pinned or default mode, and leaves it unset in tier mode, so
+  # the default here -- "best" -- is what resolves.
+  id: "${PRUDENCE_MODEL:-best}"
+  max_tokens: "${PRUDENCE_MAX_TOKENS:-16384}"
+transports:
+  - kind: cli
+tools:
+  provider: mcp
+  servers:
+    - name: review
+      command: ["${PRUDENCE_PYTHON:-python3}", "${PRUDENCE_HOME:-.}/review_mcp.py"]   # an argv list
+      env:
+        PRUDENCE_POST: "${PRUDENCE_POST:-}"
+        PRUDENCE_REPO: "${PRUDENCE_REPO:-}"
+        PRUDENCE_PR: "${PRUDENCE_PR:-}"
+        PRUDENCE_SHA: "${PRUDENCE_SHA:-}"
+        PRUDENCE_ENGINE: "${PRUDENCE_ENGINE:-litellm}"
+        PRUDENCE_MODEL_LABEL: "${PRUDENCE_MODEL_LABEL:-default}"
+        PRUDENCE_POST_STATUS: "${PRUDENCE_POST_STATUS:-}"
+        PRUDENCE_GH_TOKEN_FILE: "${PRUDENCE_GH_TOKEN_FILE:-}"
+  builtin:
+    files:
+      roots: ["${PRUDENCE_CHECKOUT:-.}"]
+      max_bytes: "${PRUDENCE_READ_BYTES:-40000}"   # one read must not swamp a small model's context
+    exec:   # runs the PR's own code, as the agent: see prudence/README.md, "Running tests"
+      roots: ["${PRUDENCE_CHECKOUT:-.}"]
+      timeout: "${PRUDENCE_EXEC_TIMEOUT:-300}"
+  # review.post_review exists only when PRUDENCE_POST=1 (review_mcp.py).
+  allow: ["files.read", "files.list", "files.search", "exec.run", "review.post_review"]
+  max_steps: "${PRUDENCE_MAX_STEPS:-80}"
+  on_exhausted: "${PRUDENCE_ON_EXHAUSTED:-wrap_up}"
+  # Stop reading before a local model server's memory ceiling. The default is
+  # effectively no limit; set it for a small model (prudence/README.md).
+  context_tokens: "${PRUDENCE_CONTEXT_TOKENS:-1000000000}"
+memory:
+  # Her own lessons, from techne at TECHNE_HOME (the image: its /techne volume), 5 of
+  # them recalled on the PR's title and changed paths (review-daedalus.sh, --recall).
+  personal: "${PRUDENCE_MEMORY:-none}"
+  team: none
+approvals:
+  ceiling:
+    write: false
+    exec: true
+engine:
+  claude_code:
+    builtin_tools: []   # her tools are the ones above; Claude Code's own stay off
+    # Empty (not a default id) so tier mode can leave this unset and let daedalus fill
+    # it from the tier's entry; review-daedalus.sh sets PRUDENCE_CLAUDE_MODEL itself
+    # (a full Claude model id, never an alias) in pinned or default mode.
+    model: "${PRUDENCE_CLAUDE_MODEL:-}"

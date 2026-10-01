@@ -76,27 +76,34 @@ class BudgetSpec(_WarnExtra):
 
 
 class ModelSpec(_WarnExtra):
-    # A model id, or a tier the deployment maps to one (daedalus.tiers, #103). A
-    # non-empty id wins over the tier. Empty counts as unset, so a bundle can say
-    # `id: "${MY_MODEL:-}"` beside `tier: high` and let an operator pin a model.
+    # A concrete model id, or (after ${VAR} expansion) one of the tier words
+    # fast/balanced/best, resolved through DAEDALUS_TIERS (daedalus.tiers,
+    # tenishai/daedalus#129). A bundle can say `id: "${MY_MODEL:-best}"`: the default
+    # applies only while MY_MODEL is unset, so an operator pins a model by setting it.
+    # MY_MODEL set to an empty string expands to "" and fails to load ("model needs an
+    # id"); it does not fall back to the tier.
     id: str | None = None
-    tier: Literal["cheap", "medium", "high"] | None = None
-    # How far down this bundle may run when the deployment lacks its tier; unset means
-    # refuse to load rather than run on less.
-    min_tier: Literal["cheap", "medium", "high"] | None = None
     max_tokens: int = 8192
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
 
     @model_validator(mode="after")
-    def _id_or_tier(self):
+    def _id_required(self):
+        # model.tier and model.min_tier were removed (tenishai/daedalus#129): the tier
+        # now lives in model.id itself. ModelSpec allows unknown fields (forward compat,
+        # _WarnExtra), so a bundle still setting either would otherwise load silently
+        # with a warning; that's wrong for a field that moved, not one that's merely new.
+        removed = sorted({"tier", "min_tier"} & set(self.__pydantic_extra__ or {}))
+        if removed:
+            raise ValueError(
+                f"model.{removed[0]} was removed (tenishai/daedalus#129); put the tier "
+                "in model.id instead, e.g. model.id: best"
+            )
         if self.id is not None and not self.id.strip():
             self.id = None
-        if self.id is None and self.tier is None:
-            raise ValueError("model needs an id or a tier (cheap, medium or high)")
-        if self.min_tier is not None and self.tier is None:
-            raise ValueError("model.min_tier needs model.tier")
+        if self.id is None:
+            raise ValueError("model needs an id: a model id, or a tier (fast, balanced or best)")
         return self
 
 
@@ -326,6 +333,60 @@ class AgentSpec(_WarnExtra):
     engine: EngineSpec = Field(default_factory=EngineSpec)
 
 
+#: The placeholder syntax `interpolate()` (above) expands, anchored to match a whole
+#: field value rather than `_VAR`'s substring search: a non-string field must be
+#: written as ONE placeholder (`max_tokens: "${X:-16384}"`), never text plus a
+#: placeholder, since anything else can't parse as that field's type once expanded.
+_PLACEHOLDER_PATTERN = r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}$"
+
+#: Keys that describe a field rather than constrain its value. Kept as siblings of
+#: the widened `anyOf`, matching how pydantic already renders an optional field
+#: (`{"anyOf": [...], "default": null, "title": "..."}`) rather than nesting them
+#: inside a branch, where a schema-reading editor wouldn't look for them.
+_SCHEMA_METADATA_KEYS = ("title", "description", "default", "examples", "deprecated")
+
+
+def _placeholder_eligible(node: dict) -> bool:
+    """A leaf that `${VAR}` expansion could reach but a plain string couldn't already
+    satisfy: an enum (Literal) or a bare integer/number/boolean. A string field
+    already accepts a placeholder as ordinary text -- nothing to widen there."""
+    if "$ref" in node:
+        return False  # a nested submodel, not a scalar
+    if "enum" in node:
+        return True
+    return node.get("type") in ("integer", "number", "boolean")
+
+
+def _extend_field_schema(field_schema: dict) -> None:
+    """Let one field's schema also accept a `${VAR}` / `${VAR:-default}` placeholder,
+    in place. A field already written as `anyOf` (nullable) gets a sibling branch;
+    a plain scalar field is wrapped into one, with its metadata kept outside it."""
+    if "anyOf" in field_schema:
+        branches = field_schema["anyOf"]
+        if any(_placeholder_eligible(b) for b in branches):
+            branches.append({"type": "string", "pattern": _PLACEHOLDER_PATTERN})
+        return
+    if not _placeholder_eligible(field_schema):
+        return
+    metadata = {k: field_schema.pop(k) for k in _SCHEMA_METADATA_KEYS if k in field_schema}
+    branches = [dict(field_schema), {"type": "string", "pattern": _PLACEHOLDER_PATTERN}]
+    field_schema.clear()
+    field_schema["anyOf"] = branches
+    field_schema.update(metadata)
+
+
+def _allow_placeholders(schema: dict) -> None:
+    """Widen every non-string scalar field in `schema`, in place (tenishai/daedalus#130):
+    `Bundle.load` expands `${VAR}` placeholders before validating (`interpolate()`,
+    above), so the published schema must describe what daedalus actually accepts —
+    a placeholder in any integer, boolean or enum field, not just string ones."""
+    for defn in schema.get("$defs", {}).values():
+        for field_schema in defn.get("properties", {}).values():
+            _extend_field_schema(field_schema)
+    for field_schema in schema.get("properties", {}).values():
+        _extend_field_schema(field_schema)
+
+
 def bundle_schema() -> dict:
     """The canonical agent.yaml shape as JSON Schema — the published contract
     for consumers that can't import Python (cabal's bundle reader, editors).
@@ -336,7 +397,7 @@ def bundle_schema() -> dict:
     """
     import daedalus  # function-local: daedalus/__init__ imports this module
 
-    return {
+    schema = {
         **AgentSpec.model_json_schema(),
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/tenishai/daedalus/blob/main/docs/bundle.schema.json",
@@ -345,9 +406,19 @@ def bundle_schema() -> dict:
         "description": (
             "Wiring for a daedalus agent bundle — a directory that IS an "
             "agent (agent.yaml + persona.md + agent-card.json). Unknown "
-            "fields load with a warning, never silently."
+            "fields load with a warning, never silently. A non-string field may "
+            "also be written as a ${VAR} / ${VAR:-default} placeholder, expanded "
+            "from the environment before this shape applies."
         ),
     }
+    _allow_placeholders(schema)
+    # model.tier and model.min_tier were removed (#129) and load refuses them, but
+    # ModelSpec allows unknown keys, so say so here too: a consumer validating against
+    # this schema (kobo's vendored copy) then refuses what Bundle.load refuses.
+    schema["$defs"]["ModelSpec"]["not"] = {
+        "anyOf": [{"required": ["tier"]}, {"required": ["min_tier"]}]
+    }
+    return schema
 
 
 

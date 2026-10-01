@@ -45,7 +45,15 @@ from daedalus.protocols import (
     Transport,
 )
 from daedalus.task import RECALL_KEY, VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
-from daedalus.tiers import TIERS_ENV, Resolution, TierError, load_tiers, pick, tiers_path
+from daedalus.tiers import (
+    TIER_NAMES,
+    TIERS_ENV,
+    Resolution,
+    TierError,
+    load_tiers,
+    pick,
+    tiers_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +99,6 @@ class Agent:
         on_event: Callable[[dict], None] | None = None,
         engine: str | None = None,
     ):
-        self.bundle = bundle
         # Which engine runs the bundle is the operator's choice (tenishai/agents#51):
         # the argument, else DAEDALUS_ENGINE, else litellm. Checked here so a typo fails
         # at load, not on the first task.
@@ -192,33 +199,36 @@ class Agent:
             self.on_event(event)
 
     def _resolve_model(self, explicit_engine: str | None) -> Resolution:
-        """Turn model.tier into a model, from the deployment's tiers file (#103).
+        """Turn a tier word in model.id into a model, from the deployment's tiers file
+        (#103, #129).
 
-        A non-empty model.id wins and is only recorded. Otherwise the tier is looked up
-        in DAEDALUS_TIERS; the entry fills model.id, the endpoint, the Claude Code model
-        and the model's own limits, but never a value the bundle set itself."""
+        A concrete model.id is only recorded. A tier word (fast/balanced/best) is
+        looked up in DAEDALUS_TIERS; the entry fills model.id, the endpoint, the
+        Claude Code model and the model's own limits, but never a value the bundle
+        set itself."""
         model = self.bundle.spec.model
         cc = self.bundle.spec.engine.claude_code
-        if model.id is not None:
+        if model.id not in TIER_NAMES:
             engine = explicit_engine or "litellm"
             shown = model.id
             if engine == "claude-code":
                 shown = cc.model or "(the Claude Code default)"
-            return Resolution(tier=model.tier, used=None, engine=engine, id=shown, source="id")
+            return Resolution(tier=None, used=None, engine=engine, id=shown, source="id")
+        tier = model.id
         path = tiers_path()
         if path is None:
             raise BundleError(
-                f"model.tier is {model.tier} and {TIERS_ENV} names no tiers file; set it to "
-                "this deployment's tiers.yaml, or pin model.id"
+                f"model.id is the tier {tier!r} and {TIERS_ENV} names no tiers file; set it "
+                "to this deployment's tiers.yaml, or pin model.id to a model"
             )
         try:
-            used, entry = pick(model.tier, model.min_tier, load_tiers(path))
+            entry = pick(tier, load_tiers(path))
         except TierError as exc:
             raise BundleError(str(exc)) from exc
         if explicit_engine and explicit_engine != entry.engine:
             raise BundleError(
-                f"the {used} tier runs on {entry.engine} in {path}, and the {explicit_engine} "
-                "engine was asked for; drop the engine choice, or pin model.id"
+                f"the {tier} tier runs on {entry.engine} in {path}, and the {explicit_engine} "
+                "engine was asked for; drop the engine choice, or pin model.id to a model"
             )
         model.id = entry.id
         for field in ("api_base", "api_key_env", "max_tokens"):
@@ -232,9 +242,7 @@ class Agent:
                 setattr(tools, field, value)
         if entry.engine == "claude-code" and not cc.model:
             cc.model = entry.id
-        return Resolution(
-            tier=model.tier, used=used, engine=entry.engine, id=entry.id, source=str(path)
-        )
+        return Resolution(tier=tier, used=tier, engine=entry.engine, id=entry.id, source=str(path))
 
     def _tool_overlay_dir(self) -> Path | None:
         """The persistent overlay directory for fast-lane-delivered tools

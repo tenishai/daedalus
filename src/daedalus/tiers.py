@@ -1,31 +1,30 @@
-"""Model tiers (tenishai/daedalus#103): a bundle says how much model it needs, and each
-deployment says which model fills that need.
+"""Model tiers (tenishai/daedalus#103, #129): a bundle says how much model it needs,
+and each deployment says which model fills that need.
 
-A bundle declares `model.tier: cheap | medium | high` instead of (or beside) a
-`model.id`. The operator maps tiers to models once per deployment, in a YAML file named
-by DAEDALUS_TIERS:
+`model.id` is either a concrete model id, or one of the tier words `fast`, `balanced`,
+`best` (after `${VAR}` expansion). A tier word is looked up in a YAML file named by
+DAEDALUS_TIERS, mapping tiers to models once per deployment:
 
     tiers:
-      high:   {engine: claude-code, id: claude-opus-5-5}
-      medium: {engine: claude-code, id: claude-sonnet-5-5}
-      cheap:
+      best:     {engine: claude-code, id: claude-opus-5-5}
+      balanced: {engine: claude-code, id: claude-sonnet-5-5}
+      fast:
         engine: litellm
         id: openai/mtplx-qwen35-9b-optimized-speed
         api_base: http://192.168.10.202:8000/v1
         api_key_env: MTPLX_API_KEY
         context_tokens: 45000      # this model on this hardware
         max_repeats: 3
-      # a tier can alias another (medium: high), or be null: not available here
+      # a tier can alias another (balanced: best), or be null: not offered here
 
-Resolution rules:
-- An explicit, non-empty `model.id` wins; the tier is then only recorded.
-- A tier the deployment doesn't offer refuses to load, unless the bundle names
-  `model.min_tier`: then the next tier down is used, as far as min_tier, and the
-  fallback is recorded.
+Resolution rules (`daedalus.agent._resolve_model`):
+- A concrete `model.id` is only recorded.
+- A tier word is looked up in DAEDALUS_TIERS; a deployment that doesn't offer it
+  refuses to load.
 - Limits that belong to a model (context_tokens, max_repeats, max_tokens) come from
   the tier entry only where the bundle hasn't set them.
 - The resolved model is always recorded, because a tier floats the way an alias does
-  (agents-archive#142): which tier, which engine, which id, and whether it fell back.
+  (agents-archive#142): which tier, which engine, which id.
 """
 
 from __future__ import annotations
@@ -38,8 +37,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-TIER_NAMES: tuple[str, ...] = ("cheap", "medium", "high")  # lowest to highest
-Tier = Literal["cheap", "medium", "high"]
+TIER_NAMES: tuple[str, ...] = ("fast", "balanced", "best")  # lowest to highest
+Tier = Literal["fast", "balanced", "best"]
 TIERS_ENV = "DAEDALUS_TIERS"
 
 
@@ -63,15 +62,18 @@ class TierEntry(BaseModel):
 class Resolution:
     """What a tier resolved to, for the trace, the log and the agent card."""
 
-    tier: str | None  # the tier the bundle asked for (None: it pinned an id)
-    used: str | None  # the tier actually used (differs from `tier` after a fallback)
+    tier: str | None  # the tier word model.id named (None: it was a concrete id)
+    used: str | None  # the tier actually used
     engine: str
     id: str
-    source: str  # "id" (the bundle pinned it) or the tiers file's path
+    source: str  # "id" (the bundle pinned a concrete model) or the tiers file's path
 
     @property
     def fell_back(self) -> bool:
-        # A pinned id has used=None: that is a pin, not a fallback (Prudence, PR 127).
+        # Kept for the card/event shape (tenishai/daedalus#103): daedalus no longer
+        # has a fallback mechanism (model.min_tier was removed, #129), so `used`
+        # always equals `tier` once resolved and this is always False. A pinned id
+        # has used=None, which is a pin, not a fallback.
         return self.used is not None and self.used != self.tier
 
     def as_dict(self) -> dict:
@@ -130,21 +132,17 @@ def tiers_path(env: dict[str, str] | None = None) -> Path | None:
     return Path(value).expanduser() if value else None
 
 
-def pick(
-    tier: str, min_tier: str | None, table: dict[str, TierEntry | None]
-) -> tuple[str, TierEntry]:
-    """The tier to use: the one asked for, else lower ones down to min_tier."""
-    floor = min_tier or tier
-    if TIER_NAMES.index(floor) > TIER_NAMES.index(tier):
-        raise TierError(f"model.min_tier {floor} is above model.tier {tier}")
-    for name in reversed(TIER_NAMES[TIER_NAMES.index(floor) : TIER_NAMES.index(tier) + 1]):
-        found = table.get(name)
-        if found is not None:
-            return name, found
+def pick(tier: str, table: dict[str, TierEntry | None]) -> TierEntry:
+    """The tiers-file entry for `tier`, or a TierError naming what's offered instead.
+
+    No fallback (tenishai/daedalus#129 removed model.min_tier): a tier the deployment
+    doesn't offer refuses to load rather than running on a lower one.
+    """
+    found = table.get(tier)
+    if found is not None:
+        return found
     offered = [n for n in TIER_NAMES if table.get(n) is not None]
-    wanted = tier if floor == tier else f"{tier} (or down to {floor})"
     raise TierError(
-        f"this bundle needs the {wanted} tier, and this deployment offers "
-        f"{', '.join(offered) or 'none'}; map it in the tiers file, or set model.min_tier "
-        "if the bundle can run on less"
+        f"this bundle needs the {tier} tier, and this deployment offers "
+        f"{', '.join(offered) or 'none'}; map it in the tiers file"
     )

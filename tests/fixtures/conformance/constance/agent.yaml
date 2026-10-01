@@ -1,0 +1,56 @@
+# Copied verbatim from tenishai/agents, branch feat/tier-names, commit
+# 0975c8619e728c9f3b442e53022de9ac928afbc2 (tenishai/agents#106): constance/agent.yaml
+# as it reads after folding model.tier into model.id (tenishai/daedalus#129).
+# This header is the only edit; everything below is unedited (tenishai/daedalus#131).
+# Constance as a daedalus bundle (Fates design step 4): the concordance audit, on any
+# model or on Claude Code. constance/audit-daedalus.sh clones the pull request, fetches
+# the GitHub surface she audits into files, sets the CONSTANCE_* variables and runs it.
+# `daedalus run constance` directly loads with no CONSTANCE_MODEL: model.id defaults to
+# the tier word "balanced", resolved through DAEDALUS_TIERS if it names a deployment's
+# tiers file (daedalus.tiers, tenishai/daedalus#129); otherwise it needs CONSTANCE_MODEL
+# pinned. Her judgment is persona.md; what this run gives her is audit-only.md, first in
+# the brief.
+name: constance
+card: agent-card.json
+persona: persona.md
+model:
+  # A LiteLLM route, a full Claude Code model id, or a tier word (fast/balanced/best),
+  # resolved through DAEDALUS_TIERS. The claude-code engine reads
+  # engine.claude_code.model instead, and only records this.
+  id: "${CONSTANCE_MODEL:-balanced}"
+  max_tokens: "${CONSTANCE_MAX_TOKENS:-16384}"
+transports:
+  - kind: cli
+tools:
+  builtin:
+    files:
+      # The checkout, and the GitHub pages the launcher fetched for her (read-only copies).
+      roots: ["${CONSTANCE_CHECKOUT:-.}", "${CONSTANCE_GITHUB:-.}"]
+      max_bytes: "${CONSTANCE_READ_BYTES:-40000}"
+    exec:
+      # Read-only probes: no gh (the launcher fetches GitHub for her, so no token reaches
+      # her run), no test runner, package manager or shell. Not a boundary: python3 and
+      # git can still write, but only into the throwaway clone.
+      roots: ["${CONSTANCE_CHECKOUT:-.}", "${CONSTANCE_GITHUB:-.}"]
+      commands: [git, grep, sed, awk, find, ls, cat, head, tail, wc, sort, uniq, diff, sqlite3, python3]
+      timeout: "${CONSTANCE_EXEC_TIMEOUT:-60}"
+  allow: ["files.read", "files.list", "files.search", "exec.run"]
+  max_steps: "${CONSTANCE_MAX_STEPS:-60}"
+  on_exhausted: "${CONSTANCE_ON_EXHAUSTED:-wrap_up}"
+  context_tokens: "${CONSTANCE_CONTEXT_TOKENS:-1000000000}"
+memory:
+  # Her own lessons, from techne at TECHNE_HOME (the image: its /techne volume),
+  # recalled on the PR's title and changed paths (audit-daedalus.sh, --recall).
+  personal: "${CONSTANCE_MEMORY:-none}"
+  team: none
+approvals:
+  ceiling:
+    write: false
+    exec: true
+engine:
+  claude_code:
+    builtin_tools: []   # her tools are the ones above; Claude Code's own stay off
+    # Empty so tier mode can leave this unset and let daedalus fill it from the tier's
+    # entry; audit-daedalus.sh sets CONSTANCE_CLAUDE_MODEL itself (a full Claude model
+    # id, never an alias) in pinned or default mode.
+    model: "${CONSTANCE_CLAUDE_MODEL:-}"

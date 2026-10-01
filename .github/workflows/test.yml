@@ -33,17 +33,17 @@ jobs:
             extras: dev,claude-code
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       # The runner CONTAINER persists between jobs (same machine name across legs), so
-      # setup-python's interpreter in _work/_tool is shared: a bare `pip install` would
-      # let one job's packages satisfy the next job's imports (liminal#103 r1). A fresh
-      # venv per job, first on PATH, keeps each run to what it installed itself.
-      # setup-python stays (proven on this runner) rather than the image's interpreters.
+      # a shared interpreter plus a bare `pip install` would let one job's packages
+      # satisfy the next job's imports (liminal#103 r1). A fresh venv per job, first on
+      # PATH, keeps each run to what it installed itself.
+      # uv-managed Python, not actions/setup-python (#133): setup-python's builds on this
+      # runner load libpython only through the LD_LIBRARY_PATH it exports, and exec.run
+      # hands commands a clean environment, so every test_tools_exec test that runs
+      # sys.executable exited 127. uv's builds run without it, like a normal install.
       - name: Fresh venv for this job
         run: |
-          python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
+          uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
       - run: pip install -e ".[${{ matrix.extras }}]"
       - run: ruff check src tests docker conftest.py
@@ -78,15 +78,11 @@ jobs:
           repository: tenishai/techne
           path: techne
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      # Same fresh-venv reasoning as the test job above: the runner container
-      # persists between jobs, so a bare `pip install` would let this job's
-      # techne install leak into the next job's (liminal#103 r1).
+      # Same fresh-venv and uv-managed-Python reasoning as the test job above
+      # (liminal#103 r1, #133).
       - name: Fresh venv for this job
         run: |
-          python -m venv --clear "$GITHUB_WORKSPACE/.venv-ci"
+          uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
 
       - name: Install (with techne sibling)
