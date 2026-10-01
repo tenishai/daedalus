@@ -223,8 +223,38 @@ class ClaudeCodeEngine:
                               state=TaskState.FAILED, reason=ReasonCode.ESCALATION)
         # Which models actually ran: a pin or a tier can resolve differently than meant
         # (agents-archive#142, daedalus#103), so the trace records what happened.
-        turn.emit("engine_finished", engine=self.name,
-                  models=sorted((result.model_usage or {}).keys()), turns=result.num_turns)
+        #
+        # Usage and cost (daedalus#135): the Fates run in --rm containers, so the trace
+        # is the only record of what a run cost once the container is gone. The SDK's
+        # ResultMessage carries usage/model_usage/total_cost_usd separately from
+        # `models`, and all three are optional (an older CLI, or an error result) --
+        # this must not raise on any of them being None. Emitted before the
+        # error/max-turns branches below, same as `models`/`turns` already were, so a
+        # failed run still reports what it spent.
+        #
+        # Field policy, picked for consistency and documented here because the issue
+        # left it open: when `usage` itself is missing there is nothing measured, so
+        # the four token fields are left out of the event entirely; when `usage` is
+        # present but one counter is absent from it (no cache activity, say), that
+        # counter is reported as 0 -- it was measured, and measured zero. Never print
+        # (or report) a 0 for a counter that was never measured at all.
+        fields: dict[str, Any] = {
+            "engine": self.name,
+            "models": sorted((result.model_usage or {}).keys()),
+            "turns": result.num_turns,
+            "model_usage": dict(result.model_usage or {}),
+        }
+        usage = result.usage
+        if usage is not None:
+            fields.update(
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+                cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            )
+        if result.total_cost_usd is not None:
+            fields["total_cost_usd"] = result.total_cost_usd
+        turn.emit("engine_finished", **fields)
         # No token budget here: Claude Code runs the whole loop, so per_task_tokens can't
         # stop it between calls. The Agent refuses to load a bundle that sets one with
         # this engine rather than ignore it.

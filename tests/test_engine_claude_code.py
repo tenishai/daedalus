@@ -42,11 +42,16 @@ def _turn(tmp_path, *, tools=(READ_SPEC,), approve: object = "unset", events=Non
     )
 
 
-def _result(subtype="success", *, is_error=False, result="done", model_usage=None):
+_unset_usage = object()  # lets a test pass usage=None, distinct from "use the default"
+
+
+def _result(subtype="success", *, is_error=False, result="done", model_usage=None,
+            usage=_unset_usage, total_cost_usd=None):
     return sdk.ResultMessage(
         subtype=subtype, duration_ms=1, duration_api_ms=1, is_error=is_error, num_turns=2,
-        session_id="s", result=result, usage={"input_tokens": 3, "output_tokens": 4},
-        model_usage=model_usage or {},
+        session_id="s", result=result,
+        usage={"input_tokens": 3, "output_tokens": 4} if usage is _unset_usage else usage,
+        model_usage=model_usage or {}, total_cost_usd=total_cost_usd,
     )
 
 
@@ -181,8 +186,64 @@ async def test_a_successful_run_replies_with_the_result_and_records_models(tmp_p
     kinds = [(k, f.get("name")) for k, f in events]
     assert ("reasoning", None) in kinds and ("tool_call", "claude.Bash") in kinds
     assert ("tool_call", "mcp__daedalus__files__read") not in kinds  # traced in the handler
-    assert ("engine_finished", {"engine": "claude-code", "models": ["claude-opus-5-5"],
-                                "turns": 2}) in events
+    assert ("engine_finished", {
+        "engine": "claude-code", "models": ["claude-opus-5-5"], "turns": 2,
+        "model_usage": {"claude-opus-5-5": {}},
+        "input_tokens": 3, "output_tokens": 4,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+    }) in events  # no total_cost_usd: _result()'s default is None, so it's left out
+
+
+async def test_engine_finished_reports_the_full_numbers_when_the_sdk_gives_them(tmp_path):
+    """daedalus#135: the real counters, not just which models ran."""
+    events = []
+    usage = {
+        "input_tokens": 1_200_000, "output_tokens": 11_234,
+        "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 200_000,
+    }
+    result = _result(usage=usage, model_usage={"claude-opus-5-5": {"inputTokens": 1_200_000}},
+                     total_cost_usd=1.234)
+    task = await ClaudeCodeEngine(ClaudeCodeSpec(), query=_fake_query(result)).run(
+        _turn(tmp_path, events=events))
+    assert task.state is not TaskState.FAILED
+    finished = next(f for k, f in events if k == "engine_finished")
+    assert finished == {
+        "engine": "claude-code", "models": ["claude-opus-5-5"], "turns": 2,
+        "model_usage": {"claude-opus-5-5": {"inputTokens": 1_200_000}},
+        "input_tokens": 1_200_000, "output_tokens": 11_234,
+        "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 200_000,
+        "total_cost_usd": 1.234,
+    }
+
+
+async def test_engine_finished_omits_token_fields_when_usage_is_missing(tmp_path):
+    """An older SDK, or an error result, can leave usage/model_usage/total_cost_usd
+    None; the engine must not raise, and must not report measured zeros for numbers
+    nobody measured."""
+    events = []
+    result = _result(usage=None, model_usage=None, total_cost_usd=None)
+    task = await ClaudeCodeEngine(ClaudeCodeSpec(), query=_fake_query(result)).run(
+        _turn(tmp_path, events=events))
+    assert task.state is not TaskState.FAILED
+    finished = next(f for k, f in events if k == "engine_finished")
+    assert finished == {
+        "engine": "claude-code", "models": [], "turns": 2, "model_usage": {},
+    }
+    assert "input_tokens" not in finished and "total_cost_usd" not in finished
+
+
+async def test_an_error_result_still_reports_usage(tmp_path):
+    """The event is emitted before the error/max-turns branches (daedalus#135): a
+    failed run still says what it spent."""
+    events = []
+    usage = {"input_tokens": 5, "output_tokens": 1}
+    result = _result("error_during_execution", is_error=True, result=None, usage=usage,
+                     model_usage={"claude-opus-5-5": {}}, total_cost_usd=0.01)
+    task = await ClaudeCodeEngine(ClaudeCodeSpec(), query=_fake_query(result)).run(
+        _turn(tmp_path, events=events))
+    assert task.state is TaskState.FAILED
+    finished = next(f for k, f in events if k == "engine_finished")
+    assert finished["input_tokens"] == 5 and finished["total_cost_usd"] == 0.01
 
 
 async def test_running_out_of_turns_is_a_policy_stop(tmp_path):

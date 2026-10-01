@@ -135,6 +135,48 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [{lane}] {decision} for sub={event['sub']}")
 
 
+def _usage_line(event: dict) -> str | None:
+    """The one-line usage/cost summary for an `engine_finished` event, in the
+    `[budget]` style (see `_print_event` above) -- but printed every run, not only
+    under -v (daedalus#135): the Fates run `daedalus` in `--rm` containers, so this
+    line is the only record of what a run cost once the container is gone.
+
+    Tokens lead because they are what's actually measured; `total_cost_usd` is the
+    SDK's list-price estimate, and on a subscription (CLAUDE_CODE_OAUTH_TOKEN)
+    nothing was billed per token, so it's labelled an estimate rather than a cost.
+
+    Returns None when there's nothing worth reporting (no token counts, no turns,
+    no cost) rather than printing zeros that were never measured.
+    """
+    models = ", ".join(event.get("models") or []) or "(model unknown)"
+    parts = []
+    if "input_tokens" in event:
+        parts.append(
+            f"{event['input_tokens']:,} tokens in "
+            f"({event['cache_read_input_tokens']:,} cache read, "
+            f"{event['cache_creation_input_tokens']:,} cache write), "
+            f"{event['output_tokens']:,} out"
+        )
+    if event.get("turns") is not None:
+        parts.append(f"{event['turns']} turns")
+    if event.get("total_cost_usd") is not None:
+        parts.append(f"~${event['total_cost_usd']:.2f} at list price")
+    if not parts:
+        return None
+    return f"[usage] {event['engine']} {models}: " + ", ".join(parts)
+
+
+def _print_usage(event: dict) -> None:
+    """Unconditional counterpart to `_print_event`: wired into `daedalus run`
+    regardless of -v, on stderr, so a launcher that only captures stderr still sees
+    it (daedalus#135)."""
+    if event["type"] != "engine_finished":
+        return
+    line = _usage_line(event)
+    if line:
+        click.echo(line, err=True)
+
+
 @main.command()
 @click.argument("bundle_path")
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
@@ -151,7 +193,13 @@ def run(
     """Serve the bundle's declared transports, or one-shot with -m."""
     if recall is not None and message is None:
         raise click.UsageError("--recall applies to a one-shot run; pass -m too.")
-    agent = _load(bundle_path, on_event=_print_event if verbose else None, engine=engine)
+
+    def on_event(event: dict) -> None:
+        if verbose:
+            _print_event(event)
+        _print_usage(event)  # always, even without -v: see _print_usage
+
+    agent = _load(bundle_path, on_event=on_event, engine=engine)
     if message is not None:
 
         async def one_shot():
