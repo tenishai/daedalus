@@ -154,3 +154,68 @@ def test_run_recall_without_message_is_refused(tmp_path):
     result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), "--recall", "x"])
     assert result.exit_code == 2
     assert "pass -m too" in result.output
+
+
+# -- the [usage] line (daedalus#135) ----------------------------------------------
+
+
+def test_usage_line_format_with_full_numbers():
+    from daedalus.cli import _usage_line
+
+    line = _usage_line({
+        "type": "engine_finished", "engine": "claude-code", "models": ["claude-opus-5-5"],
+        "turns": 42, "input_tokens": 1_234_567, "output_tokens": 11_234,
+        "cache_read_input_tokens": 1_200_000, "cache_creation_input_tokens": 30_000,
+        "total_cost_usd": 1.234,
+    })
+    assert line == (
+        "[usage] claude-code claude-opus-5-5: 1,234,567 tokens in "
+        "(1,200,000 cache read, 30,000 cache write), 11,234 out, 42 turns, "
+        "~$1.23 at list price"
+    )
+
+
+def test_usage_line_omits_tokens_and_cost_when_absent_rather_than_print_zeros():
+    from daedalus.cli import _usage_line
+
+    line = _usage_line({
+        "type": "engine_finished", "engine": "claude-code", "models": [], "turns": 2,
+        "model_usage": {},
+    })
+    assert line == "[usage] claude-code (model unknown): 2 turns"
+    assert "0" not in line  # nothing was measured, so nothing claims to be a measured 0
+
+
+def test_usage_line_is_none_when_theres_nothing_to_report():
+    from daedalus.cli import _usage_line
+
+    assert _usage_line({"type": "engine_finished", "engine": "claude-code", "models": [],
+                        "turns": None}) is None
+
+
+def test_run_prints_the_usage_line_without_dash_v(tmp_path, monkeypatch):
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    real_handle = Agent.handle_task
+
+    async def handle_with_usage_event(self, task):
+        self.on_event({
+            "type": "engine_finished", "engine": "claude-code", "models": ["claude-opus-5-5"],
+            "turns": 3, "input_tokens": 100, "output_tokens": 20,
+            "cache_read_input_tokens": 5, "cache_creation_input_tokens": 0,
+            "total_cost_usd": 0.01,
+        })
+        return await real_handle(self, task)
+
+    real_load = Agent.load.__func__
+
+    def load_with_fake_llm(cls, path, **overrides):
+        overrides.setdefault("llm", ScriptedLLM("ok"))
+        return real_load(cls, path, **overrides)
+
+    monkeypatch.setattr(Agent, "load", classmethod(load_with_fake_llm))
+    monkeypatch.setattr(Agent, "handle_task", handle_with_usage_event)
+    result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), "-m", "hi"])
+    assert result.exit_code == 0, result.output
+    assert "[usage] claude-code claude-opus-5-5:" in result.stderr
+    assert "100 tokens in (5 cache read, 0 cache write), 20 out, 3 turns" in result.stderr
+    assert "~$0.01 at list price" in result.stderr
