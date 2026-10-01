@@ -164,14 +164,29 @@ def test_usage_line_format_with_full_numbers():
 
     line = _usage_line({
         "type": "engine_finished", "engine": "claude-code", "models": ["claude-opus-5-5"],
-        "turns": 42, "input_tokens": 1_234_567, "output_tokens": 11_234,
+        "turns": 42, "input_tokens": 4_567, "output_tokens": 11_234,
         "cache_read_input_tokens": 1_200_000, "cache_creation_input_tokens": 30_000,
         "total_cost_usd": 1.234,
     })
     assert line == (
         "[usage] claude-code claude-opus-5-5: 1,234,567 tokens in "
-        "(1,200,000 cache read, 30,000 cache write), 11,234 out, 42 turns, "
+        "(1,200,000 cache read, 30,000 cache write, 4,567 uncached), 11,234 out, 42 turns, "
         "~$1.23 at list price"
+    )
+
+
+def test_usage_line_total_counts_cache_reads_and_writes():
+    # input_tokens is only the uncached tail; a cached review's real input is the sum.
+    from daedalus.cli import _usage_line
+
+    line = _usage_line({
+        "type": "engine_finished", "engine": "claude-code", "models": ["claude-opus-5-5"],
+        "turns": 1, "input_tokens": 50, "output_tokens": 7,
+        "cache_read_input_tokens": 100_000, "cache_creation_input_tokens": 0,
+    })
+    assert line == (
+        "[usage] claude-code claude-opus-5-5: 100,050 tokens in "
+        "(100,000 cache read, 0 cache write, 50 uncached), 7 out, 1 turn"
     )
 
 
@@ -217,5 +232,6 @@ def test_run_prints_the_usage_line_without_dash_v(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), "-m", "hi"])
     assert result.exit_code == 0, result.output
     assert "[usage] claude-code claude-opus-5-5:" in result.stderr
-    assert "100 tokens in (5 cache read, 0 cache write), 20 out, 3 turns" in result.stderr
+    expected = "105 tokens in (5 cache read, 0 cache write, 100 uncached), 20 out, 3 turns"
+    assert expected in result.stderr
     assert "~$0.01 at list price" in result.stderr

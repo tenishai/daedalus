@@ -151,14 +151,21 @@ def _usage_line(event: dict) -> str | None:
     models = ", ".join(event.get("models") or []) or "(model unknown)"
     parts = []
     if "input_tokens" in event:
+        # Anthropic's input_tokens counts only what follows the last cache breakpoint;
+        # the input a run actually sent is all three counters together (prompt-caching
+        # docs: total = cache_read + cache_creation + input_tokens). A cached Opus
+        # review is mostly cache reads, so leading with input_tokens alone understated
+        # it by two orders of magnitude.
+        read, write = event["cache_read_input_tokens"], event["cache_creation_input_tokens"]
+        uncached = event["input_tokens"]
         parts.append(
-            f"{event['input_tokens']:,} tokens in "
-            f"({event['cache_read_input_tokens']:,} cache read, "
-            f"{event['cache_creation_input_tokens']:,} cache write), "
+            f"{read + write + uncached:,} tokens in "
+            f"({read:,} cache read, {write:,} cache write, {uncached:,} uncached), "
             f"{event['output_tokens']:,} out"
         )
     if event.get("turns") is not None:
-        parts.append(f"{event['turns']} turns")
+        turns = event["turns"]
+        parts.append(f"{turns} turn" if turns == 1 else f"{turns} turns")
     if event.get("total_cost_usd") is not None:
         parts.append(f"~${event['total_cost_usd']:.2f} at list price")
     if not parts:
