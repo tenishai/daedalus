@@ -289,7 +289,7 @@ class ClaudeCodeSpec(_WarnExtra):
     # (the SDK's own lookup). Set a path or name only to run a different binary.
     binary: str | None = None
     # A full model id. None = whatever the Claude Code config dir pins in its
-    # settings.json. Never an alias (agents-archive#142).
+    # settings.json. Never an alias, which can start resolving to a different model.
     model: str | None = None
     # Claude Code built-ins this agent may use (e.g. Read, Grep, Bash). Default none: the
     # agent's tools come from the bundle. A built-in call that needs permission goes

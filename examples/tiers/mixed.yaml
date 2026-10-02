@@ -1,12 +1,12 @@
-# Claude for the tiers that need judgment, a LAN model for the fast one. This is the
-# shape of the tenish deployment on mash1.
+# Claude for the tiers that need judgment, a model on a local OpenAI-compatible server for
+# the fast one. Change api_base to wherever that server runs.
 tiers:
   best:     {engine: claude-code, id: claude-opus-5-5}
   balanced: {engine: claude-code, id: claude-sonnet-5-5}
   fast:
     engine: litellm
-    id: openai/mtplx-qwen35-9b-optimized-speed
-    api_base: http://192.168.10.202:8000/v1
-    api_key_env: MTPLX_API_KEY
-    context_tokens: 45000                 # measured ceiling ~55-60k on a 24 GB Mac
+    id: openai/local-model
+    api_base: http://localhost:8000/v1
+    api_key_env: LOCAL_API_KEY
+    context_tokens: 45000                 # this model on this hardware; measure yours
     max_repeats: 3

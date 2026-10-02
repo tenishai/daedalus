@@ -10,7 +10,7 @@ Daedalus is an open-source agent construction kit: the assembly layer of the
 tenish family. It defines a declarative **agent bundle** (a directory that *is*
 an agent), a small runtime that instantiates bundles, pluggable transports so
 one bundle runs in Slack, over A2A, or headless in CI, and a three-tier
-approval model. A companion GUI (**kaminos**, Greek for furnace) edits bundles
+approval model. A companion visual builder (a separate project, not yet released) edits bundles
 the way NeXTSTEP Interface Builder edited nibs: live objects, no codegen.
 
 ## Lineage and clean-room policy
@@ -18,7 +18,7 @@ the way NeXTSTEP Interface Builder edited nibs: live objects, no codegen.
 Daedalus is a clean-room design. It is informed by lessons from an internal
 proprietary SDK (client_agent: Slack transport ergonomics, human-in-the-loop
 approval bridging, "agent in 50 lines" DX) and by the open tenish repos
-(techne, liminal, cabal, ladon, gojira, agents), but **no code is carried over
+(techne, liminal, cabal, ladon), but **no code is carried over
 from proprietary sources**. Where a tenish repo already solves a problem,
 daedalus integrates rather than reimplements.
 
@@ -30,7 +30,7 @@ daedalus integrates rather than reimplements.
 | Tool gateway, credential scoping | liminal | `ToolProvider` Protocol; liminal via extra, direct MCP otherwise |
 | Multi-agent orchestration, A2A broker | cabal | daedalus agents are cabal-compatible handlers; A2A transport speaks to it |
 | Secrets platform | ladon | daedalus reads env/file; ladon patterns for hygiene |
-| Deploy | gojira | a daedalus bundle is a deployable app |
+| Deploy | a deployment platform | a daedalus bundle is a deployable app |
 
 Daedalus owns: the bundle format, the runtime that loads it, transports,
 approvals, and the CLI/GUI developer experience.
@@ -158,7 +158,8 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
   refuses naming the tier and `DAEDALUS_TIERS`; with a tiers file that doesn't offer the
   tier, load refuses naming the tier and the tiers the file does offer.
 - **The resolved model is always on the record**, because a tier floats the way the
-  `opus` alias did (agents-archive#142): logged at load, emitted as the `model_resolved`
+  `opus` alias did (an alias can start resolving to a different model with no edit on
+  your side): logged at load, emitted as the `model_resolved`
   event (shown by `run -v`, replayed on `/events`), and served on the a2a agent card
   as `daedalus_model`.
 - `model.tier` and `model.min_tier` (PR 127) are removed: a bundle that still sets
@@ -246,7 +247,7 @@ provider degrades all loops together rather than thundering.
 
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
-DeepSeek R1 on vLLM). They will feed the kaminos trace pane over SSE.
+DeepSeek R1 on vLLM). They will feed the visual builder's trace pane over SSE.
 
 ### 2.4 Transports
 
@@ -316,19 +317,19 @@ it upgrades a still-default (DenyAll) approver to reaction approvals — so a
 gated call arriving via a2a or cli also posts its plan to Slack.
 *Approvals flow to where the humans are.* An explicitly wired approver is
 always respected; headless agents with no human-bearing transport keep
-DenyAll and fail closed. (Decided 2026-07-06 after the kaminos canvas
+DenyAll and fail closed. (Decided 2026-07-06 after the visual builder's canvas
 surfaced the interplay; documented rather than "fixed" — it is the correct
 behavior, arrived at by accident.)
 
 Secrets hygiene primitives (mask, placeholder-refusal) ship in core and are
 applied to anything approval-bound or logged.
 
-## 4. kaminos — the builder GUI (companion repo)
+## 4. The visual builder (companion project)
 
 Interface Builder for agents. Svelte 5 frontend, FastAPI backend, separate
-repo, talks to daedalus over a local API.
+project, talks to daedalus over a local API.
 
-| NeXTSTEP concept | kaminos |
+| NeXTSTEP concept | Visual builder |
 |---|---|
 | Palette | personas, models, transports, tool handlers, memory stores, approval policies, sibling agents |
 | Canvas + outlets/actions | the agent's object graph; drag connections (memory → store, escalation → channel, tool → allowlist) |
@@ -354,13 +355,13 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 
 | Phase | Deliverable |
 |---|---|
-| 0 | this doc reviewed; repos created (tenishai/daedalus, tenishai/kaminos) |
+| 0 | this doc reviewed; repo created (tenishai/daedalus) |
 | 1 (v0.1) | bundle spec + loader, core runtime, LiteLLM loop, cli transport, `daedalus create/run/chat`, fakes + goldens |
 | 2a (v0.2) | tool loop, direct MCP `ToolProvider`, approvals tiers 1–2 |
 | 2b (v0.2) | techne extra, checkpoints + budget |
 | 3 (v0.3) | a2a transport + card serving, slack transport + tier-3 escalation, liminal extra |
-| 4 (v0.4) | kaminos: bundle editor (palette/canvas/inspector) + test mode over SSE |
-| 5 (v0.5) | kaminos live wiring against a running cabal |
+| 4 (v0.4) | visual builder: bundle editor (palette/canvas/inspector) + test mode over SSE |
+| 5 (v0.5) | visual builder live wiring against a running cabal |
 
 ## 7. Open questions — resolved 2026-07-02
 
@@ -372,7 +373,7 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
   (the `teammem` relocation) rather than daedalus guessing it.
 - **Card signing: deferred to v0.3**, when the a2a transport lands. Identity
   without dispatch doesn't need signatures; adopt cabal's JWS approach then.
-- **kaminos test mode: spawn-and-attach.** The GUI spawns `daedalus run` and
+- **Visual-builder test mode: spawn-and-attach.** The GUI spawns `daedalus run` and
   attaches to its SSE stream — what you test is exactly what ships.
 
 ## 8. The cabal wire contract — discovered 2026-07-06 (v0.5 scoping)
@@ -401,7 +402,7 @@ round" resolved differently than assumed:
 - **The bundle shape is published.** `docs/bundle.schema.json` is the
   canonical agent.yaml contract for non-Python consumers (cabal's bundle
   reader, editors), emitted from `AgentSpec` via `daedalus schema` and
-  drift-pinned by tests — the runtime controls the shape. kaminos keeps
+  drift-pinned by tests — the runtime controls the shape. the visual builder keeps
   validating through `AgentSpec` directly; per-transport extras (port,
   channel, auth) stay open, and unknown top-level fields load with a
   warning, never silently.

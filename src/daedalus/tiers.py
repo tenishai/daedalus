@@ -10,9 +10,9 @@ DAEDALUS_TIERS, mapping tiers to models once per deployment:
       balanced: {engine: claude-code, id: claude-sonnet-5-5}
       fast:
         engine: litellm
-        id: openai/mtplx-qwen35-9b-optimized-speed
-        api_base: http://192.168.10.202:8000/v1
-        api_key_env: MTPLX_API_KEY
+        id: openai/local-model
+        api_base: http://localhost:8000/v1
+        api_key_env: LOCAL_API_KEY
         context_tokens: 45000      # this model on this hardware
         max_repeats: 3
       # a tier can alias another (balanced: best), or be null: not offered here
@@ -23,8 +23,8 @@ Resolution rules (`daedalus.agent._resolve_model`):
   refuses to load.
 - Limits that belong to a model (context_tokens, max_repeats, max_tokens) come from
   the tier entry only where the bundle hasn't set them.
-- The resolved model is always recorded, because a tier floats the way an alias does
-  (agents-archive#142): which tier, which engine, which id.
+- The resolved model is always recorded, because a tier floats the way an alias does:
+  which tier, which engine, which id.
 """
 
 from __future__ import annotations

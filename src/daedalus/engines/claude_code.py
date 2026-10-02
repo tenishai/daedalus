@@ -222,7 +222,7 @@ class ClaudeCodeEngine:
             return task.reply("The Claude Code engine ended without a result.",
                               state=TaskState.FAILED, reason=ReasonCode.ESCALATION)
         # Which models actually ran: a pin or a tier can resolve differently than meant
-        # (agents-archive#142, daedalus#103), so the trace records what happened.
+        # (daedalus#103), so the trace records what happened.
         #
         # Usage and cost (daedalus#135): the Fates run in --rm containers, so the trace
         # is the only record of what a run cost once the container is gone. The SDK's

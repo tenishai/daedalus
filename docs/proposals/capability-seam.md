@@ -77,7 +77,7 @@ tools:
 
 - Empty `allow` **stays** deny-everything. Openness is never a default
   or an absence — `allow: ["*"]` is written in the bundle, reviewable
-  in the PR, visible in kaminos.
+  in the PR, visible in the visual builder.
 - `deny` uses the same fnmatch, wins over allow, enforced at both
   listing and call time like the ceiling.
 - Small, additive; changes `AgentSpec` → regenerate
@@ -152,9 +152,9 @@ bundle ceiling remains the agent-side belt to the gateway's
 suspenders — two independent fail-closed layers, either alone
 sufficient to stop a surprise.
 
-### E. The kaminos capability palette (kaminos, next arc after v0.5)
+### E. The visual builder's capability palette (next arc after v0.5)
 
-Liminal's card set IS the palette. Kaminos queries the gateway, shows
+Liminal's card set IS the palette. The builder queries the gateway, shows
 every capability with its card (description, credentials, mutating
 flag), overlays the current bundle's effective ceiling
 (allow ∩ ¬deny), and lets the operator toggle — writing `allow`/`deny`
@@ -184,10 +184,10 @@ inspect what you got.
 | 3 | Card `mutating` field name/shape in liminal (C) | the operator |
 | 4 | Auto-gate default for metadata-less tools (C, open q) | the daedalus maintainer + fleet experience |
 | 5 | Fleet read-scope grant convention in liminal deploys (D) | the operator + the fleet SRE team |
-| 6 | Palette as the kaminos arc after v0.5 (E) | the daedalus maintainer |
+| 6 | Palette as the visual builder's arc after v0.5 (E) | the daedalus maintainer |
 
 A + B are small, self-contained daedalus PRs and unblock the pending
 fleet agent's bundle immediately. C needs the operator. D is deployment
-config, not code. E waits for kaminos PR #3 (v0.5) to merge.
+config, not code. E waits for the visual builder's v0.5 release.
 
 — an SRE agent
