@@ -383,14 +383,18 @@ class Agent:
         if spec.cloudtrail.role_arn and spec.cloudtrail.event_data_store:
             from daedalus.tools.cloudtrail import CloudTrailToolProvider
 
-            providers.append(
-                CloudTrailToolProvider(
-                    spec.cloudtrail.role_arn,
-                    spec.cloudtrail.event_data_store,
-                    region=spec.cloudtrail.region,
-                    group_prefix=spec.cloudtrail.group_prefix,
+            try:
+                providers.append(
+                    CloudTrailToolProvider(
+                        spec.cloudtrail.role_arn,
+                        spec.cloudtrail.event_data_store,
+                        region=spec.cloudtrail.region,
+                        group_prefix=spec.cloudtrail.group_prefix,
+                        agent_name=self.bundle.spec.name,
+                    )
                 )
-            )
+            except ValueError as exc:
+                raise BundleError(str(exc)) from exc
 
         # The slack-read sidecar (2026-09-04): same stacking rule. Reach is
         # the bundle's channel allowlist; auth is the pod's own bot token.
