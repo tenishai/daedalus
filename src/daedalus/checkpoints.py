@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -22,8 +24,19 @@ class SqliteCheckpoints:
                 "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """A connection that commits on success, rolls back on error, and is
+        CLOSED either way. `with sqlite3.connect(...)` alone only ends the
+        transaction; it leaves the connection open until garbage collection, and
+        the ResourceWarning that raises then lands in whichever test happens to
+        be running (#95)."""
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     async def save(self, task_id: str, state: dict) -> None:
         payload = json.dumps(state, default=str)

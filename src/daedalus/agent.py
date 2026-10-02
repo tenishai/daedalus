@@ -383,14 +383,18 @@ class Agent:
         if spec.cloudtrail.role_arn and spec.cloudtrail.event_data_store:
             from daedalus.tools.cloudtrail import CloudTrailToolProvider
 
-            providers.append(
-                CloudTrailToolProvider(
-                    spec.cloudtrail.role_arn,
-                    spec.cloudtrail.event_data_store,
-                    region=spec.cloudtrail.region,
-                    group_prefix=spec.cloudtrail.group_prefix,
+            try:
+                providers.append(
+                    CloudTrailToolProvider(
+                        spec.cloudtrail.role_arn,
+                        spec.cloudtrail.event_data_store,
+                        region=spec.cloudtrail.region,
+                        group_prefix=spec.cloudtrail.group_prefix,
+                        agent_name=self.bundle.spec.name,
+                    )
                 )
-            )
+            except ValueError as exc:
+                raise BundleError(str(exc)) from exc
 
         # The slack-read sidecar (2026-09-04): same stacking rule. Reach is
         # the bundle's channel allowlist; auth is the pod's own bot token.
@@ -687,12 +691,22 @@ class Agent:
         which task_to_a2a carries verbatim for the room to parse."""
         from daedalus.memory import journal, learnings
 
-        if not teach_authorized(task):
-            self._emit("learnings_refused", sub=task.metadata.get(VERIFIED_SUB_KEY))
+        # Same gate as the other lanes, so `learnings_allowed` exists beside
+        # `learnings_refused` (#86). Unlike teach/knowledge/tool this lane calls
+        # the model over untrusted text, so it sits UNDER the law layer: locked
+        # enforcement refuses it, and the reply goes through post_draft below.
+        if not self._operator_gate(task, "learnings"):
             return task.reply(
                 "Only the room may ask me to summarize my day.",
                 state=TaskState.FAILED,
                 reason=ReasonCode.POLICY_VIOLATION,
+            )
+        if self.enforcement.locked:
+            name, _ = self.enforcement.load_error
+            return task.reply(
+                f"My orchestrator file {name} failed to load. Fix or remove it in the room.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
             )
         empty = json.dumps({"candidates": []})
         db_path = getattr(self.memory, "db_path", None)
@@ -740,8 +754,20 @@ class Agent:
         candidates = learnings.parse_candidates(
             response.text or "", turns=learnings.turns_by_speaker(messages[-1]["content"])
         )
+        reply = json.dumps({"candidates": candidates})
+        # The model-produced reply passes post_draft like a chat reply (#86). A
+        # block returns the chat path's failure shape and nothing is kept in
+        # history; a hook's rewrite replaces the text (the room re-validates it).
+        post = await self.enforcement.run_post_draft(reply)
+        if post.blocked:
+            self._emit("learnings_blocked", detail=post.detail)
+            return task.reply(
+                f"A rule stopped this reply: {post.detail}.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.TOOL_BLOCKED,
+            )
         self._emit("learnings_proposed", count=len(candidates))
-        return task.reply(json.dumps({"candidates": candidates}))
+        return task.reply(post.text)
 
     async def _handle_knowledge(self, task: Task) -> Task:
         """The operator knowledge lane: a knowledge FILE's edit or delete,

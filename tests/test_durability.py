@@ -195,3 +195,24 @@ async def test_techne_store_defaults_to_vectors_on(tmp_path):
 
     store = TechneMemoryStore(db_path=tmp_path / "techne.db")
     assert store.use_vectors is True
+
+
+async def test_checkpoint_store_closes_its_sqlite_connections(tmp_path):
+    """#95: `with sqlite3.connect()` leaves the connection open, and the
+    ResourceWarning that GC raised later landed in an unrelated test
+    (test_bundle's no-warnings assertion). Every operation must close its own."""
+    import gc
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        store = SqliteCheckpoints(tmp_path / "cp.db")
+        await store.save("t1", {"n": 1})
+        assert await store.load("t1") == {"n": 1}
+        await store.drop("t1")
+        assert await store.load("t1") is None
+        del store
+        gc.collect()
+
+    leaks = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert not leaks, [str(w.message) for w in leaks]

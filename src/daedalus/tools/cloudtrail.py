@@ -76,6 +76,39 @@ _ACCOUNT_WIDE_EVENTS = frozenset(
 _RESTORE_EVENTS = frozenset(("user.lifecycle.activate", "user.lifecycle.unsuspend"))
 
 
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_EDS_ID = re.compile(rf"^{_UUID}$")
+_EDS_ARN = re.compile(
+    rf"^arn:aws[a-z-]*:cloudtrail:[a-z0-9-]+:\d{{12}}:eventdatastore/(?P<id>{_UUID})$"
+)
+_SESSION_NAME_BAD = re.compile(r"[^\w+=,.@-]")
+_SESSION_NAME_MAX = 64  # AWS RoleSessionName limit
+
+
+def _eds_id(event_data_store: str) -> str:
+    """The event data store ID, from either an ID or an ARN, or ValueError.
+
+    CloudTrail Lake takes no bind parameters for `FROM`, so the value is
+    interpolated into the SQL and must be proven to be an identifier first
+    (#88). The query takes the ID, which is the last segment of the ARN."""
+    if _EDS_ID.match(event_data_store):
+        return event_data_store
+    match = _EDS_ARN.match(event_data_store)
+    if match:
+        return match.group("id")
+    raise ValueError(
+        f"cloudtrail event_data_store {event_data_store!r} is neither an event data "
+        "store ID (a UUID) nor an eventdatastore ARN"
+    )
+
+
+def _session_name(agent_name: str) -> str:
+    """`daedalus-<agent>`, sanitised to AWS's RoleSessionName alphabet and
+    length, so AWS-side audit can tell agents apart (#88)."""
+    name = _SESSION_NAME_BAD.sub("-", f"daedalus-{agent_name}" if agent_name else "daedalus")
+    return name[:_SESSION_NAME_MAX]
+
+
 def _metadata_token() -> str | None:
     """An identity token from the GCP metadata server, or None when not
     running on GCP compute (the metadata host does not resolve)."""
@@ -100,9 +133,14 @@ class CloudTrailToolProvider:
         group_prefix: str = "engineering_",
         token_fetch=None,
         boto3_module=None,
+        agent_name: str = "",
     ):
         self.role_arn = role_arn
         self.event_data_store = event_data_store
+        # Raises ValueError on anything that is not an ID or ARN, before it can
+        # reach a query string. `_query_eds` is what FROM interpolates.
+        self._query_eds = _eds_id(event_data_store)
+        self.session_name = _session_name(agent_name)
         self.region = region
         self.group_prefix = group_prefix
         self._token_fetch = token_fetch or _metadata_token
@@ -342,7 +380,7 @@ class CloudTrailToolProvider:
         sts = boto3.client("sts", region_name=self.region)
         response = sts.assume_role_with_web_identity(
             RoleArn=self.role_arn,
-            RoleSessionName="daedalus-cloudtrail",
+            RoleSessionName=self.session_name,
             WebIdentityToken=token,
         )
         self._creds = response["Credentials"]
@@ -373,7 +411,7 @@ SELECT
         '$.alternateId'
     ) AS actor,
     element_at(eventData.additionaleventdata, 'eventType') AS eventType
-FROM {self.event_data_store}
+FROM {self._query_eds}
 CROSS JOIN UNNEST(
     CAST(json_parse(element_at(eventData.additionaleventdata, 'target')) AS array(json))
 ) AS target_user(value)
@@ -415,7 +453,7 @@ SELECT
         '$.alternateId'
     ) AS actor,
     element_at(eventData.additionaleventdata, 'eventType') AS eventType
-FROM {self.event_data_store}
+FROM {self._query_eds}
 CROSS JOIN UNNEST(
     CAST(json_parse(element_at(eventData.additionaleventdata, 'target')) AS array(json))
 ) AS target_user(value)

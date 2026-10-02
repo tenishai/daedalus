@@ -5,7 +5,7 @@ import json
 from daedalus.memory.journal import journal_path, record
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import SYSTEM_TASK_KEY
-from daedalus.task import VERIFIED_SUB_KEY, Task, TaskState
+from daedalus.task import VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 from tests.fakes import ScriptedLLM
 from tests.test_agent import make_agent
 from tests.test_agent_journal import FakeMemory
@@ -219,3 +219,81 @@ async def test_attribution_binds_only_to_the_transcript_the_model_saw(tmp_path):
     assert "old words" not in llm.calls[0][1]["content"]
     said_by = [c["said_by"] for c in json.loads(result.agent_text())["candidates"]]
     assert said_by == ["", "<@U0NEW>"]
+
+
+# ---- the law layer (#86) -----------------------------------------------------
+
+
+def _journal_with_one_turn(db):
+    record(
+        journal_path(db),
+        "slack:C1:171",
+        [{"role": "user", "text": "the canary gate is manual now"}],
+    )
+
+
+def _law_agent(tmp_path, tools, llm):
+    from tests.test_agent_enforcement import make_agent as make_law_agent
+
+    db = tmp_path / "techne.db"
+    _journal_with_one_turn(db)
+    return make_law_agent(tmp_path / "bundle", tools=tools, llm=llm, memory=FakeMemory(db))
+
+
+async def test_learnings_reply_passes_post_draft_like_a_chat_reply(tmp_path):
+    (tmp_path / "bundle").mkdir()
+    tools = {"z_reject.py": "def post_draft(draft):\n    raise ValueError('no candidates')\n"}
+    llm = ScriptedLLM(GOOD_REPLY)
+    agent = _law_agent(tmp_path, tools, llm)
+
+    result = await agent.handle_task(_learnings_task())
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.TOOL_BLOCKED
+    assert result.agent_text() == (
+        "A rule stopped this reply: blocked by z_reject.py: no candidates."
+    )
+    assert "canary gate" not in result.agent_text()
+    assert all("canary gate" not in m.text for m in result.history)
+
+
+async def test_learnings_post_draft_that_allows_still_returns_the_candidates(tmp_path):
+    """Control for the test above: same agent shape, a pass-through hook, so the
+    block there means "the hook ran", not "learnings is broken under enforcement"."""
+    (tmp_path / "bundle").mkdir()
+    tools = {"a_ok.py": "def post_draft(draft):\n    return draft\n"}
+    agent = _law_agent(tmp_path, tools, ScriptedLLM(GOOD_REPLY))
+
+    result = await agent.handle_task(_learnings_task())
+
+    assert result.state is TaskState.COMPLETED
+    assert len(json.loads(result.agent_text())["candidates"]) == 1
+
+
+async def test_locked_enforcement_refuses_learnings_without_a_model_call(tmp_path):
+    (tmp_path / "bundle").mkdir()
+    tools = {"broken.py": "import definitely_not_a_module\n"}
+    llm = ScriptedLLM(GOOD_REPLY)
+    agent = _law_agent(tmp_path, tools, llm)
+
+    result = await agent.handle_task(_learnings_task())
+
+    assert result.state is TaskState.FAILED
+    assert result.reason_code is ReasonCode.TOOL_BLOCKED
+    assert result.agent_text() == (
+        "My orchestrator file broken.py failed to load. Fix or remove it in the room."
+    )
+    assert llm.calls == []
+
+
+async def test_learnings_emits_allowed_and_refused_events(tmp_path):
+    events = []
+    agent = make_agent(
+        llm=ScriptedLLM(), memory=FakeMemory(tmp_path / "techne.db"), on_event=events.append
+    )
+    await agent.handle_task(_learnings_task(sub="service:room"))
+    await agent.handle_task(_learnings_task(sub=None))
+
+    kinds = [e["type"] for e in events]
+    assert "learnings_allowed" in kinds
+    assert "learnings_refused" in kinds

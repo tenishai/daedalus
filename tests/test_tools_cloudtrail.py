@@ -505,3 +505,103 @@ def test_bundle_spec_defaults_off_and_parses_on():
     )
     assert spec.tools.cloudtrail.event_data_store == EDS
     assert spec.tools.cloudtrail.group_prefix == "engineering_"
+
+
+# ---- #88: per-agent session name, validated event data store -----------------
+
+
+def _assumed_session_name(**provider_kwargs):
+    provider, fake = _provider(FakeLake(), **provider_kwargs)
+    provider._assume(fake)
+    (call,) = fake.sts.calls
+    return call["RoleSessionName"]
+
+
+def test_the_role_session_name_names_the_agent():
+    def name_for(agent):
+        provider = CloudTrailToolProvider(
+            ROLE, EDS, "us-east-2", token_fetch=lambda: "t", agent_name=agent
+        )
+        fake = FakeBoto3(FakeLake())
+        provider._assume(fake)
+        return fake.sts.calls[0]["RoleSessionName"]
+
+    assert name_for("prudence") == "daedalus-prudence"
+    assert name_for("scout") == "daedalus-scout"
+    # no name given: still a valid constant, never empty
+    assert _assumed_session_name() == "daedalus"
+
+
+def test_the_role_session_name_is_sanitised_and_capped_to_aws_rules():
+    import re
+
+    hostile = "Bad Name/with:odd*chars" + "x" * 80
+    provider = CloudTrailToolProvider(
+        ROLE, EDS, "us-east-2", token_fetch=lambda: "t", agent_name=hostile
+    )
+    fake = FakeBoto3(FakeLake())
+    provider._assume(fake)
+    name = fake.sts.calls[0]["RoleSessionName"]
+    assert re.fullmatch(r"[\w+=,.@-]{2,64}", name), name
+    assert name.startswith("daedalus-Bad-Name-with-odd-chars")
+
+
+def test_event_data_store_must_be_an_id_or_an_arn_before_it_reaches_sql():
+    import pytest
+
+    hostile = [
+        "x WHERE 1=1 --",
+        f"{EDS}; DROP TABLE t",
+        f"{EDS} UNION SELECT 1",
+        "",
+        "not-a-uuid",
+        f"'{EDS}'",
+        f"arn:aws:cloudtrail:us-east-2:123456789012:eventdatastore/{EDS} --",
+        f"arn:aws:s3:::eventdatastore/{EDS}",
+    ]
+    for value in hostile:
+        with pytest.raises(ValueError, match="event_data_store"):
+            CloudTrailToolProvider(ROLE, value, "us-east-2")
+
+
+def test_an_arn_is_accepted_and_the_query_uses_its_id():
+    arn = f"arn:aws:cloudtrail:us-east-2:123456789012:eventdatastore/{EDS}"
+    provider = CloudTrailToolProvider(ROLE, arn, "us-east-2")
+    assert f"FROM {EDS}\n" in provider._build_query("a@b.co", 30)
+    assert f"FROM {EDS}\n" in provider._build_lifecycle_query("a@b.co", 30)
+    assert "arn:" not in provider._build_query("a@b.co", 30)
+
+
+def test_a_bad_event_data_store_fails_the_bundle_at_wiring(tmp_path):
+    import pytest
+
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle, BundleError
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  provider: none\n  allow: []\n"
+        f"  cloudtrail:\n    role_arn: {ROLE}\n    event_data_store: \"x; DROP\"\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    with pytest.raises(BundleError, match="event_data_store"):
+        Agent(Bundle.load(tmp_path), llm=ScriptedLLM("hi"))
+
+
+def test_the_agent_name_reaches_the_session_name(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: prudence\nmodel:\n  id: m\ntools:\n  provider: none\n  allow: []\n"
+        f"  cloudtrail:\n    role_arn: {ROLE}\n    event_data_store: {EDS}\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("hi"))
+    provider = agent.tools
+    found = [p for p in getattr(provider, "providers", [provider])
+             if isinstance(p, CloudTrailToolProvider)]
+    assert found and found[0].session_name == "daedalus-prudence"

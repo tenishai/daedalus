@@ -679,6 +679,10 @@ class SlackTransport:
             # they are full-delivery by design (the tagged-only ruling was
             # about channels), and Slack only delivers them to apps the
             # user deliberately opened a conversation with.
+            # (Documented in docs/design.md 2.4, #87: with DMs enabled on the
+            # Slack app, anyone who can DM it bypasses the channel allowlist and
+            # only the tool ceiling limits them. The shipped manifest does not
+            # subscribe to DM events, so this is opt-in.)
             #
             # No allowlist at all skips this gate entirely: the event only
             # reached us because the app is a member of that channel, and

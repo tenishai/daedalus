@@ -474,21 +474,10 @@
           "title": "Home"
         },
         "team": {
-          "anyOf": [
-            {
-              "enum": [
-                "none",
-                "outbox"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "string",
-              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
-            }
-          ],
+          "const": "none",
+          "default": "none",
           "title": "Team",
-          "default": "none"
+          "type": "string"
         },
         "revision": {
           "anyOf": [

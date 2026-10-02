@@ -30,6 +30,7 @@ points at another issuer.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -123,14 +124,12 @@ class JwtVerifier:
     covering both.
 
     The refetch an unknown kid triggers is reachable by an unauthenticated
-    caller, so it is rate-limited ON A WARM VERIFIER. The cold leg --
-    `_key_set is None`, before any fetch has succeeded -- is bounded by
-    nothing: the stamp does not clear it, so it stays true for the whole of an
-    in-flight fetch and every concurrent arrival enters and fetches. Measured
-    on a cold process: 20 concurrent verifies produce 20 GETs, against 1 once
-    warm. Pre-existing rather than introduced here, and #55 carries it; stated
-    rather than left for a reader to discover, because the sentence this
-    replaces claimed the whole class."""
+    caller, so it is rate-limited. The cold leg -- `_key_set is None`, before
+    any fetch has succeeded -- used to be bounded by nothing: 20 concurrent
+    verifies on a cold process produced 20 GETs. All three legs now go through
+    one single-flight lock (#55), so concurrent callers share one fetch. What
+    stays open: with the endpoint down and no cached set, each LATER request
+    (not concurrent ones) still tries one fetch."""
 
     def __init__(
         self,
@@ -181,6 +180,11 @@ class JwtVerifier:
         # refused at epoch+3.0s and accepted at epoch+30.0s. A sentinel cannot
         # be mistaken for a real reading.
         self._refreshed_at: float = float("-inf")
+        # Single-flight state (#55): the lock, a count of fetch ATTEMPTS (so a
+        # caller that waited can tell one happened), and the last cold failure.
+        self._fetch_lock = asyncio.Lock()
+        self._fetch_count = 0
+        self._cold_failure = "could not load JWKS"
 
     async def _http_fetch(self) -> dict:
         import httpx
@@ -209,69 +213,92 @@ class JwtVerifier:
 
     async def _keys(self, *, refresh: bool = False) -> KeySet:
         if self._key_set is None or refresh or self._age >= KEYS_TTL_SECONDS:
-            # STAMP THE ATTEMPT, NOT THE SUCCESS, AND SERVE STALE ON FAILURE
-            # (#50 r1 Critical). Stamping after the await left `_fetched_at`
-            # unadvanced whenever a fetch raised, so `_age` stayed above the
-            # TTL FOREVER and every request re-entered the fetch. Two things
-            # fell out, and neither was fail-closed by design -- `_key_set` is
-            # still populated and still correct when it happens:
-            #   * the 1:1 unauthenticated amplification this module exists to
-            #     close came back, aimed at a JWKS endpoint already degraded
-            #     (measured, endpoint down: 20 requests -> 20 GETs);
-            #   * a JWKS blip, previously survivable indefinitely from cache,
-            #     became 100% auth failure one TTL in.
-            # The cooldown cannot bound either, because `_keys()` raises
-            # before `verify` ever reaches the `_since_refresh` check.
+            # SINGLE-FLIGHT (#55): one fetch at a time, and a caller that queued
+            # behind it takes what that fetch produced instead of fetching again.
+            # `_key_set is None` is true for the whole of an in-flight cold fetch
+            # and no stamp clears it, so before this lock 20 concurrent verifies
+            # on a fresh process made 20 GETs. The lock covers all three legs
+            # (cold, TTL, unknown-kid refresh). `seen` is read BEFORE waiting, so
+            # "a fetch happened while I waited" is `_fetch_count != seen`.
             #
-            # It also closes a thundering herd that needs no outage at all:
-            # one verifier serves the whole process on one loop, so N
-            # concurrent requests all see `_age >= TTL` before any of them
-            # stamps. Measured: 20 concurrent verifies at expiry -> 20 GETs
-            # before, 1 after. The unknown-kid path already did this right,
-            # which is what made the asymmetry visible -- `_refreshed_at` is
-            # stamped BEFORE its await and `_fetched_at` was stamped after.
-            #
-            # The cost is that a failed refresh extends the cached set's trust
-            # by another TTL -- AND RENEWS THAT EXTENSION ON EVERY ATTEMPT, so
-            # holding the endpoint down holds the extension open indefinitely,
-            # not once (#50 r2). The stamp above is outside the `try`, which is
-            # what makes the fix work and also what makes the extension renew.
-            #
-            # That is the standard serve-stale trade and the right one: a
-            # revocation you cannot fetch is undeliverable anyway. The accepted
-            # limit is that someone who can hold the JWKS endpoint unreachable
-            # can hold a revoked key alive, and the alternative hands them a
-            # total outage instead.
-            #
-            # An earlier version of this paragraph added "not invisibly", which
-            # was a property this module did not have: the except swallowed the
-            # failure with no log, no counter and no readable state, so from
-            # the agent's side auth simply kept succeeding on a stale set. That
-            # clause is the one that made the trade sound like housekeeping.
-            # It is true now because of the warning below, not because it was
-            # asserted.
-            self._fetched_at = time.monotonic()
-            try:
-                self._key_set = KeySet.import_key_set(await self._fetch())
-                self._loaded_at = self._fetched_at
-            except Exception as exc:
-                if self._key_set is None:
-                    # Cold start: there is nothing to serve stale.
-                    raise AuthError(
-                        f"could not load JWKS from {self.jwks_url}: {exc}"
-                    ) from exc
-                # CHOOSING TO KEEP SERVING A STALE SET IS EXACTLY THE DECISION
-                # THAT WANTS A RECORD. Without this the agent shows green auth
-                # throughout an outage it cannot see, and the comment above
-                # claimed a visibility the code did not provide.
-                log.warning(
-                    "JWKS refresh from %s failed (%s); still serving the cached "
-                    "key set, now %.0fs old. Revocations cannot reach this "
-                    "verifier until the endpoint recovers.",
-                    self.jwks_url,
-                    exc,
-                    time.monotonic() - self._loaded_at,
-                )
+            # The lock is held across the network await. A hung fetch therefore
+            # holds every caller, where before each failed on its own; the
+            # default fetch has a 5s client timeout, which bounds it. A custom
+            # `fetch=` callable that can hang should carry its own timeout.
+            seen = self._fetch_count
+            async with self._fetch_lock:
+                if self._fetch_count != seen:
+                    if self._key_set is None:
+                        # The fetch we queued behind failed cold: share its failure.
+                        raise AuthError(self._cold_failure)
+                    return self._key_set
+                try:
+                    # STAMP THE ATTEMPT, NOT THE SUCCESS, AND SERVE STALE ON FAILURE
+                    # (#50 r1 Critical). Stamping after the await left `_fetched_at`
+                    # unadvanced whenever a fetch raised, so `_age` stayed above the
+                    # TTL FOREVER and every request re-entered the fetch. Two things
+                    # fell out, and neither was fail-closed by design -- `_key_set` is
+                    # still populated and still correct when it happens:
+                    #   * the 1:1 unauthenticated amplification this module exists to
+                    #     close came back, aimed at a JWKS endpoint already degraded
+                    #     (measured, endpoint down: 20 requests -> 20 GETs);
+                    #   * a JWKS blip, previously survivable indefinitely from cache,
+                    #     became 100% auth failure one TTL in.
+                    # The cooldown cannot bound either, because `_keys()` raises
+                    # before `verify` ever reaches the `_since_refresh` check.
+                    #
+                    # It also closes a thundering herd that needs no outage at all:
+                    # one verifier serves the whole process on one loop, so N
+                    # concurrent requests all see `_age >= TTL` before any of them
+                    # stamps. Measured: 20 concurrent verifies at expiry -> 20 GETs
+                    # before, 1 after. The unknown-kid path already did this right,
+                    # which is what made the asymmetry visible -- `_refreshed_at` is
+                    # stamped BEFORE its await and `_fetched_at` was stamped after.
+                    #
+                    # The cost is that a failed refresh extends the cached set's trust
+                    # by another TTL -- AND RENEWS THAT EXTENSION ON EVERY ATTEMPT, so
+                    # holding the endpoint down holds the extension open indefinitely,
+                    # not once (#50 r2). The stamp above is outside the `try`, which is
+                    # what makes the fix work and also what makes the extension renew.
+                    #
+                    # That is the standard serve-stale trade and the right one: a
+                    # revocation you cannot fetch is undeliverable anyway. The accepted
+                    # limit is that someone who can hold the JWKS endpoint unreachable
+                    # can hold a revoked key alive, and the alternative hands them a
+                    # total outage instead.
+                    #
+                    # An earlier version of this paragraph added "not invisibly", which
+                    # was a property this module did not have: the except swallowed the
+                    # failure with no log, no counter and no readable state, so from
+                    # the agent's side auth simply kept succeeding on a stale set. That
+                    # clause is the one that made the trade sound like housekeeping.
+                    # It is true now because of the warning below, not because it was
+                    # asserted.
+                    self._fetched_at = time.monotonic()
+                    try:
+                        self._key_set = KeySet.import_key_set(await self._fetch())
+                        self._loaded_at = self._fetched_at
+                    except Exception as exc:
+                        if self._key_set is None:
+                            # Cold start: there is nothing to serve stale.
+                            self._cold_failure = f"could not load JWKS from {self.jwks_url}: {exc}"
+                            raise AuthError(self._cold_failure) from exc
+                        # CHOOSING TO KEEP SERVING A STALE SET IS EXACTLY THE DECISION
+                        # THAT WANTS A RECORD. Without this the agent shows green auth
+                        # throughout an outage it cannot see, and the comment above
+                        # claimed a visibility the code did not provide.
+                        log.warning(
+                            "JWKS refresh from %s failed (%s); still serving the cached "
+                            "key set, now %.0fs old. Revocations cannot reach this "
+                            "verifier until the endpoint recovers.",
+                            self.jwks_url,
+                            exc,
+                            time.monotonic() - self._loaded_at,
+                        )
+                finally:
+                    # AFTER the fetch, so a caller that arrived while it was in
+                    # flight sees the count move and shares its result.
+                    self._fetch_count += 1
         return self._key_set
 
     async def verify_header(self, authorization: str | None) -> dict:

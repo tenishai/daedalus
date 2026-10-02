@@ -422,6 +422,48 @@ async def test_a_TTL_expiry_is_not_a_thundering_herd(key):
     )
 
 
+class _SlowFetch(CountingFetch):
+    """A fetch that suspends, so concurrent callers actually interleave."""
+
+    async def __call__(self) -> dict:
+        self.calls += 1
+        await asyncio.sleep(0.01)
+        return {"keys": [k.as_dict(private=False) for k in self.keys]}
+
+
+async def test_a_COLD_herd_shares_one_fetch(key):
+    """#55: `_key_set is None` stayed true for the whole of an in-flight cold
+    fetch, so 20 concurrent verifies on a fresh process made 20 GETs. Every
+    request must still succeed, off the one fetch."""
+    fetch = _SlowFetch(key)
+    verifier = verifier_with(fetch)
+
+    results = await asyncio.gather(*(verifier.verify(mint(key)) for _ in range(20)))
+
+    assert len(results) == 20
+    assert fetch.calls == 1, f"{fetch.calls} concurrent cold fetches"
+
+
+async def test_a_COLD_herd_against_a_dead_endpoint_shares_one_failure(key):
+    """The queued callers share the winner's failure instead of each trying."""
+
+    class DeadFetch(CountingFetch):
+        async def __call__(self) -> dict:
+            self.calls += 1
+            await asyncio.sleep(0.01)
+            raise OSError("endpoint down")
+
+    fetch = DeadFetch(key)
+    verifier = verifier_with(fetch)
+
+    results = await asyncio.gather(
+        *(verifier.verify(mint(key)) for _ in range(20)), return_exceptions=True
+    )
+
+    assert all(isinstance(r, AuthError) and "could not load JWKS" in str(r) for r in results)
+    assert fetch.calls == 1
+
+
 async def test_the_cooldown_sentinel_is_not_a_real_point_on_the_clock(key, monkeypatch):
     """#50 r1 nit: `time.monotonic()`'s epoch is undefined and is uptime on
     Linux, so `_refreshed_at = 0.0` refuses the first rotation of a process
