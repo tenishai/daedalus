@@ -8,7 +8,9 @@ import asyncio
 import base64
 
 import pytest
+from pydantic import ValidationError
 
+from daedalus.bundle import Bundle
 from daedalus.tools.github import GitHubToolProvider, _slug
 
 
@@ -114,7 +116,7 @@ def test_open_pr_happy_path_stamps_branch_and_footer(monkeypatch):
 
     client = provider._client
     ref_posts = [k for m, u, k in client.sent if m == "POST" and u.endswith("/git/refs")]
-    assert ref_posts[0]["json"]["ref"].startswith("refs/heads/kobo/ward/fix-the-flaky-retry-")
+    assert ref_posts[0]["json"]["ref"].startswith("refs/heads/daedalus/ward/fix-the-flaky-retry-")
     put_calls = [k for m, u, k in client.sent if m == "PUT"]
     assert base64.b64decode(put_calls[0]["json"]["content"]).decode() == "done"
     assert "sha" not in put_calls[0]["json"]  # fresh file: no blob sha sent
@@ -566,3 +568,115 @@ def test_search_prs_respects_the_repo_grant(monkeypatch):
         )
     )
     assert "not approved for acme/other" in out
+
+
+# --- configurable head-branch prefix (#140) ---
+
+
+_OPEN_ROUTES = [
+    ("POST", "/broker/", MINT_OK),
+    ("GET", "/repos/acme/tools/git/ref/", FakeResponse(200, {"object": {"sha": "base123"}})),
+    ("GET", "/repos/acme/tools/contents/", FakeResponse(404)),
+    ("GET", "/repos/acme/tools", FakeResponse(200, {"default_branch": "main"})),
+    ("POST", "/repos/acme/tools/git/refs", FakeResponse(201)),
+    ("PUT", "/repos/acme/tools/contents/", FakeResponse(201)),
+    ("POST", "/repos/acme/tools/pulls", FakeResponse(201, {"html_url": "https://github.test/pr/7"})),
+]
+
+
+def _opened_ref(provider, **args):
+    base = {
+        "repository": "acme/tools",
+        "title": "Fix the flaky retry",
+        "body": "x",
+        "files": [{"path": "f.md", "content": "d"}],
+    }
+    asyncio.run(provider.call("github.open_pr", {**base, **args}))
+    posts = [k for m, u, k in provider._client.sent if m == "POST" and u.endswith("/git/refs")]
+    return posts[0]["json"]["ref"]
+
+
+def test_default_prefix_is_daedalus(monkeypatch):
+    provider = _provider(list(_OPEN_ROUTES), monkeypatch)
+    assert provider.branch_prefix == "daedalus"
+    assert _opened_ref(provider).startswith("refs/heads/daedalus/ward/fix-the-flaky-retry-")
+
+
+def test_configured_prefix_is_used(monkeypatch):
+    monkeypatch.setenv("CABAL_COLLEAGUE_TOKEN", "agent-jwt")
+    provider = GitHubToolProvider(
+        "http://kobo.test",
+        token_env="CABAL_COLLEAGUE_TOKEN",
+        self_name="ward",
+        client=FakeClient(list(_OPEN_ROUTES)),
+        branch_prefix="kobo",
+    )
+    assert _opened_ref(provider).startswith("refs/heads/kobo/ward/fix-the-flaky-retry-")
+
+
+def test_exact_branch_name_beats_prefix(monkeypatch):
+    provider = _provider(list(_OPEN_ROUTES), monkeypatch)
+    assert _opened_ref(provider, branch="feature/x") == "refs/heads/feature/x"
+
+
+def test_tool_description_names_the_configured_prefix():
+    for prefix in ("daedalus", "acme-bots"):
+        provider = GitHubToolProvider("http://kobo.test", self_name="ward", branch_prefix=prefix)
+        tools = asyncio.run(provider.tools())
+        open_pr = next(t for t in tools if t["name"] == "github.open_pr")
+        desc = str(open_pr)
+        assert f"{prefix}/<you>/<slug>" in desc
+        assert "kobo" not in desc
+
+
+def _load_with_prefix(tmp_path, prefix):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  github:\n    broker_url: http://room\n"
+        + ("" if prefix is None else f"    branch_prefix: {prefix!r}\n")
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.\n")
+    return Bundle.load(tmp_path).spec.tools.github
+
+
+def test_bundle_branch_prefix_default_and_override(tmp_path):
+    assert _load_with_prefix(tmp_path, None).branch_prefix == "daedalus"
+    assert _load_with_prefix(tmp_path, "kobo").branch_prefix == "kobo"
+    assert _load_with_prefix(tmp_path, "team/bots").branch_prefix == "team/bots"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "has space", "a..b", "/lead", "trail/", "a//b", "a~b", "a^b", "a:b", "a?b", "a*b",
+     "a[b", "a\\b", "x.lock", "a@{b", ".hidden", "dot.",
+     "bots/.hidden", "bots.lock/x", "a/./b", "a/.lock/b"],
+)
+def test_bundle_rejects_invalid_branch_prefix(tmp_path, bad):
+    with pytest.raises(ValidationError, match="github.branch_prefix"):
+        _load_with_prefix(tmp_path, bad)
+
+
+_GOOD_PREFIXES = ["daedalus", "kobo", "team/bots", "a@b", "a{b", "v1.2"]
+
+
+@pytest.mark.parametrize("prefix", _GOOD_PREFIXES)
+def test_accepted_prefix_is_a_valid_git_branch(tmp_path, prefix):
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    assert _load_with_prefix(tmp_path, prefix).branch_prefix == prefix
+    r = subprocess.run(
+        ["git", "check-ref-format", "--branch", f"{prefix}/agent/slug"], capture_output=True
+    )
+    assert r.returncode == 0
+
+
+def test_bundle_branch_prefix_reaches_the_github_provider(tmp_path):
+    from daedalus.agent import Agent
+
+    _load_with_prefix(tmp_path, "acme")
+    provider = Agent(Bundle.load(tmp_path))._tools_from_spec()
+    assert isinstance(provider, GitHubToolProvider)
+    assert provider.branch_prefix == "acme"

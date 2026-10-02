@@ -18,13 +18,14 @@ own truncation honestly -- a silently clipped answer reads as complete,
 which is worse than no answer.
 
 Attribution is stamped, not optional: by default the head branch is named
-kobo/<agent>/<slug> and the PR body always ends with a footer naming the
+<branch_prefix>/<agent>/<slug> (prefix `daedalus` unless the bundle's
+`github.branch_prefix` says otherwise) and the PR body always ends with a footer naming the
 agent and the room. The footer is a convention the provider enforces on
 itself, not a security boundary -- the broker's audit trail is the record.
 
 Exact branch names (2026-09-04, the release-work ruling): real pipelines
 key CI on branch patterns (release/*, feature/*, test-feature/*), which the
-kobo/ prefix can never match -- so `open_pr` accepts an exact `branch`
+default prefix can never match -- so `open_pr` accepts an exact `branch`
 name, and `push_branch` pushes a branch with no PR at all (a release cut
 IS a bare branch push; the push itself is the trigger). The name prefix
 was self-attribution, never a wall: the two walls stay exactly where they
@@ -100,10 +101,12 @@ class GitHubToolProvider:
         token_env: str | None = None,
         self_name: str | None = None,
         client=None,
+        branch_prefix: str = "daedalus",
     ):
         self.broker_url = broker_url.rstrip("/")
         self.token_env = token_env
         self.self_name = self_name
+        self.branch_prefix = branch_prefix
         self._client = client  # injectable: tests pass a fake request client
 
     def _ensure_client(self):
@@ -160,7 +163,7 @@ class GitHubToolProvider:
                             "type": "string",
                             "description": (
                                 "Exact head branch name (optional). Without "
-                                "it the branch is named kobo/<you>/<slug>. "
+                                f"it the branch is named {self.branch_prefix}/<you>/<slug>. "
                                 "Use when CI keys on branch name patterns "
                                 "(e.g. feature/*)."
                             ),
@@ -502,7 +505,7 @@ class GitHubToolProvider:
                 return f"Could not read {repository}'s {default_branch} branch."
             base_sha = ref_response.json()["object"]["sha"]
 
-            branch = branch_name or f"kobo/{self.self_name}/{_slug(title)}"
+            branch = branch_name or f"{self.branch_prefix}/{self.self_name}/{_slug(title)}"
             create_ref = await self._github(
                 token,
                 "POST",
