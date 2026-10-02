@@ -121,3 +121,16 @@ def test_transport_extras_are_options_not_warnings(tmp_path):
         bundle = Bundle.load(tmp_path)
     assert bundle.spec.transports[0].options() == {"channel": "#ops"}
     assert not caught
+
+
+def test_memory_team_outbox_is_rejected_with_a_clear_message():
+    """#111: `team: outbox` validated and did nothing, because the team sync
+    outbox was never built. It must fail loudly; `none` (the default) stays fine."""
+    base = {"name": "x", "model": {"id": "m"}}
+    assert AgentSpec.model_validate({**base, "memory": {"team": "none"}}).memory.team == "none"
+    assert AgentSpec.model_validate(base).memory.team == "none"
+
+    with pytest.raises(ValueError, match="team: outbox is not implemented"):
+        AgentSpec.model_validate({**base, "memory": {"team": "outbox"}})
+    with pytest.raises(ValueError):
+        AgentSpec.model_validate({**base, "memory": {"team": "whatever"}})

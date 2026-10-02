@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -235,7 +235,10 @@ _KNOWN_REVISION_POLICIES = ("operator",)
 class MemorySpec(_WarnExtra):
     personal: Literal["none", "techne"] = "none"
     home: str | None = None  # techne home dir; default is techne's own (~/.techne)
-    team: Literal["none", "outbox"] = "none"
+    # Reserved (#111): only "none" is accepted. "outbox" used to validate and do
+    # nothing, because the team sync outbox (docs/design.md section 7) was never
+    # built; it is rejected below rather than silently ignored.
+    team: Literal["none"] = "none"
     # Post-boot belief revision (daedalus.memory.revision): a background pass
     # that lets the agent's own model judge techne's staged contradiction
     # candidates. None (absent, the default) never constructs the pass at all
@@ -244,6 +247,17 @@ class MemorySpec(_WarnExtra):
     # the only implemented policy; any other value is not a crash -- it warns
     # and disables, same as an unknown top-level field.
     revision: str | None = None
+
+    @field_validator("team", mode="before")
+    @classmethod
+    def _reject_unbuilt_team_outbox(cls, value):
+        if value == "outbox":
+            raise ValueError(
+                "memory.team: outbox is not implemented yet (the team sync outbox "
+                "was never built), so it would do nothing; remove it or set "
+                "`team: none`"
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_revision(self):

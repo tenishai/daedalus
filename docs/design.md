@@ -103,7 +103,8 @@ memory:
   personal: techne                      # techne | none  (extra: daedalus[techne])
                                         # recalls 5 entries on the prompt, or on the
                                         # task's daedalus_recall metadata (run --recall)
-  team: none                            # git-backed shared store, later
+  team: none                            # reserved: only `none` is accepted until the
+                                        # team outbox exists (see section 7)
 
 approvals:
   ceiling:                              # tier 1 — hard capability ceiling
