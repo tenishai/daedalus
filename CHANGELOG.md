@@ -1,0 +1,169 @@
+# Changelog
+
+All notable changes to daedalus are documented here. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/); the project uses semantic versioning.
+Issue and pull request numbers all refer to this repository, written in full.
+
+## [Unreleased]
+
+Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
+
+### Added
+
+- **The Claude Code engine.** `daedalus run` and `daedalus chat` take `--engine claude-code`
+  (or `DAEDALUS_ENGINE`) to run a bundle with Claude Code as the agent, on Anthropic's
+  Agent SDK. A turn now runs behind an `Engine` seam; the LiteLLM loop is the first
+  engine and Claude Code the second. The bundle's own tools, allowlist and approval gates
+  still decide every call, including Claude Code's built-ins. Engines that run their own
+  loop get a loopback MCP bridge to the bundle's tools. New `engine.claude_code` bundle
+  block (`binary`, `model`, `builtin_tools`, `permission_mode`, `on_denied`,
+  `config_dir`) and a `claude-code` extra. The runtime image ships the engine and uses the
+  SDK's bundled CLI unless a bundle names a binary
+  (tenishai/daedalus#104, tenishai/daedalus#107, tenishai/daedalus#108, tenishai/daedalus#112).
+- **Model tiers.** A bundle can set `model.id` to `fast`, `balanced` or `best`, and each
+  deployment maps those words to real models once, in a YAML file named by `DAEDALUS_TIERS`
+  (`examples/tiers/`). The same bundle then runs on Claude in one place and on a local
+  model in another. The resolved model is logged, emitted as a `model_resolved` event and
+  served on the A2A card as `daedalus_model`. The published bundle schema now accepts
+  `${VAR}` placeholders in non-string fields, which the loader already expanded, and a
+  conformance test checks real bundles against it
+  (tenishai/daedalus#127, tenishai/daedalus#132).
+- **`exec.run` builtin.** Runs a command, as an argv list and never a shell string, in the
+  agent's own workspace, on any engine. It loads only with `approvals.ceiling.exec: true`,
+  confines `cwd` to the configured roots, passes an allowlisted environment, kills the
+  process group on timeout or cancel, and caps each output stream. It has no sandbox: the
+  runtime image runs under `tini` so killed children are reaped
+  (tenishai/daedalus#121).
+- **Better file tools.** `files.read` takes `offset` and `limit`, so a bundle with a low
+  byte cap can still read large files. New `files.search` is a rooted regex or plain-text
+  content search that returns `path:line: text` ready for `files.read`
+  (tenishai/daedalus#94, tenishai/daedalus#97).
+- **Loop limits that return something.** `tools.on_exhausted: wrap_up` makes one last
+  tool-free model call when steps or context run out and marks the reply as a partial
+  answer. `tools.context_tokens` counts a run as exhausted once a prompt reaches that size.
+  `tools.max_repeats` stops a model that repeats the same tool call with the same arguments
+  (tenishai/daedalus#99, tenishai/daedalus#102).
+- **`daedalus run --recall`** sets what personal memory recalls on, instead of the whole
+  prompt, which a large payload swamps (tenishai/daedalus#123).
+- **Token usage and cost.** `engine_finished` now carries input, output and cache token
+  counts, the per-model breakdown and `total_cost_usd` when the SDK reports them, and
+  `daedalus run` prints one `[usage]` line to stderr. Total input counts cache reads and
+  writes (tenishai/daedalus#136, tenishai/daedalus#137).
+- **Conversation journal and learnings.** Completed conversations are journaled, and a
+  `learnings` system task summarizes the day into candidate statements, keeping only what a
+  person said (tenishai/daedalus#37).
+- **Images and new tool lanes** (tenishai/daedalus#37): image attachments in Slack reach the
+  model, bounded and authenticated; read-lane sidecars `slack_read` and `jira`, with
+  anchored time windows; a `cloudtrail` sidecar for provisioning history through workload
+  identity federation; `github.push_branch`, `github.search_prs` and an exact-branch override
+  on `github.open_pr`; a `liminal` sidecar; Slack markdown tables render as aligned
+  monospace blocks; and the stable prompt prefix is cached.
+- **Skills are addressable.** Skills assigned to a bundle are listed to the agent, and a
+  skill that cannot work says so. The seeder's summary breaks the count down by knowledge
+  and skills (tenishai/daedalus#63, tenishai/daedalus#62).
+- **A `techne` extra** with a source pin (`requirements-sources.txt`), since techne is not on
+  PyPI (tenishai/daedalus#65).
+- **Open-source community files.** `CONTRIBUTING.md` with the Developer Certificate of
+  Origin, `CODE_OF_CONDUCT.md`, `SUPPORT.md`, `SECURITY.md`, issue and pull request
+  templates, and this changelog (tenishai/daedalus#83, tenishai/daedalus#138).
+- **A DCO check** on every pull request, and a Dependabot config for pip and GitHub Actions
+  (tenishai/daedalus#138).
+
+### Changed
+
+- **A bare `- kind: slack` transport answers in every channel the app was invited to.** A
+  non-empty `channel` list is still an allowlist. An empty `channel` key is now a boot
+  error rather than "every channel", and `slack_read.channels: []` now turns the lane on
+  (tenishai/daedalus#77).
+- **Gated tools nobody can approve are withheld.** With no approver wired (a headless run),
+  a gated tool is no longer offered and then refused on every call; a `tools_withheld`
+  event says which, and the system prompt tells the model why
+  (tenishai/daedalus#105).
+- **`engine.claude_code.binary` defaults to unset**, so the SDK's bundled Claude Code CLI is
+  used rather than a `claude` on `PATH` (tenishai/daedalus#112).
+- **Image builds** take techne and liminal from sibling checkouts or from a package index,
+  and `make image` passes both contexts (tenishai/daedalus#128).
+- **Every third-party GitHub Action is pinned to a full commit SHA**, and the CI header
+  comment no longer names the CI host (tenishai/daedalus#138).
+- **README rewritten**, `AGENTS.md` added, the design doc marked implemented, and the
+  capability-seam proposal scrubbed of internal names (tenishai/daedalus#73,
+  tenishai/daedalus#75).
+- **CI** runs on a self-hosted pool with a fork guard, with a manual `techne` leg that fails
+  rather than skips when techne is missing, uv-managed Python so `exec` tests can start it,
+  and `docker/` collected and linted (tenishai/daedalus#76, tenishai/daedalus#92,
+  tenishai/daedalus#134, tenishai/daedalus#61). pytest imports the checkout it runs in
+  (tenishai/daedalus#74).
+
+### Fixed
+
+- **A removal the store refuses no longer stops the seeder.** One undeletable entry used to
+  crash-loop an agent at boot; the refusal is logged and retried next boot
+  (tenishai/daedalus#79).
+- **The MCP provider works with mcp 2.x**, and a string `command` plus `args` is read the way
+  most configs write it; a malformed one is refused at load, naming the server
+  (tenishai/daedalus#118).
+- **`files` builtin `max_bytes` set through `${VAR:-default}`** arrives as a string and made
+  every `files.read` fail. It is converted at load, and a bad value is a load error
+  (tenishai/daedalus#119).
+- **A `requires:` typo in a skill** (`requires: yes` parses as a boolean) no longer takes the
+  agent down at boot (tenishai/daedalus#64).
+- **Slack:** a mention aimed at another agent is not answered, tagged-only is enforced
+  runtime-side, one transport serves many channels, and replies and approvals land where the
+  event happened (tenishai/daedalus#37).
+- **Stop replies** (token budget or steps exhausted) now say what happened in plain words and
+  point at the remedies, instead of leaking the loop's internal sentinel text into a Slack
+  channel (tenishai/daedalus#37).
+
+### Security
+
+- **Learnings treat transcript text as untrusted.** Text cannot forge prompt structure, and
+  `said_by` must name the speaker whose turn holds the quote (tenishai/daedalus#37).
+- **An open Slack transport keeps tier-2 approvals closed**, and boot warns about it, until
+  the approver allowlist is wired from configuration (tenishai/daedalus#77).
+- **`exec.run` is opt-in and says what it is not.** Its environment allowlist is not a
+  boundary, since a command runs as the same user (tenishai/daedalus#121).
+- **`SECURITY.md`** describes how to report a vulnerability privately
+  (tenishai/daedalus#83).
+
+## [0.4.0] — 2026-09-14
+
+The first tag since v0.3.0, 91 commits earlier. The change that makes this release matter is
+that the delegation hop count now crosses the A2A boundary (tenishai/daedalus#40): without it,
+cabal's delegation-depth guardrail cannot fire on cross-agent traffic at all.
+
+- **Colleagues:** a directory filter and a colleague-down breaker stop offering colleagues
+  that cannot answer (tenishai/daedalus#38, tenishai/daedalus#39); agents find, ask and remember
+  what their colleagues tell them; a quorum of specialists can change a belief, and the
+  operator's word cannot be outvoted.
+- **Enforcement:** the law layer loads, composes and fails closed, and every reply passes
+  through it; a returned denial now denies, and hooks get their own pool
+  (tenishai/daedalus#52).
+- **Memory:** techne 0.16.1 with semantic recall, the teach lane, a knowledge lane, and a boot
+  seeder that converges bundle knowledge and skills into the store.
+- **Slack:** a thinking placeholder that becomes the reply, long replies chunked at safe
+  boundaries, and the approver of a tier-2 action is recorded (tenishai/daedalus#54).
+- **Tools:** the GitHub read quartet (`list_prs`, `get_pr`, `list_releases`, `read_file`)
+  and a `github.open_pr` sidecar with attribution enforcement.
+- **A2A auth:** revocation has a TTL and an unknown `kid` a cooldown
+  (tenishai/daedalus#50); the teach operator shield checks a prefix that is actually minted
+  (tenishai/daedalus#49).
+- **Runtime image:** the `daedalus-runtime` base image with a seed-then-run entrypoint.
+- **Contract:** `docs/bundle.schema.json` is the published bundle schema and embeds the version.
+- **Known, not fixed here:** the colleague breaker counts a 403 policy refusal as a transport
+  failure (tenishai/daedalus#56).
+
+## [0.3.0] — 2026-07-06
+
+- **A2A transport** with agent-card serving and JSON-RPC, plus the cabal peer surface
+  (`/a2a/tasks`, dual-key reason codes, JWT verification).
+- **Slack transport** with reaction approvals and tier-3 escalation.
+- **liminal tool gateway** as a `ToolProvider`; a down provider degrades to a task failure.
+- **Events:** an `EventBus` and an SSE `/events` stream make the trace attachable.
+
+## [0.2.0] — 2026-07-05
+
+- Bundle loader, agent runtime and CLI transport (`daedalus create`, `run`, `chat`).
+- Tool loop with an MCP provider and approval tiers 1 and 2, plus read-only builtin
+  `files` tools.
+- techne-backed memory, checkpoints and a token budget.
+- Relicensed from Apache-2.0 to AGPL-3.0-or-later.
