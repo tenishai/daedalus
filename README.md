@@ -24,7 +24,7 @@ gateway still runs.
 ## Quickstart
 
 Python 3.11+ and git. On Debian or Ubuntu, install the venv module first:
-`sudo apt install python3-venv git`.
+`sudo apt update && sudo apt install python3-venv git`.
 
 ```bash
 git clone https://github.com/tenishai/daedalus.git

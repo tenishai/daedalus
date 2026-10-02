@@ -108,6 +108,9 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Fixed
 
+- **The README quickstart runs as written on a fresh Ubuntu machine** (tenishai/daedalus#145):
+  `sudo apt update` precedes the `python3-venv` install. Found by the 2026-10-02
+  clean-machine run (tenishai/agora#47).
 - **A removal the store refuses no longer stops the seeder.** One undeletable entry used to
   crash-loop an agent at boot; the refusal is logged and retried next boot
   (tenishai/daedalus#79).
