@@ -71,6 +71,13 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Changed
 
+- **The GitHub tool's default head-branch prefix is now `daedalus/`, and it is configurable.**
+  `open_pr` used to name every branch `kobo/<agent>/<slug>`, which hardcoded another
+  product's name. The new `tools.github.branch_prefix` bundle setting (default `daedalus`)
+  gives `<prefix>/<agent>/<slug>`, the tool description the model sees names the configured
+  prefix, and a value that is not a valid git ref component fails at bundle load. Bundles
+  that relied on the old `kobo/` prefix should set `branch_prefix: kobo`. An exact `branch`
+  argument still wins. Closes #140.
 - **A bare `- kind: slack` transport answers in every channel the app was invited to.** A
   non-empty `channel` list is still an allowlist. An empty `channel` key is now a boot
   error rather than "every channel", and `slack_read.channels: []` now turns the lane on

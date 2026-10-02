@@ -174,6 +174,35 @@ class GitHubSpec(_WarnExtra):
     token_env: str | None = None  # env var holding the agent's colleague JWT
     # Same deliberate `self` naming as ColleaguesSpec above.
     self: str | None = None  # this agent's own name, for the broker route
+    # Head-branch prefix for open_pr when no exact `branch` is given:
+    # branches are `<branch_prefix>/<agent>/<slug>`. Self-attribution only.
+    branch_prefix: str = "daedalus"
+
+    @field_validator("branch_prefix")
+    @classmethod
+    def _branch_prefix_is_ref_component(cls, v: str) -> str:
+        """Checked at load so a bad prefix fails the bundle, not the first PR."""
+        problem = None
+        if not v:
+            problem = "must not be empty"
+        elif v != v.strip() or any(c.isspace() for c in v):
+            problem = "must not contain whitespace"
+        elif ".." in v:
+            problem = "must not contain '..'"
+        elif v.startswith("/") or v.endswith("/"):
+            problem = "must not start or end with '/'"
+        elif "//" in v:
+            problem = "must not contain '//'"
+        elif any(c in v for c in "~^:?*[\\@{") or any(ord(c) < 32 or ord(c) == 127 for c in v):
+            problem = "must not contain any of ~ ^ : ? * [ \\ @{ or control characters"
+        elif v.endswith(".lock") or v.endswith(".") or v.startswith("."):
+            problem = "must not start with '.' or end with '.' or '.lock'"
+        if problem:
+            raise ValueError(
+                f"github.branch_prefix {v!r} is not a valid git branch prefix: {problem} "
+                "(e.g. daedalus, or kobo)"
+            )
+        return v
 
 
 class CloudTrailSpec(_WarnExtra):

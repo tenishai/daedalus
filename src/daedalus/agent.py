@@ -374,6 +374,7 @@ class Agent:
                     spec.github.broker_url,
                     token_env=spec.github.token_env,
                     self_name=spec.github.self,
+                    branch_prefix=spec.github.branch_prefix,
                 )
             )
 
