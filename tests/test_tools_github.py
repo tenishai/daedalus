@@ -648,8 +648,35 @@ def test_bundle_branch_prefix_default_and_override(tmp_path):
 @pytest.mark.parametrize(
     "bad",
     ["", "has space", "a..b", "/lead", "trail/", "a//b", "a~b", "a^b", "a:b", "a?b", "a*b",
-     "a[b", "a\\b", "x.lock", "a@{b", ".hidden", "dot."],
+     "a[b", "a\\b", "x.lock", "a@{b", ".hidden", "dot.",
+     "bots/.hidden", "bots.lock/x", "a/./b", "a/.lock/b"],
 )
 def test_bundle_rejects_invalid_branch_prefix(tmp_path, bad):
     with pytest.raises(ValidationError, match="github.branch_prefix"):
         _load_with_prefix(tmp_path, bad)
+
+
+_GOOD_PREFIXES = ["daedalus", "kobo", "team/bots", "a@b", "a{b", "v1.2"]
+
+
+@pytest.mark.parametrize("prefix", _GOOD_PREFIXES)
+def test_accepted_prefix_is_a_valid_git_branch(tmp_path, prefix):
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    assert _load_with_prefix(tmp_path, prefix).branch_prefix == prefix
+    r = subprocess.run(
+        ["git", "check-ref-format", "--branch", f"{prefix}/agent/slug"], capture_output=True
+    )
+    assert r.returncode == 0
+
+
+def test_bundle_branch_prefix_reaches_the_github_provider(tmp_path):
+    from daedalus.agent import Agent
+
+    _load_with_prefix(tmp_path, "acme")
+    provider = Agent(Bundle.load(tmp_path))._tools_from_spec()
+    assert isinstance(provider, GitHubToolProvider)
+    assert provider.branch_prefix == "acme"

@@ -183,20 +183,28 @@ class GitHubSpec(_WarnExtra):
     def _branch_prefix_is_ref_component(cls, v: str) -> str:
         """Checked at load so a bad prefix fails the bundle, not the first PR."""
         problem = None
+        bad_chars = "~^:?*[\\"
         if not v:
             problem = "must not be empty"
-        elif v != v.strip() or any(c.isspace() for c in v):
+        elif any(c.isspace() for c in v):
             problem = "must not contain whitespace"
-        elif ".." in v:
-            problem = "must not contain '..'"
+        elif any(ord(c) < 32 or ord(c) == 127 for c in v):
+            problem = "must not contain control characters"
+        elif ".." in v or "@{" in v or "//" in v:
+            problem = "must not contain '..', '@{' or '//'"
+        elif any(c in v for c in bad_chars):
+            problem = "must not contain any of ~ ^ : ? * [ \\"
         elif v.startswith("/") or v.endswith("/"):
             problem = "must not start or end with '/'"
-        elif "//" in v:
-            problem = "must not contain '//'"
-        elif any(c in v for c in "~^:?*[\\@{") or any(ord(c) < 32 or ord(c) == 127 for c in v):
-            problem = "must not contain any of ~ ^ : ? * [ \\ @{ or control characters"
-        elif v.endswith(".lock") or v.endswith(".") or v.startswith("."):
-            problem = "must not start with '.' or end with '.' or '.lock'"
+        elif v.endswith("."):
+            problem = "must not end with '.'"
+        else:
+            for part in v.split("/"):
+                if part.startswith(".") or part.endswith(".lock"):
+                    problem = (
+                        f"component {part!r} must not start with '.' or end with '.lock'"
+                    )
+                    break
         if problem:
             raise ValueError(
                 f"github.branch_prefix {v!r} is not a valid git branch prefix: {problem} "
