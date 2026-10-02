@@ -328,9 +328,12 @@ class SlackReactionApprover:
     approves", was the unsafe one: with a `channel:` allowlist any member of the
     channel, the requester included, approved a tier-2 action with a reaction.
 
-    The requester (`self.requester`, set per event by the transport) never
-    counts as an approver, even when listed: the gate exists so a second person
-    sees the plan. A denial is never filtered, because raising the bar to
+    The requester (`self.requester`, set per event by the transport) does not
+    count as an approver, even when listed, so a second person sees the plan.
+    ONE EXCEPTION: when the requester is the only listed approver. A solo
+    operator has no second person to ask, and listing only yourself is an
+    explicit choice to approve your own actions, the same thing `daedalus chat`
+    already does at the terminal. A denial is never filtered, because raising the bar to
     authorise must not lower the bar to stop. Every decision names its Slack
     user id in the log.
     """
@@ -407,8 +410,11 @@ class SlackReactionApprover:
                 log.info("tier-2 %s DENIED by %s", action, ", ".join(sorted(deny)))
                 return False
             saw = self._reactors(reactions, self.APPROVE)
-            # The requester never approves their own request, listed or not.
-            approve = (saw & self.approvers) - {requester}
+            # The requester does not approve their own request unless they are
+            # the only listed approver (the solo-operator case above).
+            approve = saw & self.approvers
+            if self.approvers != {requester}:
+                approve -= {requester}
             if approve:
                 log.info("tier-2 %s APPROVED by %s", action, ", ".join(sorted(approve)))
                 return True
@@ -615,7 +621,8 @@ class SlackTransport:
         With both, the approver is wired to the first named channel and then
         follows each event's channel. A DM event (`im`/`mpim`, admitted without
         regard to the channel allowlist) retargets it to the DM, where in
-        practice only the requester is present, so a gate there is denied."""
+        practice only the requester is present, so a gate there is denied
+        unless the requester is the only listed approver."""
         if isinstance(getattr(handler, "approver", None), DenyAll):
             if not self.channels:
                 log.warning(

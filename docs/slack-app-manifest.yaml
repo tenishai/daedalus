@@ -6,7 +6,8 @@
 # bare `- kind: slack` block in agent.yaml answers wherever the app is a
 # member. It does not enable tier-2 approvals: those are DENIED unless the
 # block names both a `channel:` and `approvers: [U012ABC]` (Slack user ids;
-# the person who made the request can never approve it themselves).
+# the person who made the request cannot approve it themselves unless they
+# are the only listed approver).
 # Add `channel: C012ABC` lines only when you want the narrower thing: an
 # allowlist that holds even inside channels the app has been invited to.
 # Public AND private channel grants are both included below (channels:

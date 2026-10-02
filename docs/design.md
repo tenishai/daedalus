@@ -284,11 +284,14 @@ back. Persona constant, transport variable:
   `kind: slack` block, unioned across blocks. Reaction approvals are wired
   only when the transport has both a `channel` allowlist and `approvers`;
   with either missing, tier-2 stays `DenyAll` and boot says which. The
-  requester never approves their own request, even when listed, so a gate
-  needs a second person; an empty `approvers: []` is the same as none.
+  requester does not approve their own request, even when listed, so a gate
+  needs a second person, unless the requester is the only listed approver: a
+  solo operator approves their own actions, as `daedalus chat` does at the
+  terminal. An empty `approvers: []` is the same as none.
   Denials (a ❌) count from anyone in the channel. DMs are admitted without
   regard to the channel allowlist, and the approver retargets to the DM
-  where only the requester is present, so a gate there is denied in practice.
+  where only the requester is present, so a gate there is denied in practice
+  unless the requester is the only listed approver.
   A `channel` key whose value is empty
   (a `${VAR}` set but empty; an unset one already fails in `Bundle.load`)
   fails boot rather than reading as open. Mixed blocks

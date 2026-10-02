@@ -1227,6 +1227,35 @@ async def test_the_requester_cannot_approve_their_own_request(caplog):
     assert await both.approve("deploy", {}) is True
 
 
+async def test_a_sole_listed_approver_may_approve_their_own_request(caplog):
+    """A solo operator listed alone approves their own request; add a second
+    approver and the same reaction is ignored again."""
+    script = [[("white_check_mark", ["U-operator"])]]
+    solo = SlackReactionApprover(
+        FakeApi(reactions_script=list(script)), CH, timeout=5, poll=0.01,
+        approvers=frozenset({"U-operator"}),
+    )
+    solo.requester = "U-operator"
+    assert await solo.approve("deploy", {}) is True
+
+    pair = SlackReactionApprover(
+        FakeApi(reactions_script=script * 4), CH, timeout=0.05, poll=0.01,
+        approvers=frozenset({"U-operator", "U-second"}),
+    )
+    pair.requester = "U-operator"
+    with caplog.at_level(logging.INFO):
+        assert await pair.approve("deploy", {}) is False
+    assert "who made the request" in caplog.text
+
+    # A different sole approver still cannot be impersonated by the requester.
+    other = SlackReactionApprover(
+        FakeApi(reactions_script=script * 4), CH, timeout=0.05, poll=0.01,
+        approvers=frozenset({"U-second"}),
+    )
+    other.requester = "U-operator"
+    assert await other.approve("deploy", {}) is False
+
+
 async def test_the_transport_tells_the_approver_who_asked():
     """The requester is the Slack user who sent the message, set per event."""
     api = FakeApi()
