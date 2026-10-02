@@ -141,7 +141,9 @@ jobs:
       - name: Checkout (metadata only)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 1
+          # Full history at checkout, so the check below needs no authenticated
+          # fetch (credentials are not persisted, and the repo may be private).
+          fetch-depth: 0
           persist-credentials: false
       - name: DCO sign-off check
         env:
@@ -152,11 +154,9 @@ jobs:
         run: |
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
-          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-            git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
-          else
-            git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA"
-          fi
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            git cat-file -e "$sha^{commit}" || { echo "::error::DCO: $sha is not in the checkout"; exit 1; }
+          done
           commits=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
           if [ -z "$commits" ]; then
             echo "::error::DCO: no non-merge commits in $BASE_SHA..$HEAD_SHA, so nothing was checked"
