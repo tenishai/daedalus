@@ -11,7 +11,7 @@ surface takes the bare Task only. Non-streaming, bound to loopback by default. O
 JWT verification (transport `auth` config) gates both POST surfaces; card
 signing stays deferred (cabal accepts an empty card at graduation and does
 not verify cards on dispatch). Requires the a2a extra: pip install
-'daedalus[a2a]'.
+'tenishai-daedalus[a2a]'.
 """
 
 from __future__ import annotations

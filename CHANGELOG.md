@@ -85,6 +85,11 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   and `make image` passes both contexts (tenishai/daedalus#128).
 - **Every third-party GitHub Action is pinned to a full commit SHA**, and the CI header
   comment no longer names the CI host (tenishai/daedalus#138).
+- **The distribution is named `tenishai-daedalus`** (pyproject `name`; was `daedalus`). The
+  bare names `daedalus` and `techne` are taken or open to squatting on PyPI. The import
+  package (`import daedalus`) and the CLI (`daedalus`) are unchanged; install extras as
+  `tenishai-daedalus[a2a]`, and `pip show tenishai-daedalus` is how to look it up
+  (tenishai/daedalus#138).
 - **README rewritten**, `AGENTS.md` added, the design doc marked implemented, and the
   capability-seam proposal scrubbed of internal names (tenishai/daedalus#73,
   tenishai/daedalus#75).

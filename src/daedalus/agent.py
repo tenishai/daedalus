@@ -326,7 +326,7 @@ class Agent:
             except ImportError as exc:
                 raise BundleError(
                     "tools.provider is 'mcp' but the mcp extra is not installed — "
-                    "pip install 'daedalus[mcp]'"
+                    "pip install 'tenishai-daedalus[mcp]'"
                 ) from exc
             from daedalus.tools.mcp import MCPToolProvider
 
@@ -1059,7 +1059,7 @@ class Agent:
             import joserfc  # noqa: F401  — fail at load time, not on first request
         except ImportError as exc:
             raise BundleError(
-                "a2a transport auth requires joserfc — pip install 'daedalus[a2a]'"
+                "a2a transport auth requires joserfc — pip install 'tenishai-daedalus[a2a]'"
             ) from exc
         from daedalus.transports.a2a_auth import JwtVerifier
 
@@ -1086,7 +1086,7 @@ class Agent:
                 except ImportError as exc:
                     raise BundleError(
                         "transport 'a2a' requires the a2a extra — "
-                        "pip install 'daedalus[a2a]'"
+                        "pip install 'tenishai-daedalus[a2a]'"
                     ) from exc
                 from daedalus.transports.a2a import A2aTransport
 
@@ -1112,7 +1112,7 @@ class Agent:
                 except ImportError as exc:
                     raise BundleError(
                         "transport 'slack' requires the slack extra — "
-                        "pip install 'daedalus[slack]'"
+                        "pip install 'tenishai-daedalus[slack]'"
                     ) from exc
 
                 options = spec.options()
