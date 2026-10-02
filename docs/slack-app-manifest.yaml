@@ -13,6 +13,13 @@
 # legacy "G"-prefixed private-channel id space to special-case for — both
 # public and private channels use C-prefixed ids today.
 
+# DIRECT MESSAGES ARE NOT SUBSCRIBED, ON PURPOSE. Adding `im:history` (and
+# `mpim:history`) with the `message.im` (and `message.mpim`) event turns on DMs,
+# and DMs bypass the `channel:` allowlist: anyone in the workspace who can open
+# a DM with the app reaches the model and every tool the bundle allows, with
+# only the bundle's tool ceiling as the limit. There is no per-user allowlist.
+# Subscribe to them only when that is what you want (docs/design.md, 2.4).
+
 display_information:
   name: Scout
   description: A daedalus agent bundle, reachable in Slack.

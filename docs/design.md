@@ -283,6 +283,17 @@ back. Persona constant, transport variable:
   resolve open. Tier-3 escalations go wherever `approvals.escalation.route`
   says (`slack:<channel>` for Slack), never to the first named channel.
 
+  **Direct messages bypass the channel allowlist, by design.** An `im`/`mpim`
+  event is admitted whatever `channel` lists: DMs are full-delivery (the
+  tagged-only rule is for channels), and Slack delivers them only to an app a
+  user chose to message. The consequence for a bundle author: with DMs on,
+  any workspace member who can DM the app reaches the model and the tools the
+  bundle allows, and the tool ceiling is the only limit. There is no per-user
+  allowlist (tenishai/daedalus#87 left that as a feature decision). The shipped
+  `docs/slack-app-manifest.yaml` does not subscribe to DM events, so this is
+  opt-in: it applies only when the Slack app is given `message.im` or
+  `message.mpim` and the matching history scopes.
+
   The read-only companion, `tools.slack_read`, takes the same three-state
   shape: the block absent is **off**, `channels: []` is **on with no
   allowlist** (every invited channel, with Slack's own `not_in_channel` as
