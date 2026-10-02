@@ -250,7 +250,9 @@ async def test_learnings_reply_passes_post_draft_like_a_chat_reply(tmp_path):
 
     assert result.state is TaskState.FAILED
     assert result.reason_code is ReasonCode.TOOL_BLOCKED
-    assert result.agent_text() == "A rule stopped this reply: blocked by z_reject.py: no candidates."
+    assert result.agent_text() == (
+        "A rule stopped this reply: blocked by z_reject.py: no candidates."
+    )
     assert "canary gate" not in result.agent_text()
     assert all("canary gate" not in m.text for m in result.history)
 
