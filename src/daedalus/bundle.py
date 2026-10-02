@@ -107,12 +107,40 @@ class ModelSpec(_WarnExtra):
         return self
 
 
+_SLACK_USER_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
+
+
 class TransportSpec(BaseModel):
-    """kind plus transport-specific fields (channel, port, ...) kept as extras."""
+    """kind plus transport-specific fields (channel, port, approvers, ...) kept as extras."""
 
     model_config = ConfigDict(extra="allow")
 
     kind: str
+
+    @model_validator(mode="after")
+    def _slack_approvers_shape(self) -> TransportSpec:
+        """`approvers` on a `kind: slack` block: a list of Slack user ids (#53).
+
+        Checked at load, so a typo fails the bundle instead of silently leaving
+        tier-2 with nobody entitled to approve. `[]` is legal and means the same
+        as leaving the key out: no approvers, tier-2 denied."""
+        if self.kind != "slack":
+            return self
+        approvers = (self.__pydantic_extra__ or {}).get("approvers")
+        if approvers is None:
+            return self
+        if not isinstance(approvers, list):
+            raise ValueError(
+                "slack transport `approvers` must be a list of Slack user ids, "
+                "e.g. [U012ABC, U034DEF]"
+            )
+        for entry in approvers:
+            if not isinstance(entry, str) or not _SLACK_USER_ID.match(entry):
+                raise ValueError(
+                    f"slack transport `approvers` entry {entry!r} is not a Slack user id "
+                    "(U or W followed by capital letters and digits, e.g. U012ABC)"
+                )
+        return self
 
     def options(self) -> dict:
         return dict(self.__pydantic_extra__ or {})

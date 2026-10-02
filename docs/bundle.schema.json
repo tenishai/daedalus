@@ -753,7 +753,7 @@
     },
     "TransportSpec": {
       "additionalProperties": true,
-      "description": "kind plus transport-specific fields (channel, port, ...) kept as extras.",
+      "description": "kind plus transport-specific fields (channel, port, approvers, ...) kept as extras.",
       "properties": {
         "kind": {
           "title": "Kind",

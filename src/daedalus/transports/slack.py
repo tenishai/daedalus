@@ -27,12 +27,14 @@ SLACK_BOT_TOKEN and SLACK_APP_TOKEN unless passed explicitly.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 
 from daedalus.protocols import DenyAll, Handler
 from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
@@ -46,6 +48,14 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
 log = logging.getLogger(__name__)
+
+# Slack user id of whoever sent the message that started the running task. Set
+# by SlackTransport.handle_event around handler.handle_task, so it is per task
+# (each asyncio task has its own context), not per approver. None for any task
+# that did not start from a Slack event: a2a, cli, a colleague agent.
+current_slack_requester: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_slack_requester", default=None
+)
 
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
 
@@ -320,26 +330,24 @@ class SlackApi:
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
 
-    WHO APPROVED IS NOW RECORDED, AND OPTIONALLY CHECKED (#46). This said
-    "any user reaction counts for now; an approver allowlist is a planned
-    hardening before any production use" -- and the agents shipped, so the
-    condition that sentence set was passed without the hardening.
+    THE ALLOWLIST IS REQUIRED (#53). `approvers` (Slack user ids, wired from the
+    `approvers:` key of the bundle's `kind: slack` block) names who may APPROVE.
+    Absent and empty are the same thing: nobody may, so every gate is denied
+    before a plan is posted. The earlier default, "unset means any reactor
+    approves", was the unsafe one: with a `channel:` allowlist any member of the
+    channel, the requester included, approved a tier-2 action with a reaction.
 
-    Pass `approvers` (Slack user ids) to require one of them for APPROVAL --
-    a denial is never filtered, because raising the bar to authorise must not
-    lower the bar to stop. NOTHING WIRES `approvers` FROM CONFIG YET (#53), so
-    in a real deployment this control is presently unreachable: the code below
-    is the mechanism, not the hardening. Saying otherwise is how the docstring
-    this replaces came to promise a hardening that never arrived.
-
-    Leave it unset and behaviour is exactly as before, any reactor counts.
-    That default is
-    deliberate and it is NOT the safe one: refusing every approval on an
-    agent whose operator has not yet listed themselves would take tier-2
-    tools offline in a running room, unannounced. #53 carries the inversion,
-    and the log line below is what makes it answerable -- every decision now
-    names its approver, so an operator can read off the real list before
-    committing to one.
+    The requester (`current_slack_requester`, set by the transport for the task
+    a Slack message started) does not count as an approver, even when listed,
+    so a second person sees the plan. This covers Slack-originated requests
+    only: a gate reached from a2a, the cli or a colleague agent has no known
+    requester, so nobody is excluded and any listed approver may approve.
+    ONE EXCEPTION: when the requester is the only listed approver. A solo
+    operator has no second person to ask, and listing only yourself is an
+    explicit choice to approve your own actions, the same thing `daedalus chat`
+    already does at the terminal. A denial is never filtered, because raising the bar to
+    authorise must not lower the bar to stop. Every decision names its Slack
+    user id in the log.
     """
 
     APPROVE = {"white_check_mark", "heavy_check_mark", "+1", "thumbsup"}
@@ -372,6 +380,19 @@ class SlackReactionApprover:
         if not self.channel:
             log.info("tier-2 %s denied: no slack channel to ask in", action)
             return False
+        if not self.approvers:
+            # Fail closed (#53): no allowlist means no one may approve. Checked
+            # before posting, so nobody is asked to react to a plan that cannot
+            # be approved.
+            log.warning(
+                "tier-2 %s denied: no approvers configured "
+                "(set `approvers: [U...]` on the slack transport block)",
+                action,
+            )
+            return False
+        # Per task, via contextvar: a later Slack event cannot change it, and a
+        # task not started by a Slack event sees None (no one to exclude).
+        requester = current_slack_requester.get()
         text = (
             f":shield: approval required: `{action}`\n"
             f"```{json.dumps(plan, indent=2, default=str)}```\n"
@@ -381,6 +402,7 @@ class SlackReactionApprover:
         ts = await self.api.post(self.channel, text, thread_ts=self.thread_ts)
         deadline = time.monotonic() + self.timeout
         ignored = False
+        self_refused = False
         while time.monotonic() < deadline:
             reactions = await self.api.reactions_with_users(self.channel, ts)
             # DENY IS NEVER FILTERED BY THE ALLOWLIST, and that asymmetry is the
@@ -397,10 +419,27 @@ class SlackReactionApprover:
                 log.info("tier-2 %s DENIED by %s", action, ", ".join(sorted(deny)))
                 return False
             saw = self._reactors(reactions, self.APPROVE)
-            approve = saw if self.approvers is None else saw & self.approvers
+            # The requester does not approve their own request unless they are
+            # the only listed approver (the solo-operator case above).
+            approve = saw & self.approvers
+            if requester is not None and self.approvers != {requester}:
+                approve -= {requester}
             if approve:
                 log.info("tier-2 %s APPROVED by %s", action, ", ".join(sorted(approve)))
                 return True
+            if (
+                requester is not None
+                and self.approvers != {requester}
+                and requester in saw
+                and requester in self.approvers
+                and not self_refused
+            ):
+                self_refused = True
+                log.info(
+                    "tier-2 %s: ignoring approval from %s, who made the request",
+                    action,
+                    requester,
+                )
             ignored = ignored or bool(saw)
             await asyncio.sleep(self.poll)
         # "NO REACTION" WOULD BE A LIE WHEN THERE WAS ONE. An off-list tick runs
@@ -408,7 +447,9 @@ class SlackReactionApprover:
         # statement into the one artefact this class exists to produce.
         if ignored:
             log.info(
-                "tier-2 %s denied: only off-list approvals within %.0fs", action, self.timeout
+                "tier-2 %s denied: only off-list or self approvals within %.0fs",
+                action,
+                self.timeout,
             )
         else:
             log.info("tier-2 %s denied: no reaction within %.0fs", action, self.timeout)
@@ -439,8 +480,12 @@ class SlackTransport:
         bot_token: str | None = None,
         app_token: str | None = None,
         escalation_route: str | None = None,
+        approvers: Iterable[str] | None = None,
         api: SlackApi | None = None,
     ):
+        # `approvers` (Slack user ids) are the only people whose reaction approves
+        # a tier-2 action (#53); none configured means tier-2 stays denied.
+        self.approvers = frozenset(a for a in (approvers or ()) if a)
         # `channel` seeds the tier-2 approver before the first event (tier-3
         # escalations follow `escalation_route`, not this);
         # `channels` is the full allowlist this one transport serves. One
@@ -578,22 +623,47 @@ class SlackTransport:
 
     def _wire_approver(self, handler: Handler) -> None:
         """Humans are reachable here, so upgrade a fail-closed DenyAll default
-        to reaction approvals — an explicitly chosen approver is respected.
+        to reaction approvals, but only when the bundle names who may approve
+        (#53). An explicitly chosen approver is respected.
 
-        Not on an open transport. The approver follows the channel of the
-        latest event, and until #53 wires `approvers` from config, anyone who
-        can react there approves. With an allowlist that is a channel the
-        bundle named; with none it is any channel a workspace member invites
-        the app to, including one they own. So an open transport keeps tier-2
-        closed until #53 lands (2026-09-24 operator ruling)."""
+        Tier-2 stays DenyAll, with a warning at boot, in two cases:
+        - no `approvers` configured: nobody is entitled to approve;
+        - an open transport (no `channel` allowlist, #84): the approver follows
+          the channel of the latest event, which on an open transport is any
+          channel a workspace member invites the app to, including one they own
+          (2026-09-24 operator ruling). Name a `channel` as well to enable tier-2.
+
+        With both, the approver is wired to the first named channel and then
+        follows each event's channel. A DM event (`im`/`mpim`, admitted without
+        regard to the channel allowlist) retargets it to the DM. In a 1:1 DM
+        (`im`) only the requester is present, so a gate there is denied unless
+        the requester is the only listed approver. A group DM (`mpim`) can
+        include another listed approver, who may approve there.
+
+        `approvers` is transport-wide: unioned across `kind: slack` blocks and
+        valid in every channel the approver follows, not scoped per channel."""
         if isinstance(getattr(handler, "approver", None), DenyAll):
             if not self.channels:
                 log.warning(
                     "slack transport is open (no channel allowlist): tier-2 "
-                    "approvals stay denied until an approver allowlist exists (#53)"
+                    "approvals stay denied; add a `channel` and `approvers` to enable them"
                 )
                 return
-            handler.approver = SlackReactionApprover(self._api, self.channel)
+            if not self.approvers:
+                log.warning(
+                    "slack transport has no `approvers`: tier-2 approvals stay "
+                    "denied until the bundle lists who may approve (#53)"
+                )
+                return
+            handler.approver = SlackReactionApprover(
+                self._api, self.channel, approvers=self.approvers
+            )
+            log.info(
+                "slack tier-2 approvals enabled; %d approver(s), transport-wide "
+                "(unioned across slack blocks, not per channel): %s",
+                len(self.approvers),
+                ", ".join(sorted(self.approvers)),
+            )
 
     async def handle_event(self, event: dict, handler: Handler) -> None:
         if event.get("type") not in {"message", "app_mention"}:
@@ -614,7 +684,7 @@ class SlackTransport:
             # reached us because the app is a member of that channel, and
             # membership is the permission. Every filter below still runs --
             # bots, subtypes, dedupe, and above all the tagged-only rule.
-            # It does widen who could approve a tier-2 action, which is why
+            # It does widen where an approval could be asked for, which is why
             # _wire_approver keeps tier-2 closed on an open transport.
             return
         if self._not_for_us_in_channel(event):
@@ -681,7 +751,8 @@ class SlackTransport:
         if isinstance(approver, SlackReactionApprover):
             # Point the approver at this event's thread AND channel (the
             # prompt must appear where the human is). Same last-writer-wins
-            # behavior under concurrent tasks as thread_ts always had.
+            # behavior under concurrent tasks as thread_ts always had. The
+            # requester is NOT carried here: see current_slack_requester.
             approver.thread_ts = thread
             approver.channel = channel
 
@@ -695,6 +766,9 @@ class SlackTransport:
             thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
         except Exception:
             thinking_ts = None
+        requester_token = current_slack_requester.set(
+            sender if isinstance(sender, str) else None
+        )
         try:
             task = await handler.handle_task(task)
             self._threads[(channel, thread)] = task
@@ -704,6 +778,8 @@ class SlackTransport:
             del task.history[history_len:]
             ok = False
             reply = f"error: {exc}"
+        finally:
+            current_slack_requester.reset(requester_token)
         await self._api.unreact(channel, ts, "eyes")
         await self._api.react(channel, ts, "white_check_mark" if ok else "x")
         rendered = to_mrkdwn(reply)
