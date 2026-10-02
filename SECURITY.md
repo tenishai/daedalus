@@ -50,8 +50,9 @@ daedalus is the runtime agents run in. In scope:
   that crosses a trust boundary the runtime claims to enforce);
 - the a2a HTTP transport and its bearer/JWT authentication: when `auth` is
   configured, anything that reaches an agent through a POST without passing
-  it. Without an `auth` block the POST surfaces are open by design, as are the
-  GET endpoints (card, health, events);
+  it. Without an `auth` block the POST surfaces are open by design. The card
+  and health GETs are open by design. The `/events` stream stays open even
+  when `auth` is configured: that is a known hardening item, not a new report;
 - the Slack transport and other connectors: anything that lets someone other
   than an intended approver approve an action. The approver allowlist isn't
   wired from configuration yet (daedalus#53), so "anyone who can react can
