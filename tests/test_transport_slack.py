@@ -6,7 +6,12 @@ import logging
 
 from daedalus.protocols import DenyAll
 from daedalus.task import ReasonCode, Task, TaskState
-from daedalus.transports.slack import SlackApi, SlackReactionApprover, SlackTransport
+from daedalus.transports.slack import (
+    SlackApi,
+    SlackReactionApprover,
+    SlackTransport,
+    current_slack_requester,
+)
 
 CH = "C0MAIN"
 
@@ -1208,12 +1213,12 @@ async def test_the_requester_cannot_approve_their_own_request(caplog):
     other = SlackReactionApprover(
         FakeApi(reactions_script=list(script)), CH, timeout=5, poll=0.01, approvers=approvers
     )
-    other.requester = "U-second"
+    current_slack_requester.set("U-second")
     assert await other.approve("deploy", {}) is True
 
     api = FakeApi(reactions_script=script * 4)
     own = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01, approvers=approvers)
-    own.requester = "U-operator"
+    current_slack_requester.set("U-operator")
     with caplog.at_level(logging.INFO):
         assert await own.approve("deploy", {}) is False
     assert "who made the request" in caplog.text
@@ -1223,7 +1228,7 @@ async def test_the_requester_cannot_approve_their_own_request(caplog):
         ("white_check_mark", ["U-operator"]), ("white_check_mark", ["U-second"])
     ]])
     both = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=approvers)
-    both.requester = "U-operator"
+    current_slack_requester.set("U-operator")
     assert await both.approve("deploy", {}) is True
 
 
@@ -1235,14 +1240,14 @@ async def test_a_sole_listed_approver_may_approve_their_own_request(caplog):
         FakeApi(reactions_script=list(script)), CH, timeout=5, poll=0.01,
         approvers=frozenset({"U-operator"}),
     )
-    solo.requester = "U-operator"
+    current_slack_requester.set("U-operator")
     assert await solo.approve("deploy", {}) is True
 
     pair = SlackReactionApprover(
         FakeApi(reactions_script=script * 4), CH, timeout=0.05, poll=0.01,
         approvers=frozenset({"U-operator", "U-second"}),
     )
-    pair.requester = "U-operator"
+    current_slack_requester.set("U-operator")
     with caplog.at_level(logging.INFO):
         assert await pair.approve("deploy", {}) is False
     assert "who made the request" in caplog.text
@@ -1252,18 +1257,107 @@ async def test_a_sole_listed_approver_may_approve_their_own_request(caplog):
         FakeApi(reactions_script=script * 4), CH, timeout=0.05, poll=0.01,
         approvers=frozenset({"U-second"}),
     )
-    other.requester = "U-operator"
+    current_slack_requester.set("U-operator")
     assert await other.approve("deploy", {}) is False
 
 
-async def test_the_transport_tells_the_approver_who_asked():
-    """The requester is the Slack user who sent the message, set per event."""
+async def test_the_transport_tells_the_task_who_asked():
+    """The requester is the Slack user who sent the message, set per task."""
     api = FakeApi()
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api, approvers=OPS)
     handler = EchoHandler()
     transport._wire_approver(handler)
+    seen = []
+
+    async def handle(task):
+        seen.append(current_slack_requester.get())
+        return task.reply("ok")
+
+    handler.handle_task = handle
     await transport.handle_event(event("hi", ts="500.1", user="U0ASKER"), handler)
-    assert handler.approver.requester == "U0ASKER"
+    assert seen == ["U0ASKER"]
+    assert current_slack_requester.get() is None  # reset after the task
+
+
+class GatingHandler(EchoHandler):
+    """Runs a tier-2 gate inside handle_task, after an optional pause, and
+    records the requester it saw and the gate's verdict."""
+
+    def __init__(self, approver, pause=None):
+        super().__init__()
+        self.approver = approver
+        self.pause = pause
+        self.seen: dict[str, tuple] = {}
+
+    async def handle_task(self, task):
+        if self.pause is not None:
+            await self.pause.wait()
+        who = current_slack_requester.get()
+        verdict = await self.approver.approve("deploy", {"text": task.user_text()})
+        self.seen[task.user_text()] = (who, verdict)
+        return task.reply("done")
+
+
+def _gated_transport(api, approvers, _unused=None):
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api, approvers=approvers)
+    approver = SlackReactionApprover(api, CH, timeout=0.2, poll=0.01, approvers=approvers)
+    return transport, approver
+
+
+async def test_another_user_speaking_mid_task_does_not_change_the_requester():
+    """Review r1 #1, scenario 1: Alice (listed, one of several) asks; an
+    unlisted account posts before her gate fires; her own tick is still refused."""
+    approvers = frozenset({"U0ALICE", "U0CAROL"})
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U0ALICE"])]] * 50)
+    transport, approver = _gated_transport(api, approvers, None)
+    gate = asyncio.Event()
+    handler = GatingHandler(approver, pause=gate)
+    transport._wire_approver(handler)
+    handler.approver = approver
+    alice = asyncio.create_task(
+        transport.handle_event(event("deploy prod", ts="1.1", user="U0ALICE"), handler)
+    )
+    await asyncio.sleep(0.01)
+    # a different user's event lands while Alice's task is still working
+    other = event("hello", ts="1.2", thread="1.2", user="U0ALT")
+    await transport.handle_event(other, EchoHandler())
+    gate.set()
+    await alice
+    assert handler.seen["deploy prod"] == ("U0ALICE", False)
+
+
+async def test_a_gate_outside_a_slack_event_has_no_slack_requester():
+    """Review r1 #1, scenario 2: after Bob speaks in Slack, a gate reached from
+    another transport sees no requester (not Bob), so nobody is excluded and a
+    listed approver, here Bob, is not wrongly special-cased either."""
+    approvers = frozenset({"U0ALICE", "U0BOB"})
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U0ALICE"])]] * 50)
+    transport, approver = _gated_transport(api, approvers, None)
+    handler = GatingHandler(approver)
+    await transport.handle_event(event("hi", ts="2.1", user="U0BOB"), handler)
+    assert handler.seen["hi"][0] == "U0BOB"
+    assert current_slack_requester.get() is None
+    # a2a-style call: no Slack event around it
+    assert await approver.approve("deploy", {}) is True  # Alice's tick counts
+
+
+async def test_concurrent_tasks_each_see_their_own_requester():
+    approvers = frozenset({"U0ALICE", "U0BOB", "U0CAROL"})
+    api = FakeApi(reactions_script=[[("white_check_mark", ["U0ALICE"])]] * 50)
+    transport, approver = _gated_transport(api, approvers, None)
+    gate = asyncio.Event()
+    handler = GatingHandler(approver, pause=gate)
+    a = asyncio.create_task(
+        transport.handle_event(event("from alice", ts="3.1", thread="3.1", user="U0ALICE"), handler)
+    )
+    b = asyncio.create_task(
+        transport.handle_event(event("from bob", ts="3.2", thread="3.2", user="U0BOB"), handler)
+    )
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.gather(a, b)
+    assert handler.seen["from alice"] == ("U0ALICE", False)  # Alice's own tick refused
+    assert handler.seen["from bob"] == ("U0BOB", True)  # Alice may approve Bob's
 
 
 async def test_a_transport_without_approvers_leaves_tier2_denied(caplog):

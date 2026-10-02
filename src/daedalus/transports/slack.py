@@ -27,6 +27,7 @@ SLACK_BOT_TOKEN and SLACK_APP_TOKEN unless passed explicitly.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -47,6 +48,14 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _HEADER = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _POST_BUDGET = 3900  # Slack renders reliably to ~4000 chars, hard-errors past 40k
 log = logging.getLogger(__name__)
+
+# Slack user id of whoever sent the message that started the running task. Set
+# by SlackTransport.handle_event around handler.handle_task, so it is per task
+# (each asyncio task has its own context), not per approver. None for any task
+# that did not start from a Slack event: a2a, cli, a colleague agent.
+current_slack_requester: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_slack_requester", default=None
+)
 
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
 
@@ -328,8 +337,11 @@ class SlackReactionApprover:
     approves", was the unsafe one: with a `channel:` allowlist any member of the
     channel, the requester included, approved a tier-2 action with a reaction.
 
-    The requester (`self.requester`, set per event by the transport) does not
-    count as an approver, even when listed, so a second person sees the plan.
+    The requester (`current_slack_requester`, set by the transport for the task
+    a Slack message started) does not count as an approver, even when listed,
+    so a second person sees the plan. This covers Slack-originated requests
+    only: a gate reached from a2a, the cli or a colleague agent has no known
+    requester, so nobody is excluded and any listed approver may approve.
     ONE EXCEPTION: when the requester is the only listed approver. A solo
     operator has no second person to ask, and listing only yourself is an
     explicit choice to approve your own actions, the same thing `daedalus chat`
@@ -356,11 +368,6 @@ class SlackReactionApprover:
         self.poll = poll
         self.approvers = approvers
         self.thread_ts: str | None = None  # set per-event by the transport
-        # Slack user id of whoever sent the message that led to this gate; set
-        # per-event by the transport, last-writer-wins like thread_ts. Read once
-        # at the top of approve() so a later event cannot change who is excluded
-        # from a gate already waiting.
-        self.requester: str | None = None
 
     async def approve(self, action: str, plan: dict) -> bool:
         # An approver built with an empty channel has nowhere to ask until a
@@ -383,7 +390,9 @@ class SlackReactionApprover:
                 action,
             )
             return False
-        requester = self.requester
+        # Per task, via contextvar: a later Slack event cannot change it, and a
+        # task not started by a Slack event sees None (no one to exclude).
+        requester = current_slack_requester.get()
         text = (
             f":shield: approval required: `{action}`\n"
             f"```{json.dumps(plan, indent=2, default=str)}```\n"
@@ -413,12 +422,18 @@ class SlackReactionApprover:
             # The requester does not approve their own request unless they are
             # the only listed approver (the solo-operator case above).
             approve = saw & self.approvers
-            if self.approvers != {requester}:
+            if requester is not None and self.approvers != {requester}:
                 approve -= {requester}
             if approve:
                 log.info("tier-2 %s APPROVED by %s", action, ", ".join(sorted(approve)))
                 return True
-            if requester in saw and requester in self.approvers and not self_refused:
+            if (
+                requester is not None
+                and self.approvers != {requester}
+                and requester in saw
+                and requester in self.approvers
+                and not self_refused
+            ):
                 self_refused = True
                 log.info(
                     "tier-2 %s: ignoring approval from %s, who made the request",
@@ -620,9 +635,13 @@ class SlackTransport:
 
         With both, the approver is wired to the first named channel and then
         follows each event's channel. A DM event (`im`/`mpim`, admitted without
-        regard to the channel allowlist) retargets it to the DM, where in
-        practice only the requester is present, so a gate there is denied
-        unless the requester is the only listed approver."""
+        regard to the channel allowlist) retargets it to the DM. In a 1:1 DM
+        (`im`) only the requester is present, so a gate there is denied unless
+        the requester is the only listed approver. A group DM (`mpim`) can
+        include another listed approver, who may approve there.
+
+        `approvers` is transport-wide: unioned across `kind: slack` blocks and
+        valid in every channel the approver follows, not scoped per channel."""
         if isinstance(getattr(handler, "approver", None), DenyAll):
             if not self.channels:
                 log.warning(
@@ -638,6 +657,12 @@ class SlackTransport:
                 return
             handler.approver = SlackReactionApprover(
                 self._api, self.channel, approvers=self.approvers
+            )
+            log.info(
+                "slack tier-2 approvals enabled; %d approver(s), transport-wide "
+                "(unioned across slack blocks, not per channel): %s",
+                len(self.approvers),
+                ", ".join(sorted(self.approvers)),
             )
 
     async def handle_event(self, event: dict, handler: Handler) -> None:
@@ -726,10 +751,10 @@ class SlackTransport:
         if isinstance(approver, SlackReactionApprover):
             # Point the approver at this event's thread AND channel (the
             # prompt must appear where the human is). Same last-writer-wins
-            # behavior under concurrent tasks as thread_ts always had.
+            # behavior under concurrent tasks as thread_ts always had. The
+            # requester is NOT carried here: see current_slack_requester.
             approver.thread_ts = thread
             approver.channel = channel
-            approver.requester = sender if isinstance(sender, str) else None
 
         # Thinking state (2026-08-27 operator feedback): a visible in-thread
         # placeholder the moment work starts, updated IN PLACE into the
@@ -741,6 +766,9 @@ class SlackTransport:
             thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
         except Exception:
             thinking_ts = None
+        requester_token = current_slack_requester.set(
+            sender if isinstance(sender, str) else None
+        )
         try:
             task = await handler.handle_task(task)
             self._threads[(channel, thread)] = task
@@ -750,6 +778,8 @@ class SlackTransport:
             del task.history[history_len:]
             ok = False
             reply = f"error: {exc}"
+        finally:
+            current_slack_requester.reset(requester_token)
         await self._api.unreact(channel, ts, "eyes")
         await self._api.react(channel, ts, "white_check_mark" if ok else "x")
         rendered = to_mrkdwn(reply)

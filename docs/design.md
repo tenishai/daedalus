@@ -283,15 +283,22 @@ back. Persona constant, transport variable:
   separate setting: `approvers: [U012ABC, ...]` (Slack user ids) on a
   `kind: slack` block, unioned across blocks. Reaction approvals are wired
   only when the transport has both a `channel` allowlist and `approvers`;
-  with either missing, tier-2 stays `DenyAll` and boot says which. The
-  requester does not approve their own request, even when listed, so a gate
-  needs a second person, unless the requester is the only listed approver: a
-  solo operator approves their own actions, as `daedalus chat` does at the
-  terminal. An empty `approvers: []` is the same as none.
+  with either missing, tier-2 stays `DenyAll` and boot says which. `approvers` is
+  transport-wide, not per channel: the lists are unioned and apply in every
+  channel the approver follows. The requester does not approve their own
+  request, even when listed, so a gate needs a second person, unless the
+  requester is the only listed approver: a solo operator approves their own
+  actions, as `daedalus chat` does at the terminal. The requester is carried
+  per task (a contextvar set when a Slack message starts the task), so this
+  self-exclusion covers Slack-originated requests only: a gate reached from
+  a2a, the cli or a colleague agent has no known requester, nobody is
+  excluded, and any listed approver may approve. An empty `approvers: []` is
+  the same as none.
   Denials (a ❌) count from anyone in the channel. DMs are admitted without
-  regard to the channel allowlist, and the approver retargets to the DM
-  where only the requester is present, so a gate there is denied in practice
-  unless the requester is the only listed approver.
+  regard to the channel allowlist, and the approver retargets to the DM. In a
+  1:1 DM (`im`) only the requester is present, so a gate there is denied in
+  practice unless the requester is the only listed approver; a group DM
+  (`mpim`) can include another listed approver, who may approve there.
   A `channel` key whose value is empty
   (a `${VAR}` set but empty; an unset one already fails in `Bundle.load`)
   fails boot rather than reading as open. Mixed blocks

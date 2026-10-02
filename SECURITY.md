@@ -55,9 +55,12 @@ daedalus is the runtime agents run in. In scope:
 - the Slack transport and other connectors: anything that lets someone other
   than an intended approver approve an action. Tier-2 approvals need an
   `approvers` list (Slack user ids) and a `channel` allowlist on the Slack
-  transport block; without them every tier-2 action is denied. The person
-  who made a request cannot approve it unless they are the only listed
-  approver, a deliberate solo-operator choice. Reports that get around any
+  transport block; without them every tier-2 action is denied. For a request that
+  started in Slack, the person who sent it cannot approve it unless they are
+  the only listed approver, a deliberate solo-operator choice. A request that
+  did not start in Slack (a2a, cli, a colleague agent) has no known Slack
+  requester, so this self-exclusion does not apply to it. `approvers` is
+  transport-wide, not per channel. Reports that get around any
   of these rules are in scope.
 
 **Out of scope:** vulnerabilities in third-party dependencies (please report
