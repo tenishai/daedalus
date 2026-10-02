@@ -44,7 +44,7 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="techne[vectors] @ file:///src/techne"; else TECHNE="techne[vectors]>=0.16.1"; fi \
+RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="techne[vectors] @ file:///src/techne"; else TECHNE="techne[vectors]>=0.17.0"; fi \
  && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="liminal @ file:///src/liminal"; else LIMINAL="liminal>=0.2.0"; fi \
  && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
       echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
@@ -67,11 +67,11 @@ RUN python -c "import daedalus, techne; from techne.core.database import connect
 RUN python -c "import claude_agent_sdk"   # the Claude Code engine (--engine claude-code), with its bundled CLI
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
-# Version floor: techne may arrive as a named build context, which nothing
+# Version floor (0.17.0, matching pyproject.toml): techne may arrive as a named build context, which nothing
 # else pins. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
 # drop every lexical hit -- the exact failure use_vectors=True was gated
 # on. A 0.16.0 checkout passes every other proof here and ships that bug.
-RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 16, 1), f'techne {techne.__version__} < 0.16.1: the #827 fusion bug ships with use_vectors=True'"
+RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 17, 0), f'techne {techne.__version__} < 0.17.0, the version pinned in requirements-sources.txt and pyproject.toml (below 0.16.1, techne#827, the fusion bug ships with use_vectors=True)'"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
