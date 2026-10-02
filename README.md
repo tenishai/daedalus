@@ -14,7 +14,7 @@ gateway still runs.
 - [liminal](https://github.com/tenishai/liminal) — tool gateway (optional)
 - cabal — orchestration (optional)
 - **daedalus** — agent construction kit (this repo)
-- kaminos — the builder GUI (companion, not yet released)
+- a visual builder GUI — a companion project, in development
 
 > Status: 0.4.0, released. Bundle loader, runtime, CLI/A2A/Slack transports,
 > approvals and enforcement have all shipped. Design rationale:
@@ -23,20 +23,35 @@ gateway still runs.
 
 ## Quickstart
 
-Python 3.11+.
+Python 3.11+ and git. On Debian or Ubuntu, install the venv module first:
+`sudo apt install python3-venv git`.
 
 ```bash
+git clone https://github.com/tenishai/daedalus.git
+cd daedalus
+python3 -m venv .venv && . .venv/bin/activate
 pip install -e .                    # not on PyPI yet
-export ANTHROPIC_API_KEY=...        # or any provider litellm supports
+```
+
+Point it at a model. For any OpenAI-compatible endpoint (vLLM, ollama, a hosted gateway):
+
+```bash
+export OPENAI_API_BASE=http://localhost:8000/v1   # your endpoint
+export OPENAI_API_KEY=...                         # any non-empty string if the server ignores it
+export DAEDALUS_MODEL=openai/<model-name>         # the name the endpoint serves
 daedalus create prudence            # scaffolds the bundle below
 daedalus chat ./prudence            # talk to it
 ```
 
+For Anthropic, set `ANTHROPIC_API_KEY` instead of the three variables above; the default
+model is `anthropic/claude-sonnet-4-5`. Any provider litellm supports works the same way.
+
 `daedalus create` writes an agent.yaml whose model reads
 `${DAEDALUS_MODEL:-anthropic/claude-sonnet-4-5}`, so `export DAEDALUS_MODEL=…`
 switches provider without editing the bundle. Any litellm route string works,
-including a local endpoint via `api_base`. The other commands are
-`daedalus run` (serve the declared transports), `version` and `schema`.
+including a local endpoint via `api_base` in agent.yaml. The other commands are
+`daedalus run` (serve the declared transports, or `-m "text"` for one reply),
+`version` and `schema`.
 
 ## The idea in one file tree
 
@@ -53,7 +68,7 @@ daedalus run  ./prudence     # serve its declared transports
 ```
 
 Same bundle, three runtimes — a chat REPL, an A2A endpoint, a Slack
-presence. The GUI (kaminos) edits the same files. No code generation,
+presence. A companion GUI is planned to edit the same files. No code generation,
 ever: the bundle is the source of truth, diffable and PR-reviewable.
 
 ## License
