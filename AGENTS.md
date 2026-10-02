@@ -50,6 +50,9 @@ right.
   failure instead of a skip (`conftest.py`) — but it is `workflow_dispatch`-only
   and clones techne without a token, so it can only run once `tenishai/techne` is public
   (agora#27). Until then, the 92 tests are covered locally, not in CI on every PR.
+- **The distribution is `tenishai-daedalus`; the import package and the CLI are `daedalus`.**
+  Anything that looks the package up by distribution name (`pip show`, `importlib.metadata`,
+  an extras install string) needs the long name.
 - **The version lives in `src/daedalus/__init__.py`**, not in `pyproject.toml`
   (`[tool.hatch.version]` points at it). Bumping pyproject silently does nothing.
 - **`docs/bundle.schema.json` is drift-pinned** to `AgentSpec` by

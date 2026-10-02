@@ -1,0 +1,25 @@
+# Dependabot version updates, grouped so a week's bumps land as one PR per
+# ecosystem rather than one per package.
+#
+# Dependabot PRs are same-repo PRs, so test.yml's trusted-path guard runs them like a
+# human contributor's PR. While the self-hosted runner is still attached, that means a
+# dependency bump's install-time code runs there before anyone reviews it; the runner
+# is stopped when the repo goes public, after which every PR runs on hosted runners.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

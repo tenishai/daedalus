@@ -100,7 +100,7 @@ tools:
     - files.read
 
 memory:
-  personal: techne                      # techne | none  (extra: daedalus[techne])
+  personal: techne                      # techne | none  (extra: tenishai-daedalus[techne])
                                         # recalls 5 entries on the prompt, or on the
                                         # task's daedalus_recall metadata (run --recall)
   team: none                            # git-backed shared store, later
@@ -235,8 +235,8 @@ class Transport(Protocol):           # start/stop; delivers Tasks to the handler
 
 Default implementations ship in-tree (in-memory/no-op/SQLite). Real backends
 arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
-`daedalus.transports`): `daedalus[techne]`, `daedalus[liminal]`,
-`daedalus[slack]`. Third parties add backends without touching core.
+`daedalus.transports`): `tenishai-daedalus[techne]`, `tenishai-daedalus[liminal]`,
+`tenishai-daedalus[slack]`. Third parties add backends without touching core.
 
 ### 2.3 LLM invocation
 

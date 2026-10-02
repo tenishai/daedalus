@@ -11,7 +11,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  # SELF-HOSTED on mash1 (2026-09-23): hosted Actions stopped on a billing failure.
+  # SELF-HOSTED (2026-09-23): hosted Actions stopped on a billing failure, so this job runs
+  # on a self-hosted runner pool labelled daedalus-ci.
   # The `if:` below is DEFENCE IN DEPTH for honest fork PRs, not a security boundary:
   # for `pull_request` GitHub runs the PR's own copy of this file, so a fork can
   # delete the guard (see the ATTACKER-EDITABLE block in tenishai/techne's test.yml).
@@ -32,7 +33,7 @@ jobs:
           - python-version: "3.12"
             extras: dev,claude-code
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The runner CONTAINER persists between jobs (same machine name across legs), so
       # a shared interpreter plus a bare `pip install` would let one job's packages
       # satisfy the next job's imports (liminal#103 r1). A fresh venv per job, first on
@@ -68,12 +69,12 @@ jobs:
         python-version: ["3.12"]
     steps:
       - name: Checkout daedalus
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: daedalus
 
       - name: Checkout techne
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: tenishai/techne
           path: techne
@@ -111,10 +112,73 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[dev]
       - run: ruff check src tests docker conftest.py
       - run: pytest -q
+
+  # ---- dco: every commit a PR adds is signed off (CONTRIBUTING.md) -------------
+  # Hosted runner, every pull request including forks. It checks out nothing and runs
+  # no code from the PR: it fetches the two SHAs and reads commit metadata, with
+  # GIT_NO_REPLACE_OBJECTS set so a refs/replace entry cannot change what it reads.
+  #
+  # Dependabot exemption: a commit authored exactly as
+  # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>` is skipped,
+  # because Dependabot signs off as `dependabot[bot] <support@github.com>`, which never
+  # matches its noreply author address. The skip applies only when the PR's head is this
+  # repo: anyone who can push a branch here is already trusted, whereas a fork can forge
+  # any author string, so a fork claiming to be dependabot still has to sign off.
+  dco:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (metadata only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Full history at checkout, so the check below needs no authenticated
+          # fetch (credentials are not persisted, and the repo may be private).
+          fetch-depth: 0
+          persist-credentials: false
+      - name: DCO sign-off check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          export GIT_NO_REPLACE_OBJECTS=1
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            git cat-file -e "$sha^{commit}" || { echo "::error::DCO: $sha is not in the checkout"; exit 1; }
+          done
+          commits=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ -z "$commits" ]; then
+            echo "::error::DCO: no non-merge commits in $BASE_SHA..$HEAD_SHA, so nothing was checked"
+            exit 1
+          fi
+          bad=0
+          skipped=0
+          for c in $commits; do
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            if [ "$HEAD_REPO" = "$THIS_REPO" ] && [ "$author" = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>" ]; then
+              echo "DCO: skipping ${c:0:12} as a bot commit ($author)"
+              skipped=$((skipped + 1))
+              continue
+            fi
+            # no `grep -q`: an early exit SIGPIPEs `tr`, and pipefail reads that as a miss
+            if ! git log -1 --format=%B "$c" | tr -d '\r' | grep -Fxi -- "Signed-off-by: $author" >/dev/null; then
+              echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'. To fix existing commits, see 'Developer Certificate of Origin' in CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors$( [ "$skipped" -gt 0 ] && printf ' (%s skipped as bot commits)' "$skipped" )"

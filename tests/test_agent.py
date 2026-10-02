@@ -146,7 +146,7 @@ def test_a2a_transport_wires_with_card_and_options(tmp_path):
     try:
         transports = agent.transports()
     except Exception as exc:
-        assert "daedalus[a2a]" in str(exc)
+        assert "tenishai-daedalus[a2a]" in str(exc)
         return
     assert transports[0].port == 9911
     card = transports[0].card

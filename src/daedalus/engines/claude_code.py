@@ -172,7 +172,7 @@ class ClaudeCodeEngine:
         except ImportError:
             return task.reply(
                 "The Claude Code engine needs the claude-code extra: "
-                "pip install 'daedalus[claude-code]'.",
+                "pip install 'tenishai-daedalus[claude-code]'.",
                 state=TaskState.FAILED,
                 reason=ReasonCode.ESCALATION,
             )
