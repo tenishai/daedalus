@@ -179,10 +179,17 @@ async def test_escalation_skipped_when_route_is_same_channel():
     assert len([p for p in api.posts if p[2] is None]) == 0
 
 
+OPS = frozenset({"U-operator"})
+ANYONE = frozenset({"U-someone"})  # the reactor FakeApi gives plain-name script entries
+
+
 async def test_wire_approver_upgrades_denyall_but_respects_explicit():
-    transport, api, handler = make()
+    api = FakeApi()
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=api, approvers=OPS)
+    handler = EchoHandler()
     transport._wire_approver(handler)
     assert isinstance(handler.approver, SlackReactionApprover)
+    assert handler.approver.approvers == OPS
 
     class Custom:
         async def approve(self, action, plan):
@@ -196,16 +203,16 @@ async def test_wire_approver_upgrades_denyall_but_respects_explicit():
 
 async def test_reaction_approver_approves_denies_and_times_out():
     api = FakeApi(reactions_script=[[], ["white_check_mark"]])
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=ANYONE)
     assert await approver.approve("files.write", {"tool": "files.write"}) is True
     assert "approval required" in api.posts[0][1]
 
     api = FakeApi(reactions_script=[["x"]])
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=ANYONE)
     assert await approver.approve("files.write", {}) is False
 
     api = FakeApi()  # nobody ever reacts
-    approver = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01, approvers=ANYONE)
     assert await approver.approve("files.write", {}) is False  # silence is denial
 
 
@@ -223,7 +230,7 @@ async def test_approval_prompt_is_threaded_with_the_work():
             assert await self.approver.approve("files.read", {"tool": "files.read"})
             return task.reply("read it")
 
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=ANYONE)
     transport, api2, _ = make(api=api)
     handler = GatedHandler(approver)
     await transport.handle_event(event("read the file", ts="95.0"), handler)
@@ -233,7 +240,7 @@ async def test_approval_prompt_is_threaded_with_the_work():
 
 async def test_deny_beats_approve_when_both_present():
     api = FakeApi(reactions_script=[["white_check_mark", "x"]])
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=ANYONE)
     assert await approver.approve("files.write", {}) is False
 
 
@@ -956,10 +963,11 @@ async def test_a_non_empty_allowlist_is_still_an_allowlist():
 
 
 async def test_an_approval_with_nowhere_to_ask_is_a_denial_not_a_crash(caplog):
-    """An open transport has no primary channel, and the approver is wired
-    from it before any event arrives -- so a tier-2 gate tripped by a task
-    from ANOTHER transport (a2a, cli) has no thread to ask in. Deny and say
-    why; posting to an empty channel id would raise out of the agent loop."""
+    """An approver built with an empty channel (the public class can be built
+    that way; the transport does not wire one on an open transport) has no
+    thread to ask in when a tier-2 gate is tripped by a task from ANOTHER
+    transport (a2a, cli). Deny and say why; posting to an empty channel id
+    would raise out of the agent loop."""
     api = FakeApi()
     approver = SlackReactionApprover(api, "", timeout=0.01, poll=0.001)
     with caplog.at_level(logging.INFO):
@@ -969,15 +977,17 @@ async def test_an_approval_with_nowhere_to_ask_is_a_denial_not_a_crash(caplog):
 
 
 async def test_an_open_transport_keeps_tier2_closed(caplog):
-    """No allowlist means any channel a workspace member invites the app to,
-    and until #53 anyone who can react there would approve. So the DenyAll
-    default stays, even after an event arrives from an unlisted channel."""
+    """No channel allowlist means any channel a workspace member invites the app
+    to, and the approver follows the latest event's channel. So the DenyAll
+    default stays, even with `approvers` configured and even after an event
+    arrives from an unlisted channel."""
     transport, api, handler = make_open()
+    transport.approvers = OPS
     handler.approver = DenyAll()
     with caplog.at_level(logging.WARNING):
         transport._wire_approver(handler)
     assert isinstance(handler.approver, DenyAll)
-    assert "#53" in caplog.text
+    assert "open" in caplog.text
     await transport.handle_event(
         event("<@UBOT> hello", ts="44.1", channel=ANY_CH, channel_type="channel"),
         handler,
@@ -988,7 +998,7 @@ async def test_an_open_transport_keeps_tier2_closed(caplog):
 async def test_a_listed_transport_still_wires_reaction_approvals():
     api = FakeApi()
     transport = SlackTransport("C1", channels=["C1", "C2"], bot_token="x",
-                               app_token="y", api=api)
+                               app_token="y", api=api, approvers=OPS)
     handler = EchoHandler()
     handler.approver = DenyAll()
     transport._wire_approver(handler)
@@ -1088,7 +1098,7 @@ def test_runner_folds_every_slack_block_into_one_transport(tmp_path, monkeypatch
     slack = [t for t in transports if isinstance(t, SlackTransport)]
     assert len(slack) == 1
     assert slack[0].channels == ["C0MAIN", "C0SECOND"]
-    assert slack[0].channel == "C0MAIN"  # primary: approver + escalation home
+    assert slack[0].channel == "C0MAIN"  # primary: seeds the approver's channel
 
 # --- markdown tables -> monospace blocks (2026-09-05) -------------------------
 
@@ -1169,24 +1179,84 @@ async def test_an_allowlisted_agent_is_not_approved_by_a_stranger_alone():
     assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
 
 
-async def test_with_no_allowlist_any_reactor_still_approves():
-    """The default is unchanged on purpose, and it is NOT the safe one (#53).
+async def test_with_no_approvers_configured_tier2_is_denied(caplog):
+    """#53: absent and empty both fail closed, and nobody is asked to react to
+    a plan that cannot be approved. The control (same script, approver listed)
+    approves, so the False below means "no approvers" and not "nothing happened"."""
+    script = [[("white_check_mark", ["U-anyone"])]]
+    control = SlackReactionApprover(
+        FakeApi(reactions_script=list(script)), CH, timeout=5, poll=0.01,
+        approvers=frozenset({"U-anyone"}),
+    )
+    assert await control.approve("dangerous_tool", {"plan": "x"}) is True
 
-    Refusing every approval on an agent whose operator has not yet listed
-    themselves would take tier-2 tools offline in a running room with no
-    announcement. Pinned so the default cannot drift silently either way.
-    """
-    api = FakeApi(reactions_script=[[("white_check_mark", ["U-anyone"])]])
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    for approvers in (None, frozenset()):
+        api = FakeApi(reactions_script=list(script))
+        approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=approvers)
+        with caplog.at_level(logging.WARNING):
+            assert await approver.approve("dangerous_tool", {"plan": "x"}) is False
+        assert api.posts == []
+        assert "no approvers configured" in caplog.text
 
-    assert await approver.approve("dangerous_tool", {"plan": "x"}) is True
+
+async def test_the_requester_cannot_approve_their_own_request(caplog):
+    """#53: a listed approver who made the request is ignored; a second listed
+    approver still counts. Same script with a different requester approves."""
+    approvers = frozenset({"U-operator", "U-second"})
+    script = [[("white_check_mark", ["U-operator"])]]
+
+    other = SlackReactionApprover(
+        FakeApi(reactions_script=list(script)), CH, timeout=5, poll=0.01, approvers=approvers
+    )
+    other.requester = "U-second"
+    assert await other.approve("deploy", {}) is True
+
+    api = FakeApi(reactions_script=script * 4)
+    own = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01, approvers=approvers)
+    own.requester = "U-operator"
+    with caplog.at_level(logging.INFO):
+        assert await own.approve("deploy", {}) is False
+    assert "who made the request" in caplog.text
+    assert "APPROVED" not in caplog.text
+
+    api = FakeApi(reactions_script=[[
+        ("white_check_mark", ["U-operator"]), ("white_check_mark", ["U-second"])
+    ]])
+    both = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=approvers)
+    both.requester = "U-operator"
+    assert await both.approve("deploy", {}) is True
+
+
+async def test_the_transport_tells_the_approver_who_asked():
+    """The requester is the Slack user who sent the message, set per event."""
+    api = FakeApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api, approvers=OPS)
+    handler = EchoHandler()
+    transport._wire_approver(handler)
+    await transport.handle_event(event("hi", ts="500.1", user="U0ASKER"), handler)
+    assert handler.approver.requester == "U0ASKER"
+
+
+async def test_a_transport_without_approvers_leaves_tier2_denied(caplog):
+    """#53 end to end through the wiring: a channel allowlist alone no longer
+    lets any channel member approve."""
+    for approvers in (None, []):
+        api = FakeApi()
+        transport = SlackTransport(
+            CH, bot_token="x", app_token="y", api=api, approvers=approvers
+        )
+        handler = EchoHandler()
+        with caplog.at_level(logging.WARNING):
+            transport._wire_approver(handler)
+        assert isinstance(handler.approver, DenyAll)
+        assert "no `approvers`" in caplog.text
 
 
 async def test_every_decision_names_its_approver_in_the_log(caplog):
     """The log is what makes #53 answerable: an operator can read the real
     approver set off a running agent instead of guessing at one."""
     api = FakeApi(reactions_script=[[("white_check_mark", ["U-operator"])]])
-    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=5, poll=0.01, approvers=OPS)
 
     with caplog.at_level(logging.INFO):
         assert await approver.approve("deploy", {"plan": "x"}) is True
@@ -1200,7 +1270,7 @@ async def test_a_silent_timeout_is_recorded_as_a_denial_with_its_reason(caplog):
     """`silence is denial` is right, but a requester could not tell a
     deliberate deny from an operator who never saw the message."""
     api = FakeApi(reactions_script=[])
-    approver = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01)
+    approver = SlackReactionApprover(api, CH, timeout=0.05, poll=0.01, approvers=OPS)
 
     with caplog.at_level(logging.INFO):
         assert await approver.approve("deploy", {"plan": "x"}) is False
@@ -1289,7 +1359,7 @@ async def test_user_turn_carries_the_slack_sender_id():
 
 
 def test_a_named_but_empty_channel_fails_boot(tmp_path, monkeypatch):
-    """`channel: ${SLACK_CHANNEL}` with the variable unset must not read as
+    """`channel: ${SLACK_CHANNEL}` with the variable set but empty must not read as
     "every channel": omitting the key opens the transport, an empty value is
     a missing config value."""
     import sys
@@ -1313,3 +1383,70 @@ def test_a_named_but_empty_channel_fails_boot(tmp_path, monkeypatch):
     agent = Agent(Bundle.load(tmp_path), llm=ScriptedLLM("done"), tools=FakeTools([]))
     with pytest.raises(BundleError, match="value is empty"):
         agent.transports()
+
+
+def _slack_bundle(tmp_path, block):
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\n"
+        f"transports:\n{block}"
+        "tools:\n  provider: none\n  allow: []\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    from daedalus.bundle import Bundle
+
+    return Bundle.load(tmp_path)
+
+
+def test_bundle_approvers_reach_the_slack_transport_as_a_union(tmp_path, monkeypatch):
+    """#53: `approvers` on each slack block is unioned into the one transport."""
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    bundle = _slack_bundle(
+        tmp_path,
+        "- kind: slack\n  channel: C0MAIN\n  approvers: [U0AAA, U0BBB]\n"
+        "- kind: slack\n  channel: C0TWO\n  approvers: [U0BBB, U0CCC]\n",
+    )
+    agent = Agent(bundle, llm=ScriptedLLM("done"), tools=FakeTools([]))
+    (slack,) = [t for t in agent.transports() if isinstance(t, SlackTransport)]
+    assert slack.approvers == {"U0AAA", "U0BBB", "U0CCC"}
+
+
+def test_a_slack_block_without_approvers_builds_a_transport_that_denies(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from daedalus.agent import Agent
+    from tests.fakes import FakeTools, ScriptedLLM
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", types.ModuleType("slack_sdk"))
+    bundle = _slack_bundle(tmp_path, "- kind: slack\n  channel: C0MAIN\n")
+    agent = Agent(bundle, llm=ScriptedLLM("done"), tools=FakeTools([]))
+    (slack,) = [t for t in agent.transports() if isinstance(t, SlackTransport)]
+    assert slack.approvers == frozenset()
+    handler = EchoHandler()
+    slack._api = FakeApi()
+    slack._wire_approver(handler)
+    assert isinstance(handler.approver, DenyAll)
+
+
+def test_bundle_validates_the_approvers_field(tmp_path):
+    import pytest
+
+    ok = _slack_bundle(
+        tmp_path, "- kind: slack\n  channel: C0MAIN\n  approvers: [U0AAA, W0BBB]\n"
+    )
+    assert ok.spec.transports[0].options()["approvers"] == ["U0AAA", "W0BBB"]
+    empty = _slack_bundle(tmp_path, "- kind: slack\n  approvers: []\n")  # legal: same as absent
+    assert empty.spec.transports[0].options()["approvers"] == []
+
+    for bad in ("U0AAA", "[U0AAA, '']", "['#ops']", "[u0aaa]", "[123]", "[[U0AAA]]"):
+        with pytest.raises(Exception, match="approvers"):
+            _slack_bundle(tmp_path, f"- kind: slack\n  approvers: {bad}\n")
+    # other transports' extras are untouched
+    _slack_bundle(tmp_path, "- kind: a2a\n  approvers: whatever\n")

@@ -53,9 +53,11 @@ daedalus is the runtime agents run in. In scope:
   it. Without an `auth` block the POST surfaces are open by design, as are the
   GET endpoints (card, health, events);
 - the Slack transport and other connectors: anything that lets someone other
-  than an intended approver approve an action. The approver allowlist isn't
-  wired from configuration yet (daedalus#53), so "anyone who can react can
-  approve" is a known gap, not a new report.
+  than an intended approver approve an action. Tier-2 approvals need an
+  `approvers` list (Slack user ids) and a `channel` allowlist on the Slack
+  transport block; without them every tier-2 action is denied, and the
+  person who made a request can never approve it. Reports that get around
+  either rule are in scope.
 
 **Out of scope:** vulnerabilities in third-party dependencies (please report
 those upstream, and tell us if we ship an affected version), and problems that

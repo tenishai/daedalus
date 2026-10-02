@@ -76,7 +76,10 @@ transports:
   - kind: slack                         # no channel = every channel the app
                                         # is invited to (see 2.4); name one
                                         # with `channel: C012ABC` to pin an
-                                        # allowlist instead
+                                        # allowlist instead. Tier-2 approvals
+                                        # need BOTH `channel` and
+                                        # `approvers: [U012ABC]`; without them
+                                        # every tier-2 action is denied
   - kind: a2a
     port: 9200
   - kind: cli                           # always available for `daedalus chat`
@@ -274,12 +277,21 @@ back. Persona constant, transport variable:
   tagged-only rule still holds (only an `app_mention`, or a plain message
   that mentions this bot, is answered), DMs keep full delivery, and
   bots/subtypes/duplicates are still dropped. Widening *where* does change
-  who could approve: tier-2 reaction approvals follow the channel of the
-  latest event, and until #53 wires an approver allowlist anyone who can
-  react there approves. So an open transport keeps tier-2 **closed**
-  (`DenyAll`) and says so at boot; a listed transport wires reaction
-  approvals as before (2026-09-24). A `channel` key whose value is empty
-  (an unset `${VAR}`) fails boot rather than reading as open. Mixed blocks
+  where an approval could be asked for: tier-2 reaction approvals follow the
+  channel of the latest event. So an open transport keeps tier-2 **closed**
+  (`DenyAll`) and says so at boot (2026-09-24). Who may approve is a second,
+  separate setting: `approvers: [U012ABC, ...]` (Slack user ids) on a
+  `kind: slack` block, unioned across blocks. Reaction approvals are wired
+  only when the transport has both a `channel` allowlist and `approvers`;
+  with either missing, tier-2 stays `DenyAll` and boot says which. The
+  requester never approves their own request, even when listed, so a gate
+  needs a second person; an empty `approvers: []` is the same as none.
+  Denials (a ❌) count from anyone in the channel. DMs are admitted without
+  regard to the channel allowlist, and the approver retargets to the DM
+  where only the requester is present, so a gate there is denied in practice.
+  A `channel` key whose value is empty
+  (a `${VAR}` set but empty; an unset one already fails in `Bundle.load`)
+  fails boot rather than reading as open. Mixed blocks
   resolve open. Tier-3 escalations go wherever `approvals.escalation.route`
   says (`slack:<channel>` for Slack), never to the first named channel.
 
@@ -311,9 +323,11 @@ FastAPI stays at the edge: nothing below a transport imports it.
    `input-required` until answered.
 
 **Approver routing is process-wide, by design.** The approver is an agent
-collaborator, not a transport property: when a Slack transport is serving,
-it upgrades a still-default (DenyAll) approver to reaction approvals — so a
-gated call arriving via a2a or cli also posts its plan to Slack.
+collaborator, not a transport property: when a Slack transport is serving
+**and has both a `channel` allowlist and `approvers`** (§2.4), it upgrades a
+still-default (DenyAll) approver to reaction approvals — so a gated call
+arriving via a2a or cli also posts its plan to Slack. A bare `- kind: slack`
+block, or one without `approvers`, leaves tier-2 denied.
 *Approvals flow to where the humans are.* An explicitly wired approver is
 always respected; headless agents with no human-bearing transport keep
 DenyAll and fail closed. (Decided 2026-07-06 after the kaminos canvas

@@ -2,8 +2,11 @@
 # Create at api.slack.com/apps -> Create New App -> From a manifest.
 # After creating: generate an App-Level Token (connections:write) for
 # SLACK_APP_TOKEN, install to the workspace for SLACK_BOT_TOKEN, and invite
-# the bot to your channel. Inviting it is the whole setup — a bare
-# `- kind: slack` block in agent.yaml answers wherever the app is a member.
+# the bot to your channel. Inviting it is the whole setup for ANSWERING — a
+# bare `- kind: slack` block in agent.yaml answers wherever the app is a
+# member. It does not enable tier-2 approvals: those are DENIED unless the
+# block names both a `channel:` and `approvers: [U012ABC]` (Slack user ids;
+# the person who made the request can never approve it themselves).
 # Add `channel: C012ABC` lines only when you want the narrower thing: an
 # allowlist that holds even inside channels the app has been invited to.
 # Public AND private channel grants are both included below (channels:

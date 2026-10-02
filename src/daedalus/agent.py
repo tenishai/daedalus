@@ -1076,6 +1076,7 @@ class Agent:
         slack_channels: list[str] = []
         slack_asked = False  # any slack block at all
         slack_open = False  # a block that named no channel
+        slack_approvers: list[str] = []  # union of every block's `approvers`
         for spec in self.bundle.spec.transports:
             if spec.kind == "cli":
                 built.append(CliTransport())
@@ -1119,7 +1120,8 @@ class Agent:
                 channel = options.get("channel")
                 if "channel" in options and not channel:
                     # Named but empty -- typically `channel: ${SLACK_CHANNEL}`
-                    # with the variable unset. Omitting the key asks for every
+                    # with the variable set but empty (an unset one already fails in
+                    # Bundle.load). Omitting the key asks for every
                     # channel; an empty value is a missing config value, and
                     # reading it as "open" would hand the agent its widest
                     # reach on a typo. Fail boot, as a missing channel did
@@ -1129,6 +1131,7 @@ class Agent:
                         "set it, or omit the key to answer in every invited channel"
                     )
                 slack_asked = True
+                slack_approvers.extend(options.get("approvers") or [])
                 # `channel` IS OPTIONAL (2026-09-23 operator ruling). A block
                 # that names none asks for every channel the app has been
                 # invited to -- inviting the app is already the human act
@@ -1157,12 +1160,14 @@ class Agent:
             # reading would silently ignore the block that asked for more.
             # The first named channel is still passed as `channel`, but on an
             # open transport nothing reads it: it only seeds the tier-2
-            # approver, which an open transport does not wire.
+            # approver, which an open transport does not wire. `approvers` is
+            # the union across blocks (the bundle validates its shape).
             built.append(
                 SlackTransport(
                     slack_channels[0] if slack_channels else "",
                     channels=[] if slack_open else slack_channels,
                     escalation_route=self.bundle.spec.approvals.escalation.route,
+                    approvers=slack_approvers,
                 )
             )
         return built
