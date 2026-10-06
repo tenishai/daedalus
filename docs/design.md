@@ -285,7 +285,10 @@ back. Persona constant, transport variable:
   channel). `SLACK_WAKE_MODE` in the environment overrides the bundle, which
   is how a room sets it per agent. The mode is stamped on each Slack-born
   task and becomes a prompt notice, so the model knows which messages reach
-  it instead of guessing. DMs keep full delivery in every mode, and
+  it instead of guessing (it cannot see the app's event subscriptions, so the
+  manifest has to match the mode). Followed threads live in memory: after a
+  restart, a `thread`-mode agent needs a fresh mention in an old thread. DMs
+  keep full delivery in every mode, and
   bots/subtypes/duplicates are still dropped. A reply is a streamed message
   (`chat.startStream`): the agent's tool calls and recalls appear as progress
   lines under it while it works, and it becomes the answer in place; where

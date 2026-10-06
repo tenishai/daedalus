@@ -1844,6 +1844,42 @@ async def test_a_stream_that_dies_mid_way_still_lands_the_reply():
     assert api.posts[-1][2] == "72.0"
 
 
+async def test_a_failed_progress_line_stops_progress_but_the_reply_still_finishes_in_the_stream():
+    class NoProgressApi(StreamingApi):
+        async def append_progress(self, channel, ts, line):
+            raise RuntimeError("appendStream refused")
+
+    api = NoProgressApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
+    await transport.handle_event(event("hi", ts="74.0"), BusyHandler())
+    assert api.finished == [("stream-1", "echo: hi")]  # still the stream, not a plain post
+    assert api.posts == []
+
+
+async def test_progress_collapses_only_back_to_back_repeats():
+    class AlternatingHandler(BusyHandler):
+        async def handle_task(self, task):
+            from daedalus.events import current_context
+
+            token = current_context.set(task.context_id)
+            try:
+                for name in ("skills.load", "memory.search", "skills.load"):
+                    self.events.publish({"type": "tool_call", "name": name, "arguments": {}})
+            finally:
+                current_context.reset(token)
+            await asyncio.sleep(0)
+            return await EchoHandler.handle_task(self, task)
+
+    api = StreamingApi()
+    transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
+    await transport.handle_event(event("hi", ts="75.0"), AlternatingHandler())
+    assert [line for _, line in api.progress] == [
+        "Using skills.load",
+        "Using memory.search",
+        "Using skills.load",
+    ]
+
+
 async def test_a_handler_without_an_event_bus_streams_without_progress_lines():
     api = StreamingApi()
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)

@@ -83,9 +83,10 @@ _WAKE_NOTICES = {
     ),
     WAKE_THREAD: (
         "You are answering in Slack. In a thread you were @-mentioned in at the top, "
-        "or that you started, every reply reaches you without a mention. Elsewhere "
-        "in a channel only a message that @-mentions you reaches you. Direct "
-        "messages reach you in full."
+        "every reply reaches you without a mention, until you restart: after a "
+        "restart, a thread from before needs a fresh mention. Elsewhere in a "
+        "channel only a message that @-mentions you reaches you. Direct messages "
+        "reach you in full."
     ),
     WAKE_CHANNEL: (
         "You are answering in Slack and you receive every message in this channel, "
@@ -404,7 +405,9 @@ class SlackApi:
     # A streamed message shows progress lines while the agent works and then
     # becomes the answer, in place. The transport treats every one of these as
     # best-effort: a failure to start falls back to the placeholder message
-    # path, and a failure mid-stream still lands the reply as a plain post.
+    # path; a failed progress line just stops the progress lines, and the reply
+    # still finishes in the stream; only a failure to finish the stream lands
+    # the reply as a plain post.
 
     async def start_stream(
         self, channel: str, thread_ts: str | None, user: str | None, team: str | None
@@ -870,8 +873,10 @@ class SlackTransport:
         thread = event.get("thread_ts") or ts
         if thread == ts and self._addressed_to_us(event):
             # The root of a new thread, asked of us: in `thread` mode its
-            # replies reach us from here on. Recorded in every mode so a
-            # mode change at the next boot has nothing to relearn.
+            # replies reach us from here on. `_owned` lives in memory only, so
+            # a restart forgets every thread: until someone mentions the agent
+            # again, replies in a thread from before the restart are dropped.
+            # The thread-mode prompt notice says so.
             self._owned[(channel, thread)] = True
             while len(self._owned) > _SEEN_CAP:
                 self._owned.popitem(last=False)
@@ -1042,7 +1047,8 @@ class SlackTransport:
         streaming message until `done` is set and the queue is drained.
         Follows ONLY events stamped with this task's context (EventBus stamps
         them), so two threads working at once never show each other's tool
-        calls. Repeated lines collapse into one."""
+        calls. A line identical to the one just before it is skipped; the same
+        line can still appear again later."""
         mine = task.context_id or task.id
         last: str | None = None
         try:

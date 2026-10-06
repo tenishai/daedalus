@@ -20,7 +20,10 @@
 # `channel` need message.channels / message.groups subscribed below, which
 # this manifest does; an app created from a mention-only manifest never
 # receives the unmentioned messages, whatever the bundle says. The runtime
-# enforces the mode either way and tells the model which messages reach it.
+# enforces the mode and tells the model which mode it is in; it cannot see the
+# app's subscriptions, so on a mention-only app a `thread` or `channel` notice
+# promises messages that never arrive. In `thread` mode the followed threads
+# are held in memory, so a restart forgets them until the next mention.
 # Replies stream: a working message shows each tool call as a progress line
 # and becomes the answer in place (chat.startStream, slack-sdk >= 3.40); an
 # app whose workspace refuses streams falls back to the hourglass placeholder.
