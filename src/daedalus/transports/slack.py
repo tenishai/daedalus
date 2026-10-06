@@ -83,10 +83,11 @@ _WAKE_NOTICES = {
     ),
     WAKE_THREAD: (
         "You are answering in Slack. In a thread you were @-mentioned in at the top, "
-        "every reply reaches you without a mention, until you restart: after a "
-        "restart, a thread from before needs a fresh mention. Elsewhere in a "
-        "channel only a message that @-mentions you reaches you. Direct messages "
-        "reach you in full."
+        "every reply reaches you without a mention. A restart forgets those "
+        "threads: after one, a reply in an old thread reaches you only if it "
+        "@-mentions you, and that does not resume following it; a new thread "
+        "started with a mention does. Elsewhere in a channel only a message that "
+        "@-mentions you reaches you. Direct messages reach you in full."
     ),
     WAKE_CHANNEL: (
         "You are answering in Slack and you receive every message in this channel, "
@@ -874,9 +875,10 @@ class SlackTransport:
         if thread == ts and self._addressed_to_us(event):
             # The root of a new thread, asked of us: in `thread` mode its
             # replies reach us from here on. `_owned` lives in memory only, so
-            # a restart forgets every thread: until someone mentions the agent
-            # again, replies in a thread from before the restart are dropped.
-            # The thread-mode prompt notice says so.
+            # a restart forgets every thread. A mention in an old thread is
+            # answered but adopts nothing (it is not a root), so only a new
+            # thread started with a mention is followed again. The thread-mode
+            # prompt notice says so.
             self._owned[(channel, thread)] = True
             while len(self._owned) > _SEEN_CAP:
                 self._owned.popitem(last=False)

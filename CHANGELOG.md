@@ -19,8 +19,9 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   tells the truth when asked whether it must be mentioned. Mixed `wake` values across
   blocks fail the bundle. The `thread` and `channel` modes need `message.channels` /
   `message.groups` subscribed in the Slack app manifest. In `thread` mode the
-  followed threads are kept in memory, so after a restart an old thread needs a
-  fresh mention.
+  followed threads are kept in memory, so a restart forgets them: an old thread
+  then needs a mention on every message, and a new thread started with a mention
+  is followed again.
 - **Slack replies stream, with progress.** The working message is a `chat.startStream`
   stream: each tool call and memory recall the agent makes appears as a progress line
   under it, and the answer lands in the same message. Events are stamped with their

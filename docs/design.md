@@ -287,7 +287,8 @@ back. Persona constant, transport variable:
   task and becomes a prompt notice, so the model knows which messages reach
   it instead of guessing (it cannot see the app's event subscriptions, so the
   manifest has to match the mode). Followed threads live in memory: after a
-  restart, a `thread`-mode agent needs a fresh mention in an old thread. DMs
+  restart, a `thread`-mode agent answers an old thread only when mentioned,
+  and only a new thread started with a mention is followed again. DMs
   keep full delivery in every mode, and
   bots/subtypes/duplicates are still dropped. A reply is a streamed message
   (`chat.startStream`): the agent's tool calls and recalls appear as progress
