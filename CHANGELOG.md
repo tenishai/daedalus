@@ -12,7 +12,7 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 - **Slack wake modes.** A `kind: slack` block takes `wake: mention | thread | channel`
   (`SLACK_WAKE_MODE` in the environment overrides it). `mention` is the default and
-  the previous behaviour. `thread` answers a mention and then every reply in a thread
+  answers the same messages as before. `thread` answers a mention and then every reply in a thread
   the agent was asked in at the top, without re-tagging; a mention deep in someone
   else's thread is answered and adopts nothing. `channel` answers every message. The
   mode rides on each Slack task as metadata and becomes a prompt notice, so the agent
@@ -23,8 +23,8 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   then needs a mention on every message, and a new thread started with a mention
   is followed again.
 - **Slack replies stream, with progress.** The working message is a `chat.startStream`
-  stream: each tool call and memory recall the agent makes appears as a progress line
-  under it, and the answer lands in the same message. Events are stamped with their
+  stream: each tool call, and each memory recall that finds something, appears as a
+  progress line under it (a repeat straight after the same line is not shown again), and the answer lands in the same message. Events are stamped with their
   task's context id, so two threads working at once never show each other's steps. A
   workspace that refuses the stream gets the hourglass placeholder as before. The
   `slack` extra now needs slack-sdk 3.40 or later.
