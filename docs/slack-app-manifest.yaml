@@ -12,6 +12,18 @@
 # transport-wide (unioned across blocks), not per channel).
 # Add `channel: C012ABC` lines only when you want the narrower thing: an
 # allowlist that holds even inside channels the app has been invited to.
+#
+# WHAT WAKES THE AGENT IN A CHANNEL is `wake:` on the block (or the
+# SLACK_WAKE_MODE environment variable, which wins): `mention` (the default:
+# only an @-mention), `thread` (a mention, then every reply in a thread the
+# agent was asked in at the top), or `channel` (every message). `thread` and
+# `channel` need message.channels / message.groups subscribed below, which
+# this manifest does; an app created from a mention-only manifest never
+# receives the unmentioned messages, whatever the bundle says. The runtime
+# enforces the mode either way and tells the model which messages reach it.
+# Replies stream: a working message shows each tool call as a progress line
+# and becomes the answer in place (chat.startStream, slack-sdk >= 3.40); an
+# app whose workspace refuses streams falls back to the hourglass placeholder.
 # Public AND private channel grants are both included below (channels:
 # history + groups:history, message.channels + message.groups) rather than
 # one swapped in for the other: a bundle can't know ahead of time which

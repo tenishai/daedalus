@@ -10,6 +10,22 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Added
 
+- **Slack wake modes.** A `kind: slack` block takes `wake: mention | thread | channel`
+  (`SLACK_WAKE_MODE` in the environment overrides it). `mention` is the default and
+  the previous behaviour. `thread` answers a mention and then every reply in a thread
+  the agent was asked in at the top, without re-tagging; a mention deep in someone
+  else's thread is answered and adopts nothing. `channel` answers every message. The
+  mode rides on each Slack task as metadata and becomes a prompt notice, so the agent
+  tells the truth when asked whether it must be mentioned. Mixed `wake` values across
+  blocks fail the bundle. The `thread` and `channel` modes need `message.channels` /
+  `message.groups` subscribed in the Slack app manifest.
+- **Slack replies stream, with progress.** The working message is a `chat.startStream`
+  stream: each tool call and memory recall the agent makes appears as a progress line
+  under it, and the answer lands in the same message. Events are stamped with their
+  task's context id, so two threads working at once never show each other's steps. A
+  workspace that refuses the stream gets the hourglass placeholder as before. The
+  `slack` extra now needs slack-sdk 3.40 or later.
+
 - **The Claude Code engine.** `daedalus run` and `daedalus chat` take `--engine claude-code`
   (or `DAEDALUS_ENGINE`) to run a bundle with Claude Code as the agent, on Anthropic's
   Agent SDK. A turn now runs behind an `Engine` seam; the LiteLLM loop is the first

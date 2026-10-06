@@ -108,6 +108,9 @@ class ModelSpec(_WarnExtra):
 
 
 _SLACK_USER_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
+# Mirrors daedalus.transports.slack.WAKE_MODES; kept here so bundle loading never
+# imports the transport module.
+_SLACK_WAKE_MODES = frozenset({"mention", "thread", "channel"})
 
 
 class TransportSpec(BaseModel):
@@ -126,6 +129,14 @@ class TransportSpec(BaseModel):
         as leaving the key out: no approvers, tier-2 denied."""
         if self.kind != "slack":
             return self
+        wake = (self.__pydantic_extra__ or {}).get("wake")
+        if wake is not None and wake not in _SLACK_WAKE_MODES:
+            raise ValueError(
+                f"slack transport `wake` must be one of {sorted(_SLACK_WAKE_MODES)}, "
+                f"not {wake!r}: mention (only @-mentions in channels), thread (mentions, "
+                "then every reply in a thread the agent was asked in at the top), or "
+                "channel (every message in the channel)"
+            )
         approvers = (self.__pydantic_extra__ or {}).get("approvers")
         if approvers is None:
             return self

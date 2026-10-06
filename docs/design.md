@@ -276,9 +276,20 @@ back. Persona constant, transport variable:
   same permission asked for twice (2026-09-23). Boot says which regime is
   in force (`(slack listening in C1, C2)` vs `(slack listening in every
   channel the app is invited to)`). In channels and private groups the
-  tagged-only rule still holds (only an `app_mention`, or a plain message
-  that mentions this bot, is answered), DMs keep full delivery, and
-  bots/subtypes/duplicates are still dropped. Widening *where* does change
+  block's `wake` mode decides what is answered (2026-10-06): `mention`, the
+  default and the 2026-08-31 rule (only an `app_mention`, or a plain message
+  that mentions this bot); `thread` (a mention, then every reply in a thread
+  the bot was asked in at the top, so a conversation continues without
+  re-tagging, while a mention buried in someone else's thread adopts
+  nothing); or `channel` (every message, for an agent whose job is the
+  channel). `SLACK_WAKE_MODE` in the environment overrides the bundle, which
+  is how a room sets it per agent. The mode is stamped on each Slack-born
+  task and becomes a prompt notice, so the model knows which messages reach
+  it instead of guessing. DMs keep full delivery in every mode, and
+  bots/subtypes/duplicates are still dropped. A reply is a streamed message
+  (`chat.startStream`): the agent's tool calls and recalls appear as progress
+  lines under it while it works, and it becomes the answer in place; where
+  streaming is refused, the hourglass placeholder path remains. Widening *where* does change
   where an approval could be asked for: tier-2 reaction approvals follow the
   channel of the latest event. So an open transport keeps tier-2 **closed**
   (`DenyAll`) and says so at boot (2026-09-24). Who may approve is a second,

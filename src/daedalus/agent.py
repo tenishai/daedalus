@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import warnings
 from collections.abc import Callable
 from fnmatch import fnmatch
@@ -18,6 +19,7 @@ from daedalus.engines.litellm import (
     LiteLLMEngine,
     salvage_tool_calls,  # noqa: F401  re-exported: tests import it from here
 )
+from daedalus.events import current_context as event_context
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
     DELETE_KEY,
@@ -486,6 +488,7 @@ class Agent:
         )
 
         current_context_id.set(task.context_id or task.id)
+        event_context.set(task.context_id or task.id)
         consulted_colleagues.set([])
         # cabal#144 — carry the inbound hop count so an outbound ask can send
         # depth+1. An unreadable value is treated as the TOP of the chain
@@ -1043,6 +1046,16 @@ class Agent:
             system += index
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
+        # Where the conversation is happening, when a transport says so. The
+        # Slack transport stamps its wake mode (an enum, never free text: task
+        # metadata rides in from the wire on a2a, so only a known value turns
+        # into prompt) and the model learns which messages reach it, instead
+        # of guessing and promising a thread it will never hear.
+        from daedalus.transports.slack import SLACK_WAKE_KEY, wake_notice
+
+        surface = wake_notice(task.metadata.get(SLACK_WAKE_KEY))
+        if surface:
+            notices = [*(notices or []), surface]
         if notices:
             system += "\n\n## Notices\n" + "\n".join(f"- {item}" for item in notices)
         messages = [{"role": "system", "content": system}]
@@ -1104,6 +1117,7 @@ class Agent:
         slack_asked = False  # any slack block at all
         slack_open = False  # a block that named no channel
         slack_approvers: list[str] = []  # union of every block's `approvers`
+        slack_wakes: set[str] = set()  # every block's `wake`; they must agree
         for spec in self.bundle.spec.transports:
             if spec.kind == "cli":
                 built.append(CliTransport())
@@ -1159,6 +1173,8 @@ class Agent:
                     )
                 slack_asked = True
                 slack_approvers.extend(options.get("approvers") or [])
+                if options.get("wake"):
+                    slack_wakes.add(str(options["wake"]))
                 # `channel` IS OPTIONAL (2026-09-23 operator ruling). A block
                 # that names none asks for every channel the app has been
                 # invited to -- inviting the app is already the human act
@@ -1189,12 +1205,21 @@ class Agent:
             # open transport nothing reads it: it only seeds the tier-2
             # approver, which an open transport does not wire. `approvers` is
             # the union across blocks (the bundle validates its shape).
+            if len(slack_wakes) > 1:
+                raise BundleError(
+                    "slack transport blocks disagree on `wake` "
+                    f"({', '.join(sorted(slack_wakes))}); one transport serves every "
+                    "block, so they must name the same mode"
+                )
             built.append(
                 SlackTransport(
                     slack_channels[0] if slack_channels else "",
                     channels=[] if slack_open else slack_channels,
                     escalation_route=self.bundle.spec.approvals.escalation.route,
                     approvers=slack_approvers,
+                    # The bundle's word, unless the deployment overrides it in the
+                    # environment (the room sets SLACK_WAKE_MODE per agent).
+                    wake=os.environ.get("SLACK_WAKE_MODE") or next(iter(slack_wakes), None),
                 )
             )
         return built

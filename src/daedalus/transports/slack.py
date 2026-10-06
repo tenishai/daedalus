@@ -59,6 +59,69 @@ current_slack_requester: contextvars.ContextVar[str | None] = contextvars.Contex
 
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
 
+# How the agent is woken in a channel (2026-10-06, after a user asked an agent
+# "do I have to keep mentioning you?" and it answered "no" while its manifest
+# said otherwise). The bundle's `kind: slack` block sets `wake:`; the
+# deployment can override it with SLACK_WAKE_MODE (the room sets it per agent).
+# DMs and group DMs are full delivery in every mode: messaging an agent IS the
+# ask. Which mode the manifest must match: `mention` works with app_mention
+# alone; `thread` and `channel` need message.channels / message.groups
+# subscribed, or Slack never delivers the unmentioned messages at all.
+WAKE_MENTION = "mention"  # only an @-mention reaches the agent (the 2026-08-31 ruling)
+WAKE_THREAD = "thread"  # mentions, plus every reply in a thread it was asked in at the top
+WAKE_CHANNEL = "channel"  # every message in the channel, mentioned or not
+WAKE_MODES = frozenset({WAKE_MENTION, WAKE_THREAD, WAKE_CHANNEL})
+# Stamped on every Slack-born task's metadata so the prompt can say which
+# messages reach the agent (Agent._messages maps it through wake_notice).
+SLACK_WAKE_KEY = "slack_wake"
+_WAKE_NOTICES = {
+    WAKE_MENTION: (
+        "You are answering in Slack. In a channel, only a message that @-mentions "
+        "you reaches you: a reply in a thread that does not mention you is never "
+        "delivered to you. If someone asks whether they must keep mentioning you, "
+        "the honest answer is yes, in channels. Direct messages reach you in full."
+    ),
+    WAKE_THREAD: (
+        "You are answering in Slack. In a thread you were @-mentioned in at the top, "
+        "or that you started, every reply reaches you without a mention. Elsewhere "
+        "in a channel only a message that @-mentions you reaches you. Direct "
+        "messages reach you in full."
+    ),
+    WAKE_CHANNEL: (
+        "You are answering in Slack and you receive every message in this channel, "
+        "mentioned or not. Answer what is meant for you; when a message is clearly "
+        "between other people, stay out of it."
+    ),
+}
+# Slack's own ceiling on a task_update chunk.
+_TASK_UPDATE_MAX = 256
+# chat.appendStream takes markdown_text up to 12,000 characters per call.
+_STREAM_PIECE = 12000
+
+
+def wake_notice(mode: object) -> str:
+    """The prompt line for a wake mode; "" for anything that is not one.
+
+    Task metadata rides in verbatim from the wire on a2a, so this never turns
+    free text into prompt: only one of the three known words maps to a notice."""
+    return _WAKE_NOTICES.get(mode, "") if isinstance(mode, str) else ""
+
+
+def _progress_line(event: dict) -> str | None:
+    """One short line of progress for a runtime trace event, or None when the
+    event is not worth showing a reader (reasoning text, token counts, the
+    engine's own bookkeeping). Tool names read as words: `skills.load` ->
+    "Using skills.load" stays exact, because the name IS the information."""
+    kind = event.get("type")
+    if kind == "recall":
+        return "Recalling what I know"
+    if kind == "tool_call":
+        name = str(event.get("name") or "a tool")
+        return f"Using {name}"[:_TASK_UPDATE_MAX]
+    if kind == "wrap_up":
+        return "Writing the answer"
+    return None
+
 # Vision bounds. The per-image ceiling is set by the PROVIDER, not Slack:
 # Claude via Vertex accepts at most 5 MB base64 per image, which is ~3.75 MB
 # raw -- 3.5 MB keeps margin. An image past this is skipped with a note
@@ -326,6 +389,57 @@ class SlackApi:
         except Exception:  # noqa: BLE001  identity is an optimization, not a gate
             return ""
 
+    async def team_id(self) -> str:
+        """The workspace id (auth.test `team_id`), "" on any failure. Streaming
+        into a channel needs it as `recipient_team_id`; without it the
+        transport falls back to the placeholder message, never to silence."""
+        try:
+            response = await self._web.auth_test()
+            return response.get("team_id") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # -- streaming (chat.startStream / appendStream / stopStream, slack-sdk >= 3.40) --
+    #
+    # A streamed message shows progress lines while the agent works and then
+    # becomes the answer, in place. The transport treats every one of these as
+    # best-effort: a failure to start falls back to the placeholder message
+    # path, and a failure mid-stream still lands the reply as a plain post.
+
+    async def start_stream(
+        self, channel: str, thread_ts: str | None, user: str | None, team: str | None
+    ) -> str:
+        """Open a stream in the thread and return its message ts. Slack
+        requires the recipient's user and team ids when the target is a
+        channel; in a DM they are accepted and harmless."""
+        kwargs: dict = {"channel": channel}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        if user:
+            kwargs["recipient_user_id"] = user
+        if team:
+            kwargs["recipient_team_id"] = team
+        response = await self._web.chat_startStream(**kwargs)
+        return response["ts"]
+
+    async def append_progress(self, channel: str, ts: str, line: str) -> None:
+        """One `task_update` chunk: a progress line under the streaming message."""
+        await self._web.chat_appendStream(
+            channel=channel,
+            ts=ts,
+            chunks=[{"type": "task_update", "title": line[:_TASK_UPDATE_MAX]}],
+        )
+
+    async def finish_stream(self, channel: str, ts: str, markdown: str) -> None:
+        """Append the answer (in pieces under Slack's per-call ceiling) and
+        close the stream. Streams take markdown, not mrkdwn, so the caller
+        passes the reply as the model wrote it."""
+        for start in range(0, len(markdown), _STREAM_PIECE):
+            await self._web.chat_appendStream(
+                channel=channel, ts=ts, markdown_text=markdown[start : start + _STREAM_PIECE]
+            )
+        await self._web.chat_stopStream(channel=channel, ts=ts)
+
 
 class SlackReactionApprover:
     """Tier-2 gates in Slack: post the plan, wait for a human reaction.
@@ -482,7 +596,15 @@ class SlackTransport:
         escalation_route: str | None = None,
         approvers: Iterable[str] | None = None,
         api: SlackApi | None = None,
+        wake: str | None = None,
     ):
+        # How a channel wakes the agent (WAKE_* above). None means the default,
+        # `mention`, which is exactly the behaviour before this option existed.
+        self.wake = wake or WAKE_MENTION
+        if self.wake not in WAKE_MODES:
+            raise ValueError(
+                f"slack wake mode {wake!r} is not one of {sorted(WAKE_MODES)}"
+            )
         # `approvers` (Slack user ids) are the only people whose reaction approves
         # a tier-2 action (#53); none configured means tier-2 stays denied.
         self.approvers = frozenset(a for a in (approvers or ()) if a)
@@ -510,6 +632,13 @@ class SlackTransport:
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
         self._threads: dict[tuple, Task] = {}  # (channel, thread_ts) -> Task
+        # Threads this agent was asked in AT THE TOP (the root message mentioned
+        # it, or was a DM): in `thread` mode every reply in one of these reaches
+        # the agent without a mention. A mention buried in a busy thread answers
+        # that one message and adopts nothing. Bounded like `_seen`.
+        self._owned: OrderedDict[tuple, bool] = OrderedDict()
+        # Workspace id for streaming into channels (auth.test at serve time).
+        self.team_id: str | None = None
         # Own Slack user id (auth.test at serve time). None = unknown: the
         # tagged-only gate then trusts only app_mention delivery in channels.
         self.user_id: str | None = None
@@ -525,6 +654,8 @@ class SlackTransport:
 
         if self._api is None:
             self._api = SlackApi(AsyncWebClient(token=self.bot_token))
+        if self.team_id is None:
+            self.team_id = (await self._api.team_id()) or None
         if self.user_id is None:
             self.user_id = (await self._api.auth_test()) or None
             if self.user_id is None:
@@ -561,9 +692,14 @@ class SlackTransport:
         which of the two regimes is in force, because "listening in " with
         nothing after it is how an open transport would read as a broken
         one."""
+        wake = {
+            WAKE_MENTION: "on @-mention",
+            WAKE_THREAD: "on @-mention, then the thread",
+            WAKE_CHANNEL: "on every message",
+        }[self.wake]
         if not self.channels:
-            return "(slack listening in every channel the app is invited to)"
-        return f"(slack listening in {', '.join(self.channels)})"
+            return f"(slack listening in every channel the app is invited to, {wake})"
+        return f"(slack listening in {', '.join(self.channels)}, {wake})"
 
     async def _gather_images(self, files: list[dict]) -> tuple[list[ImagePart], list[str]]:
         """Filter, bound, and fetch the event's image attachments. Every
@@ -692,9 +828,10 @@ class SlackTransport:
             # _wire_approver keeps tier-2 closed on an open transport.
             return
         if self._not_for_us_in_channel(event):
-            # Tagged-only in channels: a message event that does not mention
-            # us is not ours to answer. Checked before the dedupe mark so an
-            # app_mention for the same ts is never consumed.
+            # The wake rule for channels (mention / thread / channel): a
+            # message event this mode does not admit is not ours to answer.
+            # Checked before the dedupe mark so an app_mention for the same
+            # ts is never consumed.
             return
         ts = event.get("ts")
         key = (event.get("channel"), ts)
@@ -731,10 +868,18 @@ class SlackTransport:
             text = "(image)"
 
         thread = event.get("thread_ts") or ts
+        if thread == ts and self._addressed_to_us(event):
+            # The root of a new thread, asked of us: in `thread` mode its
+            # replies reach us from here on. Recorded in every mode so a
+            # mode change at the next boot has nothing to relearn.
+            self._owned[(channel, thread)] = True
+            while len(self._owned) > _SEEN_CAP:
+                self._owned.popitem(last=False)
         task = self._threads.get((channel, thread))
         if task is None:
             task = Task(context_id=f"slack:{channel}:{thread}")
             self._threads[(channel, thread)] = task
+        task.metadata[SLACK_WAKE_KEY] = self.wake
         # Snapshotted so a handler exception below can roll the appended
         # turn back out -- otherwise a rejected/failing message (its image
         # included) stays in history forever and every later turn re-sends
@@ -760,16 +905,39 @@ class SlackTransport:
             approver.thread_ts = thread
             approver.channel = channel
 
-        # Thinking state (2026-08-27 operator feedback): a visible in-thread
-        # placeholder the moment work starts, updated IN PLACE into the
-        # final reply below -- the room's Slack presence shows working vs
-        # answered as one message's lifecycle, not silence then a wall of
-        # text. Placeholder failure is never load-bearing: None falls back
-        # to exactly the old post-at-the-end behavior.
+        # Working state, in two tiers. Preferred (2026-10-06): a streamed
+        # message that shows what the agent is doing as it does it -- each
+        # tool call and recall becomes a progress line under one message,
+        # which then becomes the answer in place. Fallback (2026-08-27): the
+        # hourglass placeholder, updated into the reply. Neither is
+        # load-bearing: a stream that will not open falls back to the
+        # placeholder, a placeholder that will not post falls back to a
+        # plain reply at the end.
+        stream_ts: str | None = None
+        thinking_ts: str | None = None
         try:
-            thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
+            stream_ts = await self._api.start_stream(
+                channel, thread, sender if isinstance(sender, str) else None, self.team_id
+            )
         except Exception:
-            thinking_ts = None
+            stream_ts = None
+        if stream_ts is None:
+            try:
+                thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
+            except Exception:
+                thinking_ts = None
+        # Subscribe to the runtime's trace BEFORE the handler runs: its first
+        # events are published synchronously, before a separate task could
+        # attach. The pump task then only reads. A handler without an event
+        # bus (tests, foreign handlers) streams the answer with no progress lines.
+        pump_done = asyncio.Event()
+        pump = None
+        bus = getattr(handler, "events", None)
+        if stream_ts is not None and bus is not None and hasattr(bus, "subscribe"):
+            _replay, queue = bus.subscribe()  # the replay is other tasks' past; skipped
+            pump = asyncio.create_task(
+                self._pump_progress(bus, queue, task, channel, stream_ts, pump_done)
+            )
         requester_token = current_slack_requester.set(
             sender if isinstance(sender, str) else None
         )
@@ -784,44 +952,117 @@ class SlackTransport:
             reply = f"error: {exc}"
         finally:
             current_slack_requester.reset(requester_token)
+            if pump is not None:
+                # Let the pump show the last steps it has queued, then stop it;
+                # a pump that will not finish in time is cut, never waited on.
+                pump_done.set()
+                try:
+                    await asyncio.wait_for(pump, 2.0)
+                except (TimeoutError, asyncio.CancelledError, Exception):
+                    pump.cancel()
         await self._api.unreact(channel, ts, "eyes")
         await self._api.react(channel, ts, "white_check_mark" if ok else "x")
         rendered = to_mrkdwn(reply)
-        if thinking_ts is not None:
+        landed = False
+        if stream_ts is not None:
+            try:
+                # Streams render markdown, so the reply goes as written.
+                await self._api.finish_stream(channel, stream_ts, reply)
+                landed = True
+            except Exception:
+                landed = False  # the plain post below is the reply's safety net
+        if not landed and thinking_ts is not None:
             try:
                 await self._api.update(channel, thinking_ts, rendered, thread_ts=thread)
+                landed = True
             except Exception:
                 # chat.update can fail independently (deleted placeholder,
                 # message too old): the reply must still land somewhere.
-                await self._api.post(channel, rendered, thread_ts=thread)
-        else:
+                landed = False
+        if not landed:
             await self._api.post(channel, rendered, thread_ts=thread)
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, channel)
 
+    def _addressed_to_us(self, event: dict) -> bool:
+        """An app_mention, a DM, or a message whose text mentions this bot."""
+        if event.get("type") == "app_mention":
+            return True
+        if event.get("channel_type") not in {"channel", "group"}:
+            return True
+        mentioned = _MENTION_ID.findall(event.get("text") or "")
+        return self.user_id is not None and self.user_id in mentioned
+
     def _not_for_us_in_channel(self, event: dict) -> bool:
-        """The tagged-only rule, enforced runtime-side. True = drop.
+        """The wake rule for channels, enforced runtime-side. True = drop.
 
         Applies only to plain `message` events in channels and private
         groups (channel_type "channel"/"group"): those reach us only when
-        the app's manifest subscribes to message.channels/message.groups
-        (docs/slack-app-manifest.yaml does), and answering unaddressed
-        ones is how two agents in one channel both reply to a mention
-        aimed at one. An `app_mention`
-        event always passes -- Slack delivers it only to the mentioned app,
-        which is stronger proof than anything we could compute. DMs and
-        group DMs ("im"/"mpim") always pass: messaging an agent directly IS
-        the ask. When self is unknown (auth.test failed) a channel message
-        cannot be verified as ours and is dropped -- the mentioned agent
-        still answers through its own app_mention, so the failure mode is
-        one correct answer, never two."""
+        the app's manifest subscribes to message.channels/message.groups,
+        and the manifest alone cannot tell "a reply to me" from "a reply to
+        anyone" -- which is how an agent once answered every message in a
+        busy thread (2026-08-31). An `app_mention` event always passes:
+        Slack delivers it only to the mentioned app, which is stronger proof
+        than anything we could compute. DMs and group DMs ("im"/"mpim")
+        always pass: messaging an agent directly IS the ask.
+
+        - `mention`: only a message that mentions this bot. When self is
+          unknown (auth.test failed) a channel message cannot be verified as
+          ours and is dropped -- the mentioned agent still answers through
+          its own app_mention, so the failure mode is one answer, never two.
+        - `thread`: a mention, or a reply in a thread this bot was asked in
+          at the top (see `_owned`). A mention deep in someone else's thread
+          is answered but adopts nothing.
+        - `channel`: nothing is dropped here; every message is the agent's.
+        """
         if event.get("type") == "app_mention":
             return False
         if event.get("channel_type") not in {"channel", "group"}:
             return False
-        mentioned = _MENTION_ID.findall(event.get("text") or "")
-        return self.user_id is None or self.user_id not in mentioned
+        if self.wake == WAKE_CHANNEL:
+            return False
+        if self._addressed_to_us(event):
+            return False
+        if self.wake == WAKE_THREAD:
+            root = event.get("thread_ts")
+            return not (root and (event.get("channel"), root) in self._owned)
+        return True
+
+    async def _pump_progress(
+        self,
+        bus,
+        queue: asyncio.Queue,
+        task: Task,
+        channel: str,
+        stream_ts: str,
+        done: asyncio.Event,
+    ) -> None:
+        """Turn this task's runtime trace into progress lines under the
+        streaming message until `done` is set and the queue is drained.
+        Follows ONLY events stamped with this task's context (EventBus stamps
+        them), so two threads working at once never show each other's tool
+        calls. Repeated lines collapse into one."""
+        mine = task.context_id or task.id
+        last: str | None = None
+        try:
+            while not (done.is_set() and queue.empty()):
+                try:
+                    event = await asyncio.wait_for(queue.get(), 0.1)
+                except TimeoutError:
+                    continue
+                if event.get("context_id") != mine:
+                    continue
+                line = _progress_line(event)
+                if line is None or line == last:
+                    continue
+                last = line
+                try:
+                    await self._api.append_progress(channel, stream_ts, line)
+                except Exception:
+                    return  # the stream is gone; the reply still lands below
+        finally:
+            bus.unsubscribe(queue)
 
     async def _escalate(self, task: Task, channel: str) -> None:
         route = self.escalation_route or ""
