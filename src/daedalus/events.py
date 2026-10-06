@@ -11,7 +11,8 @@ import contextvars
 from collections import deque
 
 # The task context the current coroutine is working for (set by Agent.handle_task).
-# publish() stamps it on every event as `context_id`, so a consumer that follows one
+# publish() stamps it on each event as `context_id` (when a task context is set and
+# the event carries none of its own), so a consumer that follows one
 # conversation -- the Slack transport streaming progress into one thread -- can tell
 # this task's tool calls from another thread's running in the same process.
 current_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(

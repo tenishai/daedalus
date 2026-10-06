@@ -112,8 +112,8 @@ def wake_notice(mode: object) -> str:
 def _progress_line(event: dict) -> str | None:
     """One short line of progress for a runtime trace event, or None when the
     event is not worth showing a reader (reasoning text, token counts, the
-    engine's own bookkeeping). Tool names read as words: `skills.load` ->
-    "Using skills.load" stays exact, because the name IS the information."""
+    engine's own bookkeeping). Tool names pass through unchanged
+    (`skills.load` -> "Using skills.load"), because the name IS the information."""
     kind = event.get("type")
     if kind == "recall":
         return "Recalling what I know"

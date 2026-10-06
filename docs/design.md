@@ -274,8 +274,8 @@ back. Persona constant, transport variable:
   every channel the app has been invited to, because inviting the app is
   already the human act that grants the reach and re-typing the ID is the
   same permission asked for twice (2026-09-23). Boot says which regime is
-  in force (`(slack listening in C1, C2)` vs `(slack listening in every
-  channel the app is invited to)`). In channels and private groups the
+  in force, with the wake mode (`(slack listening in C1, C2, on @-mention)` vs
+  `(slack listening in every channel the app is invited to, on every message)`). In channels and private groups the
   block's `wake` mode decides what is answered (2026-10-06): `mention`, the
   default and the 2026-08-31 rule (only an `app_mention`, or a plain message
   that mentions this bot); `thread` (a mention, then every reply in a thread
