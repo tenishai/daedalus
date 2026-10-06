@@ -8,6 +8,14 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
+### Fixed
+
+- **The runtime image builds against liminal 0.3.0.** liminal's distribution became
+  `tenishai-liminal` (tenishai/liminal#118); `docker/Dockerfile` still asked pip for
+  `liminal`, so a build with a current liminal checkout failed with "liminal
+  (unavailable)". Both the wheel step and the install name the new distribution; the
+  import package is unchanged.
+
 ### Added
 
 - **Slack wake modes.** A `kind: slack` block takes `wake: mention | thread | channel`
