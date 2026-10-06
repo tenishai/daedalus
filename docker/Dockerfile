@@ -3,6 +3,8 @@
 #   COPY bundle/ /bundle
 #
 # techne and liminal are not on PyPI. Two ways to supply them, same image:
+# (liminal's distribution is `tenishai-liminal` since its 0.3.0; the import
+# package is still `liminal`, which is what the build proofs below import.)
 #   docker build -f docker/Dockerfile \
 #     --build-context techne=../techne --build-context liminal=../liminal \
 #     -t daedalus-runtime .                                (sibling checkouts)
@@ -45,7 +47,7 @@ COPY . /src/daedalus
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
 RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="techne[vectors] @ file:///src/techne"; else TECHNE="techne[vectors]>=0.17.0"; fi \
- && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="liminal @ file:///src/liminal"; else LIMINAL="liminal>=0.2.0"; fi \
+ && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="tenishai-liminal @ file:///src/liminal"; else LIMINAL="tenishai-liminal>=0.3.0"; fi \
  && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
       echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
  && if [ -n "$AR_TOKEN" ]; then EXTRA_INDEX_URL="$(echo "$EXTRA_INDEX_URL" | sed "s#://#://oauth2accesstoken:${AR_TOKEN}@#")"; fi \
@@ -59,7 +61,7 @@ RUN useradd --uid 10001 --create-home agent
 RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenishai-daedalus[a2a,slack,aws,claude-code]" "techne[vectors]" liminal google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenishai-daedalus[a2a,slack,aws,claude-code]" "techne[vectors]" tenishai-liminal google-cloud-aiplatform && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.
