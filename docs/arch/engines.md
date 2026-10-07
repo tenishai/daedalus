@@ -1,18 +1,18 @@
 ---
 card: arch-card:daedalus-engines
-updated: 2026-09-28
+updated: 2026-10-07
 anchor: src/daedalus/engines/base.py sha=b1e58daa59388bd729dcbaba1ab6ad9f6d69a1ff
 anchor: src/daedalus/engines/litellm.py sha=6fa5ec275e072e189b200289308d096a6097070b
-anchor: src/daedalus/engines/claude_code.py sha=fc91c7bddfbd6088e549e00b11bbd56885a40ee5
+anchor: src/daedalus/engines/claude_code.py sha=319df26136d5be80556fb538d5303a9480efc15f
 anchor: src/daedalus/engines/bridge.py sha=bfadb495652bec27bb0239ebd00c0f6d1c97cf7e
 ---
 # engines — what runs one task turn (tenishai/agents#51)
 
 WHAT / SEAM: `Engine` Protocol (engines/base.py): `name: str`, `async run(turn: EngineTurn) -> Task`. `EngineTurn` dataclass = everything an engine may use and nothing else: task, messages (system+history, built by Agent._messages), tools (allowlisted specs, CANONICAL dotted names), call_tool(name, args), emit(event, **fields), budget, checkpoints, spec (AgentSpec, read-only), approve(name, input) -> None|refusal, withheld(name) -> bool.
-Registry: agent.py `ENGINES = ("litellm", "claude-code")`; chosen by Agent(engine=) > $DAEDALUS_ENGINE > "litellm"; unknown name → BundleError at construction. Agent._engine() builds a fresh engine PER TURN (tests swap agent.llm).
+Registry: agent.py `ENGINES = ("litellm", "claude-code")`; chosen by Agent(engine=) > $DAEDALUS_ENGINE > the engine of the model tier when model.id names one (#127, Agent._resolve_model) > "litellm". An explicit engine that disagrees with the tier is refused; an unknown name → BundleError at construction. Agent._engine() builds a fresh engine PER TURN (tests swap agent.llm).
 OPS / FLOW: Agent._loop → _allowed_tools (tier 1) → drop _unapprovable tools + system-prompt note → EngineTurn(...) → engine.run.
 - LiteLLMEngine (engines/litellm.py): daedalus's own loop. Per step: checkpoint save (images stripped) → budget check (702) → llm.complete → salvage text-embedded tool calls (≤4) → no calls = checkpoint drop + reply → context_tokens / max_repeats checks → dispatch each call via turn.call_tool. Exhaustion (steps/context/repeats) → FAILED 701/702, optional one tool-less wrap_up call when tools.on_exhausted=wrap_up and budget remains.
-- ClaudeCodeEngine (engines/claude_code.py): Claude Code IS the agent, via claude_agent_sdk.query. Our tools = SDK in-process MCP server named `daedalus` (mcp__daedalus__<munged>), each handler → turn.call_tool. Built-ins (spec.engine.claude_code.builtin_tools) decided by can_use_tool → turn.approve("claude.<Tool>"). History flattened to one text prompt (_split); image parts dropped.
+- ClaudeCodeEngine (engines/claude_code.py): Claude Code IS the agent, via claude_agent_sdk.query. Our tools = SDK in-process MCP server named `daedalus` (mcp__daedalus__<munged>), each handler → turn.call_tool. Built-ins (spec.engine.claude_code.builtin_tools) decided by can_use_tool → turn.approve("claude.<Tool>"). History flattened to one text prompt (_split); image parts dropped. CLI: spec.engine.claude_code.binary when set, else the SDK's bundled CLI, then `claude` on PATH. Emits engine_finished with models, turns, model_usage and, when the SDK reports them, token counts and total_cost_usd (#135); a counter absent from a present usage block is 0, a missing usage block omits all four.
 - ToolBridge (engines/bridge.py): loopback MCP-over-HTTP server (127.0.0.1, OS port, per-run bearer, random server name) + `approve` tool for --permission-prompt-tool. NO production caller today: #107 landed it, #108 went with the SDK's in-process server instead. Only tests/test_engine_bridge.py uses it.
 INVARIANTS:
 - Engines hold NO policy. Allowlist, gates, approver live in Agent (_call_tool, _approve_native, _withheld_native) so every engine gets identical enforcement. Never gate inside an engine.

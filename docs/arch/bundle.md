@@ -1,12 +1,12 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-09-28
-anchor: src/daedalus/bundle.py sha=ddd37d65370b5af2ecca5e1af754e5502726221c
-anchor: docs/bundle.schema.json sha=666a904dcac6ce70789b49dcbd721ee9fcdcebfd
+updated: 2026-10-07
+anchor: src/daedalus/bundle.py sha=24244f1881eebe054c284a2a12748dba3c1a1684
+anchor: docs/bundle.schema.json sha=725909516c2e522924910189c3c58de76a1776f8
 ---
 # bundle — agent.yaml schema and the bundle directory
 
-WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: AgentSpec, card: dict, persona: str, skills: dict[str, Skill]). `AgentSpec` (pydantic) is the agent.yaml schema: name, card, persona, model (ModelSpec: id, max_tokens, api_base, api_key_env, budget.per_task_tokens), transports[], tools (ToolsSpec), memory (MemorySpec), checkpoints, approvals (ceiling, gates, escalation), engine.claude_code (ClaudeCodeSpec). `bundle_schema()` emits it as JSON Schema → docs/bundle.schema.json.
+WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: AgentSpec, card: dict, persona: str, skills: dict[str, Skill]). `AgentSpec` (pydantic) is the agent.yaml schema: name, card, persona, model (ModelSpec: id, max_tokens, api_base, api_key_env, budget.per_task_tokens; id is required and is either a model or a tier word, fast|balanced|best), transports[], tools (ToolsSpec), memory (MemorySpec), checkpoints, approvals (ceiling, gates, escalation), engine.claude_code (ClaudeCodeSpec). `bundle_schema()` emits it as JSON Schema → docs/bundle.schema.json.
 Directory: agent.yaml, persona.md, agent-card.json (required); skills/<id>/SKILL.md (frontmatter when_to_use, requires); tools/*.py (enforcement hooks, not LLM tools); knowledge/*.md and intake/* (seeded into techne by docker/seeder.py, not by the runtime).
 OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursively (undefined without default → BundleError) → AgentSpec.model_validate → require card + persona files → strip persona comments → load_skills. Agent then builds collaborators from spec (see protocols card).
 INVARIANTS:
@@ -17,6 +17,10 @@ INVARIANTS:
 - `memory.revision` unknown value → warn and disable; absent = the revision module is never imported.
 - A skill whose `requires:` the allowlist doesn't admit, or skills without `skills.load` allowed, warn at load (unmet_requirements); they don't fail.
 - Slack transport: `channel` key present but empty → BundleError (a typo must not open the widest reach); key omitted → every invited channel. All slack blocks fold into ONE SlackTransport (Socket Mode delivers each event to one connection).
+- model.id as a tier (#127, #129) resolves at Agent construction from the deployment's tiers file ($DAEDALUS_TIERS, tiers.py): the entry fills model.id, the endpoint fields, context_tokens/max_repeats and the claude-code model, never overriding a value the bundle set; no tiers file → BundleError. The old model.tier/min_tier keys are refused with a pointer to model.id.
+- tools.builtin groups are `files` and `exec`; exec loads only with approvals.ceiling.exec: true (agent.py), anything else is a BundleError.
+- Fields validated at load so a typo fails the bundle: slack `approvers` (list of U…/W… user ids), slack `wake` (mention|thread|channel; every slack block must agree), github.branch_prefix (a valid git ref component, default "daedalus"), memory.team (only "none"; "outbox" is refused because it was never built).
+- The schema lets `${VAR}` / `${VAR:-default}` placeholders stand in for enum, integer, number and boolean leaves (#132), so an editor accepts what interpolate() will expand.
 - Golden bundles tests/golden/<name>/ are fixtures AND worked examples; new format features want one.
 CONSUMERS: agent.py (Agent.load, _tools_from_spec, transports()); cli.py (`schema`, `create` via scaffold.py); kobo composes bundles (kobo_api/steps.py) and pushes them as repos; cabal reads bundles via the JSON Schema; docker/seeder.py reads knowledge/, skills/, intake/.
 API: Bundle, AgentSpec (+ nested *Spec classes), BundleError, bundle_schema(), interpolate(), load_skills(), unmet_requirements(), strip_persona_comments().
