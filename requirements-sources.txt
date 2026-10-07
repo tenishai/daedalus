@@ -1,6 +1,6 @@
 # Source pins for non-PyPI dependencies.
 #
-# daedalus's `techne` extra depends on techne, which is not published to a public
+# daedalus's `techne` extra depends on techne (distribution `tenish-techne`), which is not published to a public
 # index (the name "techne" on PyPI is an unrelated package). This file supplies the
 # concrete git source so the extra installs on a clean machine, given credentials
 # for the private repo.
@@ -12,6 +12,6 @@
 #       pip install -e ../techne
 #
 # Bump the pinned tag when consumers should pick up a new techne release, and lift
-# the matching `techne>=X` floor in pyproject.toml's `techne` extra so the abstract
+# the matching `tenish-techne>=X` floor in pyproject.toml's `techne` extra so the abstract
 # floor and the concrete pin stay in step.
-techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.17.0
+tenish-techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.18.2

@@ -46,7 +46,7 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="techne[vectors] @ file:///src/techne"; else TECHNE="techne[vectors]>=0.17.0"; fi \
+RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ file:///src/techne"; else TECHNE="tenish-techne[vectors]>=0.18.2"; fi \
  && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="tenishai-liminal @ file:///src/liminal"; else LIMINAL="tenishai-liminal>=0.3.0"; fi \
  && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
       echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
@@ -61,7 +61,7 @@ RUN useradd --uid 10001 --create-home agent
 RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenishai-daedalus[a2a,slack,aws,claude-code]" "techne[vectors]" tenishai-liminal google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenishai-daedalus[a2a,slack,aws,claude-code]" "tenish-techne[vectors]" tenishai-liminal google-cloud-aiplatform && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.
@@ -69,11 +69,11 @@ RUN python -c "import daedalus, techne; from techne.core.database import connect
 RUN python -c "import claude_agent_sdk"   # the Claude Code engine (--engine claude-code), with its bundled CLI
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
-# Version floor (0.17.0, matching pyproject.toml): techne may arrive as a named build context, which nothing
+# Version floor (0.18.2, matching pyproject.toml): techne may arrive as a named build context, which nothing
 # else pins. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
 # drop every lexical hit -- the exact failure use_vectors=True was gated
 # on. A 0.16.0 checkout passes every other proof here and ships that bug.
-RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 17, 0), f'techne {techne.__version__} < 0.17.0, the version pinned in requirements-sources.txt and pyproject.toml (below 0.16.1, techne#827, the fusion bug ships with use_vectors=True)'"
+RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 18, 2), f'techne {techne.__version__} < 0.18.2, the version pinned in requirements-sources.txt and pyproject.toml (below 0.16.1, techne#827, the fusion bug ships with use_vectors=True)'"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -1,14 +1,14 @@
 ---
 card: repo-card:daedalus
 updated: 2026-10-07
-anchor: pyproject.toml sha=ee92c8a5d403f383b9935be815796d59dbe53bab
+anchor: pyproject.toml sha=6f56cff806e2bdd6c22f0b621c1970022a4fd950
 anchor: src/daedalus/agent.py sha=ba1f01fb4d326583a2539348ed775af186e119db
 ---
 # daedalus — repo card
 
 WHAT: the agent runtime. An agent is a directory (bundle: agent.yaml + persona.md + agent-card.json, optional skills/, tools/, knowledge/); daedalus loads it and serves it over CLI / A2A / Slack, with tool allowlists, approval gates, enforcement hooks, and optional techne memory.
 STATE: main, v0.4.0 (version lives in src/daedalus/__init__.py; pyproject reads it via [tool.hatch.version]); everything since is under CHANGELOG [Unreleased]. Since 2026-09-28: model tiers (#127, #129, #132: model.id may name fast|balanced|best, resolved from $DAEDALUS_TIERS), the exec builtin (#121), Claude Code engine in the runtime image (#112), go-public prep (#138 distribution tenishai-daedalus, community files; DCO check in CI), Slack approver allowlist (#141) and wake modes (#147), per-answer colleague ask limits (#150). Before that, the ENGINE seam (#104, #105, #107, #108; 2026-09-27).
-STACK: Python ≥3.11, hatchling; the distribution is `tenishai-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm. Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (install via requirements-sources.txt; PyPI "techne" is unrelated), dev. Runtime image: docker/Dockerfile (techne + liminal from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
+STACK: Python ≥3.11, hatchling; the distribution is `tenishai-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm. Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (`tenish-techne[vectors]>=0.18.2`; install via requirements-sources.txt, which pins the v0.18.2 tag), dev. Runtime image: docker/Dockerfile (techne + liminal from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
 ENTRY:
 - CLI `daedalus` → src/daedalus/cli.py:main (version, schema, create, run, chat; run/chat take --engine)
 - library → daedalus.Agent (src/daedalus/agent.py), Agent.load(path) / handle_task / serve
