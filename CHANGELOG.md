@@ -16,7 +16,8 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   access" turns colleague asks off for the rest of the answer, and the tool result says to
   tell the user plainly. An agent answering another agent (inbound
   `cabal_delegation_depth` ≥ 1) is not offered `ask_colleague` at all, so A → B → A can't
-  happen. Before this, only the turn budget and cabal's depth bound stopped a hunt,
+  happen. A resumed task restores its inbound depth from the checkpoint; its ask count
+  starts again at zero, because the ledger isn't checkpointed. Before this, only the turn budget and cabal's depth bound stopped a hunt,
   because every "I can't" was an HTTP 200 and counted as a success.
 - **The runtime image builds against liminal 0.3.0.** liminal's distribution became
   `tenishai-liminal` (tenishai/liminal#118); `docker/Dockerfile` still asked pip for

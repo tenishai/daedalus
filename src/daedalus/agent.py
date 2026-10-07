@@ -80,6 +80,15 @@ def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
 
+def _inbound_depth(task: Task, key: str) -> int:
+    """The inbound hop count from task metadata; anything unreadable is 0 (see
+    the comment in handle_task for why OverflowError is caught)."""
+    try:
+        return max(0, int(task.metadata.get(key, 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _with_inbound_note(messages: list[dict]) -> list[dict]:
     """Tell an agent answering a colleague that it can't forward the question
     (#149), once -- a resumed task's checkpointed prompt already has it."""
@@ -523,11 +532,7 @@ class Agent:
         # a crash, in the branch whose stated property is that garbage degrades.
         # (`nan` lands on ValueError and always worked.) cabal's own parser had
         # the identical gap; both ends are fixed.
-        try:
-            _inbound_depth = max(0, int(task.metadata.get(DEPTH_KEY, 0)))
-        except (TypeError, ValueError, OverflowError):
-            _inbound_depth = 0
-        current_delegation_depth.set(_inbound_depth)
+        current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
         # A BACKGROUND TASK SPAWNED BELOW THIS LINE INHERITS THE DEPTH, because
         # asyncio.create_task copies the current context (#40 r1 Nit, filed as
         # daedalus#42). _start_revision_pass does exactly that, and its own ask
@@ -897,6 +902,20 @@ class Agent:
             return None
         task = Task.model_validate(state["task"])
         task.state = TaskState.WORKING
+        # resume() skips handle_task, so restore what _loop and the colleague
+        # guards read (#149): the inbound depth comes back from the checkpointed
+        # task's metadata, so an agent answering a colleague still can't ask
+        # onward. The ask ledger is not checkpointed; a resumed run starts a
+        # fresh one, so the per-answer cap restarts at a resume.
+        from daedalus.tools.colleagues import (
+            DEPTH_KEY,
+            AskLedger,
+            ask_ledger,
+            current_delegation_depth,
+        )
+
+        current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
+        ask_ledger.set(AskLedger())
         return await self._loop(task, state["messages"])
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:

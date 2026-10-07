@@ -746,3 +746,51 @@ async def test_a_depth_zero_caller_keeps_ask_colleague(tmp_path):
     offered = [t["function"]["name"] for t in llm.tools_seen[0]]
     assert "colleagues__ask_colleague" in offered
     assert "You are answering a colleague" not in llm.calls[0][0]["content"]
+
+
+class _MemoryCheckpoints:
+    def __init__(self):
+        self.states: dict[str, dict] = {}
+
+    async def save(self, task_id, state):
+        self.states[task_id] = state
+
+    async def load(self, task_id):
+        return self.states.get(task_id)
+
+    async def drop(self, task_id):
+        self.states.pop(task_id, None)
+
+
+async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path):
+    """resume() skips handle_task, so it must restore the inbound depth itself
+    from the checkpointed task; otherwise the resumed run offers ask_colleague."""
+    from daedalus.tools.colleagues import ask_ledger
+
+    seen_ledger = []
+
+    class LedgerWatchingLLM(ScriptedLLM):
+        async def complete(self, messages, tools=None):
+            seen_ledger.append(ask_ledger.get())
+            return await super().complete(messages, tools)
+
+    llm = LedgerWatchingLLM("I can't reach that from here.")
+    agent = make_agent(
+        tmp_path, allow=["files.read", "colleagues.*"], llm=llm,
+        tools=FakeTools([READ_SPEC, ASK_SPEC]),
+    )
+    agent.checkpoints = _MemoryCheckpoints()
+    task = Task.from_text("what is monitor 42?")
+    task.metadata["cabal_delegation_depth"] = 1
+    await agent.checkpoints.save(
+        task.id,
+        {"task": task.model_dump(), "messages": [
+            {"role": "system", "content": "You are x."},
+            {"role": "user", "content": "what is monitor 42?"},
+        ]},
+    )
+    resumed = await agent.resume(task.id)
+    assert resumed is not None
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["files__read"]
+    assert seen_ledger[0] is not None
