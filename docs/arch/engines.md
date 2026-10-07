@@ -1,0 +1,27 @@
+---
+card: arch-card:daedalus-engines
+updated: 2026-10-07
+anchor: src/daedalus/engines/base.py sha=b1e58daa59388bd729dcbaba1ab6ad9f6d69a1ff
+anchor: src/daedalus/engines/litellm.py sha=6fa5ec275e072e189b200289308d096a6097070b
+anchor: src/daedalus/engines/claude_code.py sha=319df26136d5be80556fb538d5303a9480efc15f
+anchor: src/daedalus/engines/bridge.py sha=bfadb495652bec27bb0239ebd00c0f6d1c97cf7e
+---
+# engines — what runs one task turn (tenishai/agents#51)
+
+WHAT / SEAM: `Engine` Protocol (engines/base.py): `name: str`, `async run(turn: EngineTurn) -> Task`. `EngineTurn` dataclass = everything an engine may use and nothing else: task, messages (system+history, built by Agent._messages), tools (allowlisted specs, CANONICAL dotted names), call_tool(name, args), emit(event, **fields), budget, checkpoints, spec (AgentSpec, read-only), approve(name, input) -> None|refusal, withheld(name) -> bool.
+Registry: agent.py `ENGINES = ("litellm", "claude-code")`; chosen by Agent(engine=) > $DAEDALUS_ENGINE > the engine of the model tier when model.id names one (#127, Agent._resolve_model) > "litellm". An explicit engine that disagrees with the tier is refused; an unknown name → BundleError at construction. Agent._engine() builds a fresh engine PER TURN (tests swap agent.llm).
+OPS / FLOW: Agent._loop → _allowed_tools (tier 1) → drop _unapprovable tools + system-prompt note → EngineTurn(...) → engine.run.
+- LiteLLMEngine (engines/litellm.py): daedalus's own loop. Per step: checkpoint save (images stripped) → budget check (702) → llm.complete → salvage text-embedded tool calls (≤4) → no calls = checkpoint drop + reply → context_tokens / max_repeats checks → dispatch each call via turn.call_tool. Exhaustion (steps/context/repeats) → FAILED 701/702, optional one tool-less wrap_up call when tools.on_exhausted=wrap_up and budget remains.
+- ClaudeCodeEngine (engines/claude_code.py): Claude Code IS the agent, via claude_agent_sdk.query. Our tools = SDK in-process MCP server named `daedalus` (mcp__daedalus__<munged>), each handler → turn.call_tool. Built-ins (spec.engine.claude_code.builtin_tools) decided by can_use_tool → turn.approve("claude.<Tool>"). History flattened to one text prompt (_split); image parts dropped. CLI: spec.engine.claude_code.binary when set, else the SDK's bundled CLI, then `claude` on PATH. Emits engine_finished with models, turns, model_usage and, when the SDK reports them, token counts and total_cost_usd (#135); a counter absent from a present usage block is 0, a missing usage block omits all four.
+- ToolBridge (engines/bridge.py): loopback MCP-over-HTTP server (127.0.0.1, OS port, per-run bearer, random server name) + `approve` tool for --permission-prompt-tool. NO production caller today: #107 landed it, #108 went with the SDK's in-process server instead. Only tests/test_engine_bridge.py uses it.
+INVARIANTS:
+- Engines hold NO policy. Allowlist, gates, approver live in Agent (_call_tool, _approve_native, _withheld_native) so every engine gets identical enforcement. Never gate inside an engine.
+- The engine never reaches back into the Agent; only EngineTurn fields. Why: a second engine must not depend on Agent internals.
+- Model-safe names: `_munge` = "." → "__" (litellm.py). Engines map munged → canonical before call_tool; trace events speak canonical names. ClaudeCodeEngine refuses two tools that munge to one name (ValueError → FAILED 704).
+- claude-code + model.budget.per_task_tokens → BundleError at load (agent.py): Claude Code runs the whole loop, a token budget can't stop it. Declare the gap, never degrade silently.
+- ClaudeCodeEngine passes setting_sources=["user"] (no workspace .claude/settings.json hooks or .mcp.json, agents#76), strict_mcp_config=True, explicit permission_mode, allowed_tools = only ours, env DAEDALUS_ENGINE_CHILD=1 (hook recursion guard). approve=None → `--permission-prompts none`.
+- Claude Code self-approves some built-in calls (read-only tools/commands, permission-mode auto-approvals, user-settings allow rules); those never hit our gates. Only leaving a built-in out of builtin_tools guarantees it can't run.
+- Replies read by humans; machines key on state + reason code (task.py), never reply text.
+NOT HONOURED BY claude-code: checkpoints/resume, tools.on_exhausted, context_tokens, max_repeats. tools.max_steps → max_turns (error_max_turns → FAILED 701).
+CONSUMERS: agent.py (_loop, _engine); cli.py run/chat --engine; tests/test_engines.py, test_engine_claude_code.py (fake `query`), test_engine_bridge.py (real HTTP, needs claude-code extra: CI 3.12 leg only), tests/test_agent_tools.py = the LiteLLM loop's behaviour spec.
+API: daedalus.engines.{Engine, EngineTurn}; LiteLLMEngine(llm); ClaudeCodeEngine(spec: ClaudeCodeSpec, query=None); ToolBridge(turn) async ctx → mcp_config(), approve_tool; litellm.salvage_tool_calls (re-exported from agent.py for tests).
