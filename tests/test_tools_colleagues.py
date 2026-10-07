@@ -1370,3 +1370,178 @@ async def test_an_answered_ask_is_still_credited(monkeypatch):
 
     assert ledger == ["rin"]
     assert out == "the PSA range is X"
+
+
+# ---- #149: per-answer limits on ask_colleague ---------------------------------
+#
+# Observed 2026-10-06: an agent asked about a system no colleague had a tool for
+# asked one colleague three times in one answer, kept going after "I don't have
+# access", and the question bounced back to it. Every "I can't" was an HTTP 200,
+# so the breaker counted it a success.
+
+CANT = (
+    "I don't have direct access to execute shell commands or call external APIs. "
+    "Here's what you need to run in your terminal..."
+)
+
+
+def _answer(text):
+    return FakeResponse(200, {"status": {"message": {"parts": [{"kind": "text", "text": text}]}}})
+
+
+async def _ask(provider, name, question="what is monitor 42?"):
+    return await provider.call("colleagues.ask_colleague", {"name": name, "question": question})
+
+
+def _asked(client):
+    return [body["target"] for _, body, _ in client.post_calls]
+
+
+@pytest.fixture
+def ledger():
+    from daedalus.tools.colleagues import AskLedger, ask_ledger
+
+    token = ask_ledger.set(AskLedger())
+    yield ask_ledger.get()
+    ask_ledger.reset(token)
+
+
+async def test_a_fourth_ask_in_one_answer_is_refused_without_dispatching(monkeypatch, ledger):
+    from daedalus.tools.colleagues import MAX_ASKS_PER_ANSWER
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_answer("ok")] * 3)
+    provider = make_provider(client)
+    for name in ("rin", "ana", "bo"):
+        await _ask(provider, name)
+    out = await _ask(provider, "cy")
+    assert MAX_ASKS_PER_ANSWER == 3
+    assert _asked(client) == ["rin", "ana", "bo"]
+    assert "limit of 3" in out
+
+
+async def test_a_repeat_ask_returns_the_earlier_reply_and_does_not_count(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_answer("p99 latency over 2s")] + [_answer("ok")] * 2)
+    provider = make_provider(client)
+    await _ask(provider, "rin")
+    again = await _ask(provider, "rin", "same thing, reworded")
+    await _ask(provider, "ana")
+    await _ask(provider, "bo")
+    assert _asked(client) == ["rin", "ana", "bo"]
+    assert "already asked rin" in again and "p99 latency over 2s" in again
+
+
+async def test_cant_help_ends_the_hunt_for_every_colleague(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_answer(CANT)])
+    provider = make_provider(client)
+    first = await _ask(provider, "rin")
+    after = await _ask(provider, "ana")
+    assert first.startswith(CANT) and "rin can't help" in first
+    assert _asked(client) == ["rin"]
+    assert "colleague asks are off" in after
+
+
+async def test_an_ambiguous_reply_is_an_answer_and_the_hunt_goes_on(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    hedged = "It tracks p99 latency. I can't be sure of the threshold, but it fired at 19:27."
+    client = FakeHTTPClient(post_responses=[_answer(hedged), _answer("ok")])
+    provider = make_provider(client)
+    assert await _ask(provider, "rin") == hedged
+    await _ask(provider, "ana")
+    assert _asked(client) == ["rin", "ana"]
+
+
+def test_cant_help_matches_narrowly_and_only_near_the_start():
+    from daedalus.tools.colleagues import is_cant_help
+
+    assert is_cant_help(CANT)
+    assert is_cant_help("I'm unable to reach that system from here.")
+    assert is_cant_help("Sorry, I cannot access that.")
+    assert is_cant_help("There's no tool for that on my side.")
+    assert not is_cant_help("The backlog is 5.6M and growing.")
+    assert not is_cant_help("I can't be sure, but the deploy went out at 14:00.")
+    assert not is_cant_help("x" * 400 + " I can't see the threshold.")
+
+
+async def test_a_concurrent_second_ask_to_the_same_colleague_is_not_dispatched(monkeypatch, ledger):
+    import asyncio
+
+    class SlowClient(FakeHTTPClient):
+        async def post(self, url, json=None, headers=None, timeout=None):
+            await asyncio.sleep(0)  # yield, as a real request would
+            return await super().post(url, json=json, headers=headers, timeout=timeout)
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = SlowClient(post_responses=[_answer("ok")])
+    provider = make_provider(client)
+    first, second = await asyncio.gather(_ask(provider, "rin"), _ask(provider, "rin"))
+    assert _asked(client) == ["rin"]
+    assert first == "ok" and "already in flight" in second
+
+
+async def test_without_a_ledger_the_guards_stand_aside(monkeypatch):
+    """The revision pass asks through call() too, outside any answer's ledger."""
+    from daedalus.tools.colleagues import ask_ledger
+
+    token = ask_ledger.set(None)
+    try:
+        monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+        client = FakeHTTPClient(post_responses=[_answer(CANT)] * 5)
+        provider = make_provider(client)
+        for _ in range(5):
+            await _ask(provider, "rin")
+        assert len(client.post_calls) == 5
+    finally:
+        ask_ledger.reset(token)
+
+
+async def test_list_and_remember_are_not_limited(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(
+        get_responses=[FakeResponse(200, DIRECTORY)], post_responses=[_answer(CANT)]
+    )
+    provider = make_provider(client)
+    await _ask(provider, "rin")
+    listing = await provider.call("colleagues.list_colleagues", {})
+    assert "rin" in listing
+
+
+async def test_handle_task_gives_each_answer_a_fresh_ledger(monkeypatch):
+    """End to end: the cap holds within one handle_task and resets for the next."""
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle
+    from daedalus.protocols import LLMResponse, ToolCall
+    from daedalus.task import Task
+    from tests.fakes import ScriptedLLM
+
+    def asks(*names):
+        return LLMResponse(
+            text="",
+            tool_calls=[
+                ToolCall(id=n, name="colleagues__ask_colleague",
+                         arguments={"name": n, "question": "q"})
+                for n in names
+            ],
+        )
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_answer("ok")] * 4)
+    provider = make_provider(client)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "agent.yaml").write_text(
+            "name: me\nmodel:\n  id: m\ntools:\n  provider: none\n  allow:\n"
+            "    - colleagues.*\n"
+        )
+        (root / "agent-card.json").write_text("{}")
+        (root / "persona.md").write_text("You are me.")
+        llm = ScriptedLLM(asks("rin", "ana", "bo", "cy"), "first answer", asks("cy"), "second")
+        agent = Agent(Bundle.load(root), llm=llm, tools=provider)
+        await agent.handle_task(Task.from_text("one"))
+        assert _asked(client) == ["rin", "ana", "bo"]
+        await agent.handle_task(Task.from_text("two"))
+        assert _asked(client) == ["rin", "ana", "bo", "cy"]

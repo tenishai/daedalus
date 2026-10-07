@@ -10,9 +10,12 @@ tool-result text — the provider never raises out to the agent loop.
 from __future__ import annotations
 
 import contextvars
+import logging
 import os
+import re
 import secrets
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +26,8 @@ _UNREADABLE_REPLY = "The colleague answered in a shape I could not read."
 #: exactly what makes it readable as an answer if nobody checks (#40 r2).
 _UNANSWERED_STATES = frozenset({"failed", "rejected", "canceled"})
 _NO_MEMORY = "I have no memory store configured, so I cannot remember that."
+
+log = logging.getLogger(__name__)
 
 # A colleague whose heartbeat is older than this is treated as unreachable
 # (daedalus#38). 120s is a CHOSEN threshold, and calling it four missed beats
@@ -119,6 +124,55 @@ DEPTH_KEY = "cabal_delegation_depth"
 # same reason current_context_id is one: concurrent tasks.
 consulted_colleagues: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "consulted_colleagues", default=None
+)
+
+
+#: Colleague asks per answer, across all colleagues (#149). Repeat asks to a
+#: colleague already asked are answered from the ledger and don't count.
+MAX_ASKS_PER_ANSWER = 3
+
+#: A reply that OPENS by saying the colleague can't do it (#149). Matched only
+#: in the first _CANT_HELP_WINDOW characters and deliberately narrow: a false
+#: match ends the hunt and throws away a real answer, so anything ambiguous
+#: must read as an answer. "I can't be sure of X, but..." is an answer.
+_CANT_HELP = re.compile(
+    r"\bI(?:'m| am) (?:unable|not able) to\b"
+    r"|\bI (?:can't|cannot|can not) (?:access|do|fetch|query|read|reach|run|"
+    r"execute|see|help|look up|call|connect)\b"
+    r"|\bI (?:don't|do not) have (?:direct |any )?(?:access|a tool|tools|the ability)\b"
+    r"|\bno (?:tool|access) (?:for|to)\b",
+    re.IGNORECASE,
+)
+_CANT_HELP_WINDOW = 300
+
+
+def is_cant_help(reply: str) -> bool:
+    """Does this colleague reply open by saying it can't do what was asked?"""
+    return bool(_CANT_HELP.search((reply or "")[:_CANT_HELP_WINDOW]))
+
+
+@dataclass
+class AskLedger:
+    """The colleague asks made while producing ONE answer (#149).
+
+    `replies` maps a colleague to its reply, or to None while that ask is in
+    flight -- so a concurrent second ask to the same colleague (an engine that
+    runs tool calls in parallel) is refused instead of dispatched twice.
+    """
+
+    asks: int = 0
+    replies: dict[str, str | None] = field(default_factory=dict)
+    cant_help: str | None = None
+
+
+# The current answer's ledger, set by Agent.handle_task immediately before the
+# model loop. None everywhere else, and then the guards stand aside: the
+# revision pass also asks through call(), but it is spawned from system-task
+# paths that return before the ledger is set, so it inherits None and keeps
+# its own corroboration logic. A contextvar for the same reason as the rest:
+# concurrent tasks.
+ask_ledger: contextvars.ContextVar[AskLedger | None] = contextvars.ContextVar(
+    "ask_ledger", default=None
 )
 
 
@@ -293,7 +347,13 @@ class ColleaguesToolProvider:
             },
             {
                 "name": "colleagues.ask_colleague",
-                "description": "Ask a named colleague a question over A2A and get their reply.",
+                "description": (
+                    "Ask a named colleague a question over A2A and get their reply. "
+                    f"At most {MAX_ASKS_PER_ANSWER} asks per answer, and one per "
+                    "colleague. If a colleague says they can't help, don't hunt "
+                    "further: tell the user in one line what you can't do, and give "
+                    "what you can from your own tools."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -336,7 +396,7 @@ class ColleaguesToolProvider:
         if name == "colleagues.list_colleagues":
             return await self._list_colleagues()
         if name == "colleagues.ask_colleague":
-            return await self._ask_colleague(payload.get("name", ""), payload.get("question", ""))
+            return await self._guarded_ask(payload.get("name", ""), payload.get("question", ""))
         if name == "colleagues.remember":
             return await self._remember(payload.get("fact", ""), payload.get("learned_from", ""))
         raise LookupError(f"unknown tool {name!r}")
@@ -500,6 +560,61 @@ class ColleaguesToolProvider:
         """One success clears the record. CONSECUTIVE failures are what matter
         -- a colleague that answers between two blips is not failing."""
         self._failures.pop(name, None)
+
+    async def _guarded_ask(self, target: str, question: str) -> str:
+        """The per-answer limits on top of _ask_colleague (#149).
+
+        Observed 2026-10-06: an agent asked about a system no colleague had a
+        tool for asked the same colleague three times, kept asking after "I
+        don't have access", and the question came back to it as an inbound
+        task. The breaker could not stop it -- every "I can't" was an HTTP 200,
+        which is a success to a breaker that counts transport events. These
+        guards only make the tool refuse sooner; they never retry.
+
+        Order matters: a can't-help ends everything, a repeat is answered from
+        the ledger before the cap is consulted (so it never counts), and the
+        count and the in-flight marker are taken BEFORE the await so a
+        concurrent ask sees them.
+        """
+        ledger = ask_ledger.get()
+        if ledger is None:
+            return await self._ask_colleague(target, question)
+        if ledger.cant_help is not None:
+            log.info("colleague_ask_after_cant_help target=%s", target)
+            return (
+                f"Not asked: {ledger.cant_help} already said they can't help with "
+                "this, so colleague asks are off for the rest of this answer. Tell "
+                "the user in one line that you can't do it, and give what you can "
+                "from your own tools."
+            )
+        if target in ledger.replies:
+            earlier = ledger.replies[target]
+            log.info("colleague_ask_deduped target=%s", target)
+            if earlier is None:
+                return f"Not asked: a question to {target} is already in flight in this answer."
+            return (
+                f"Not asked again: you already asked {target} in this answer. "
+                f"Their reply was:\n\n{earlier}\n\nUse it, or say you can't."
+            )
+        if ledger.asks >= MAX_ASKS_PER_ANSWER:
+            log.info("colleague_ask_capped target=%s asks=%d", target, ledger.asks)
+            return (
+                f"Not asked: the limit of {MAX_ASKS_PER_ANSWER} colleague asks for "
+                "one answer is reached. Answer from what you have, or say you can't."
+            )
+        ledger.asks += 1
+        ledger.replies[target] = None
+        reply = await self._ask_colleague(target, question)
+        ledger.replies[target] = reply
+        if is_cant_help(reply):
+            ledger.cant_help = target
+            log.info("colleague_cant_help target=%s", target)
+            reply += (
+                f"\n\n[{target} can't help with this. Don't ask other colleagues "
+                "the same thing: tell the user in one line that you can't do it, "
+                "and give what you can from your own tools.]"
+            )
+        return reply
 
     async def _ask_colleague(self, target: str, question: str) -> str:
         token = self._token()
