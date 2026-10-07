@@ -34,7 +34,7 @@ GOTCHAS:
 - `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py. AGENTS.md's directory map says otherwise; the code wins.
 - `bundle/tools/` = enforcement hooks; `tools:` in agent.yaml = LLM tool providers. Same word, unrelated.
 - Engine choice is the OPERATOR's (--engine / DAEDALUS_ENGINE), never the bundle's; the bundle only carries engine.claude_code settings.
-- `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; docs/design.md §3 says they are enforced. They are not. (`ceiling.exec` IS read: it gates the exec builtin.)
+- `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; don't describe them as controls. Only `ceiling.exec` is read, at load, where it gates the exec builtin (docs/design.md §3 says the same).
 - No code sets TaskState.INPUT_REQUIRED; design.md's "task parks in input-required" is not implemented.
 - AGENTS.md cites `_OPERATOR_GATE_EVENTS` at cli.py:85; it is at cli.py:92.
 - docs/bundle.schema.json must be regenerated (`daedalus schema --out docs/bundle.schema.json`) with any AgentSpec change, or test_schema fails.
