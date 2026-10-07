@@ -8,6 +8,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
+### Upgrading
+
+- **techne 0.18.2, under its new distribution name `tenish-techne`.** The `techne` extra
+  needs `tenish-techne[vectors]>=0.18.2` (was `techne[vectors]>=0.17.0`), and
+  `requirements-sources.txt` pins the `v0.18.2` tag. The import package and the `techne`
+  command are unchanged. Run `pip uninstall techne` before reinstalling: pip treats the two
+  names as unrelated projects and would leave the old one installed beside the new one.
+  `docker/Dockerfile` installs and asserts 0.18.2, from a sibling checkout or an index.
+
 ### Fixed
 
 - **`colleagues.ask_colleague` is limited per answer** (issue #149). One answer gets at
