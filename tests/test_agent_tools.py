@@ -708,3 +708,41 @@ def test_max_repeats_below_two_is_rejected(tmp_path, value):
 
     with pytest.raises((BundleError, ValueError)):
         make_agent(tmp_path, allow=["files.read"], tools_extra=f"  max_repeats: {value}\n")
+
+
+# --- #149: an agent answering a colleague can't ask onward --------------------
+
+ASK_SPEC = {"name": "colleagues.ask_colleague", "description": "ask", "parameters": {}}
+
+
+async def test_answering_a_colleague_withholds_ask_colleague(tmp_path):
+    """Depth >= 1 means another agent asked. Offering ask_colleague then is how
+    A -> B -> A happens; withholding it makes the bounce impossible."""
+    llm = ScriptedLLM(
+        tool_turn(ToolCall(id="1", name="colleagues__ask_colleague", arguments={})),
+        "I can't reach that from here.",
+    )
+    tools = FakeTools([READ_SPEC, ASK_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
+    task = Task.from_text("what is monitor 42?")
+    task.metadata["cabal_delegation_depth"] = 1
+    await agent.handle_task(task)
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["files__read"]
+    assert "You are answering a colleague" in llm.calls[0][0]["content"]
+    assert {"type": "colleague_ask_withheld_inbound"} in events
+    assert tools.calls == []
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+
+
+async def test_a_depth_zero_caller_keeps_ask_colleague(tmp_path):
+    """A caller that sends no depth (a person via the switchboard) is not a colleague."""
+    llm = ScriptedLLM("done")
+    tools = FakeTools([READ_SPEC, ASK_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
+    await agent.handle_task(Task.from_text("hi"))
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert "colleagues__ask_colleague" in offered
+    assert "You are answering a colleague" not in llm.calls[0][0]["content"]

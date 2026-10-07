@@ -61,6 +61,8 @@ log = logging.getLogger(__name__)
 
 
 _WITHHELD_HEADING = "## Tools you can't use in this run"
+_INBOUND_HEADING = "## You are answering a colleague"
+_ASK_TOOL = "colleagues.ask_colleague"
 
 
 def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
@@ -74,6 +76,20 @@ def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
         "These tools need approval, and nobody can give it in this run, so they are "
         f"not available: {', '.join(sorted(withheld))}. Don't try to call them. If the "
         "task needs one, say what you would have done with it."
+    )
+    return [{**system, "content": system["content"] + note}, *messages[1:]]
+
+
+def _with_inbound_note(messages: list[dict]) -> list[dict]:
+    """Tell an agent answering a colleague that it can't forward the question
+    (#149), once -- a resumed task's checkpointed prompt already has it."""
+    system = messages[0]
+    if system.get("role") != "system" or _INBOUND_HEADING in str(system.get("content")):
+        return messages
+    note = (
+        f"\n\n{_INBOUND_HEADING}\n"
+        "Another agent asked you this. Answer from your own tools, or say in one "
+        "line that you can't. You can't ask other colleagues while answering one."
     )
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
@@ -482,6 +498,8 @@ class Agent:
         # colleagues.py imports nothing from daedalus.agent.
         from daedalus.tools.colleagues import (
             DEPTH_KEY,
+            AskLedger,
+            ask_ledger,
             consulted_colleagues,
             current_context_id,
             current_delegation_depth,
@@ -550,6 +568,10 @@ class Agent:
         recalled = await self.memory.recall(query)
         if recalled:
             self._emit("recall", count=len(recalled))
+        # The per-answer colleague limits (#149) start HERE, after the system-task
+        # dispatch above: a revision pass spawned on that path inherits no ledger
+        # and asks unguarded, which its corroboration logic relies on.
+        ask_ledger.set(AskLedger())
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text())
@@ -896,6 +918,18 @@ class Agent:
             allowed = [spec for spec in allowed if spec["name"] not in withheld]
             self._emit("tools_withheld", names=sorted(withheld))
             messages = _with_withheld_note(messages, withheld)
+        from daedalus.tools.colleagues import current_delegation_depth
+
+        if current_delegation_depth.get() >= 1 and any(s["name"] == _ASK_TOOL for s in allowed):
+            # ANSWERING A COLLEAGUE, SO NO ONWARD ASKS (#149). Without this, A asks
+            # B, B asks A, and only cabal's depth bound ends it; withholding the
+            # tool makes the bounce impossible. Keyed on depth, not transport: a
+            # caller that sends no depth (a person via the switchboard) arrives at
+            # 0 and can still be answered with help from colleagues. _call_tool
+            # refuses the name if the model calls it anyway.
+            allowed = [spec for spec in allowed if spec["name"] != _ASK_TOOL]
+            self._emit("colleague_ask_withheld_inbound")
+            messages = _with_inbound_note(messages)
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
 
