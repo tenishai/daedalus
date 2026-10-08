@@ -71,6 +71,16 @@ Same bundle, three runtimes — a chat REPL, an A2A endpoint, a Slack
 presence. A companion GUI is planned to edit the same files. No code generation,
 ever: the bundle is the source of truth, diffable and PR-reviewable.
 
+## How this was built
+
+tenishai is a small team of engineers who build with AI coding agents. Most of
+this code was written in pairing sessions with Claude models in Claude Code: a
+person set the design, directed the work and reviewed what landed, and the
+agent wrote much of the code and docs. Many commits name the agent in a
+`Co-Authored-By:` trailer, either a Claude model or Poe (earlier Raven), the
+name of the agent one of us pairs with. A commit without a trailer may still
+have had AI help.
+
 ## License
 
 Copyright (C) 2026 tenish and the daedalus contributors
