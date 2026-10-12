@@ -190,7 +190,8 @@ def _describe_tool(name: str, args: object) -> str:
     that" (2026-10-12). `github.read_file {path, repository}` ->
     "Reading file teams/data.yaml in example/infra"; `cloudtrail.query` ->
     "Searching CloudTrail"; `colleagues.ask_colleague {name}` -> "Asking
-    ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1"."""
+    ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1
+    (Atlassian)"."""
     provider, _, op = name.partition(".")
     words = _words(op)
     verb = ""
