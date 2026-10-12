@@ -1655,7 +1655,36 @@ async def test_an_empty_json_detail_is_not_echoed_as_raw_text(monkeypatch):
 # --- #151: only asks that reached the colleague use a slot --------------------
 
 
-async def test_after_a_transport_failure_a_retry_is_dispatched(monkeypatch, ledger):
+class _FailOnceClient(FakeHTTPClient):
+    """The first POST raises, as a timeout or refused connection does."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.failed = False
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        if not self.failed:
+            self.failed = True
+            self.post_calls.append((url, json or {}, headers or {}))
+            raise TimeoutError("timed out")
+        return await super().post(url, json=json, headers=headers, timeout=timeout)
+
+
+async def test_after_a_connection_failure_a_retry_is_dispatched(monkeypatch, ledger):
+    """The headline case of #151: the request raised, so nothing reached the
+    colleague, and the retry goes out."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = _FailOnceClient(post_responses=[_answer("ok")])
+    provider = make_provider(client)
+    first = await _ask(provider, "rin")
+    second = await _ask(provider, "rin")
+    assert first.startswith("Could not reach rin")
+    assert second == "ok"
+    assert _asked(client) == ["rin", "rin"]
+    assert ledger.asks == 1
+
+
+async def test_after_a_502_a_retry_is_dispatched(monkeypatch, ledger):
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
     client = FakeHTTPClient(post_responses=[FakeResponse(502), _answer("ok")])
     provider = make_provider(client)
@@ -1691,14 +1720,46 @@ async def test_asking_yourself_does_not_use_a_slot(monkeypatch, ledger):
     assert ledger.asks == 3
 
 
-async def test_a_policy_refusal_is_cached_and_counted(monkeypatch, ledger):
-    """A 403 won't change on a retry, so it stays in the ledger: a repeat is
-    answered from it, and it uses a slot so refusals can't fuel a hunt."""
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_a_policy_refusal_is_cached_and_counted(monkeypatch, ledger, status):
+    """A 401/403/404 won't change on a retry, so it stays in the ledger: a
+    repeat is answered from it, and it uses a slot so refusals can't fuel a
+    hunt. 404 included: a mistyped name is answered by the switchboard."""
     monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
-    client = FakeHTTPClient(post_responses=[FakeResponse(403, {"detail": "not a colleague"})])
+    client = FakeHTTPClient(post_responses=[FakeResponse(status, {"detail": "not a colleague"})])
     provider = make_provider(client)
     await _ask(provider, "rin")
     again = await _ask(provider, "rin")
     assert "already asked rin" in again and "not a colleague" in again
+    assert _asked(client) == ["rin"]
+    assert ledger.asks == 1
+
+
+_ANSWERED_200S = {
+    "unreadable": FakeResponse(200, malformed=True),
+    "no text": FakeResponse(200, {"status": {"message": {"parts": []}}}),
+    "did not answer": FakeResponse(
+        200,
+        {
+            "status": {
+                "state": "failed",
+                "message": {"parts": [{"kind": "text", "text": "blocked"}]},
+            }
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ANSWERED_200S))
+async def test_every_200_counts_and_is_cached(monkeypatch, ledger, shape):
+    """A 200 clears the breaker, so if these didn't count, a colleague whose
+    guardrail refuses with state=failed would be re-dispatched on every ask in
+    the answer: the unbounded hunt #149 closed."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_ANSWERED_200S[shape]])
+    provider = make_provider(client)
+    await _ask(provider, "rin")
+    again = await _ask(provider, "rin")
+    assert "already asked rin" in again
     assert _asked(client) == ["rin"]
     assert ledger.asks == 1
