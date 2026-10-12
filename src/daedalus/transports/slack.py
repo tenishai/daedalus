@@ -20,7 +20,7 @@ requirements, not code:
 - tier-2 approvals via reactions on a posted plan
 - tier-3 escalation (reason 700/704) copied to approvals.escalation.route
 
-Requires the slack extra: pip install 'tenishai-daedalus[slack]'. Tokens come from
+Requires the slack extra: pip install 'tenish-daedalus[slack]'. Tokens come from
 SLACK_BOT_TOKEN and SLACK_APP_TOKEN unless passed explicitly.
 """
 

@@ -6,39 +6,53 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
-Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
+## [0.5.0] — 2026-10-12
+
+Everything since v0.4.0 (2026-09-14), 57 commits.
 
 ### Upgrading
 
-- **techne 0.18.2, under its new distribution name `tenish-techne`.** The `techne` extra
-  needs `tenish-techne[vectors]>=0.18.2` (was `techne[vectors]>=0.17.0`), and
-  `requirements-sources.txt` pins the `v0.18.2` tag. The import package and the `techne`
+- **The distribution is now `tenish-daedalus`** (was `daedalus` in 0.4.0): every released
+  tenish Python distribution is named `tenish-<project>`. The import package
+  (`import daedalus`) and the `daedalus` command are unchanged. Run
+  `pip uninstall daedalus tenishai-daedalus` before installing 0.5.0: v0.4.0 installed as
+  `daedalus`, and a checkout of main between tenishai/daedalus#138 and this release
+  installed as `tenishai-daedalus`; pip treats each name as an unrelated project and would
+  leave the old one beside the new. Extras install as `tenish-daedalus[a2a]`, and
+  `pip show tenish-daedalus` looks it up. `__version__` is still the literal in
+  `src/daedalus/__init__.py`, so `daedalus version` is right with any install; reinstall an
+  editable checkout (`pip install -e ".[dev]"`) anyway so pip's record carries the new name.
+  `v0.5.0` is the first tag that builds `tenish-daedalus`; `v0.4.0` builds `daedalus`.
+- **techne 0.18.2, under its new distribution name `tenish-techne`**
+  (tenishai/daedalus#152). The `techne` extra needs `tenish-techne[vectors]>=0.18.2` (was
+  `techne[vectors]>=0.17.0`), and `requirements-sources.txt` pins the `v0.18.2` tag. The import package and the `techne`
   command are unchanged. Run `pip uninstall techne` before reinstalling: pip treats the two
   names as unrelated projects and would leave the old one installed beside the new one.
   `docker/Dockerfile` installs and asserts 0.18.2, from a sibling checkout or an index.
-
-### Fixed
-
-- **A colleague's refusal is shown, and no longer bans it** (issues #155 and #56).
-  `colleagues.ask_colleague` used to answer any non-200 with "Asking X failed: HTTP N."
-  For a 4xx it now includes the switchboard's reason, capped at 300 characters. A 401, 403
-  or 404 is worded as a refusal that won't change on retry, and no longer counts toward
-  marking the colleague down, so a policy refusal can't hide a healthy colleague for five
-  minutes. Other 4xx (400, 422, 429) and 5xx still count.
-- **`colleagues.ask_colleague` is limited per answer** (issue #149). One answer gets at
-  most 3 colleague asks. A repeat ask to the same colleague returns the earlier reply
-  without dispatching and doesn't count. A reply that opens with "I can't" / "I don't have
-  access" turns colleague asks off for the rest of the answer, and the tool result says to
-  tell the user plainly. An agent answering another agent (inbound
-  `cabal_delegation_depth` ≥ 1) is not offered `ask_colleague` at all, so A → B → A can't
-  happen. A resumed task restores its inbound depth from the checkpoint; its ask count
-  starts again at zero, because the ledger isn't checkpointed. Before this, only the turn budget and cabal's depth bound stopped a hunt,
-  because every "I can't" was an HTTP 200 and counted as a success.
-- **The runtime image builds against liminal 0.3.0.** liminal's distribution became
-  `tenishai-liminal` (tenishai/liminal#118); `docker/Dockerfile` still asked pip for
-  `liminal`, so a build with a current liminal checkout failed with "liminal
-  (unavailable)". Both the wheel step and the install name the new distribution; the
-  import package is unchanged.
+- **The runtime image needs liminal 0.4.0, under its new distribution name
+  `tenish-liminal`.** `docker/Dockerfile` installs `tenish-liminal` (was
+  `tenishai-liminal`), and its index path asks for `tenish-liminal>=0.4.0`. A
+  sibling-checkout build wants `../liminal` at `v0.4.0` or later: pip refuses a direct
+  requirement whose name doesn't match the project, so an older checkout fails the wheel
+  step. The import package `liminal` is unchanged.
+- **Slack tier-2 approvals need an `approvers` list** (tenishai/daedalus#141). A
+  `kind: slack` block now takes `approvers: [U...]` (Slack user ids), and reaction
+  approvals are wired only when the transport has both a `channel` allowlist and
+  approvers. In 0.4.0 any member of an allowlisted channel, the requester included, could
+  approve; with no approvers a tier-2 action is now denied before a plan is posted. Add
+  `approvers` to any bundle that relies on Slack approvals.
+- **Bundles that load in 0.4.0 can fail in 0.5.0.** `memory.team: outbox` is rejected,
+  since it never did anything (tenishai/daedalus#142, closes tenishai/daedalus#111). A
+  `cloudtrail` sidecar's `event_data_store` must be an event data store ID (a UUID) or an
+  eventdatastore ARN (tenishai/daedalus#142, closes tenishai/daedalus#88). An empty
+  `channel:` key on a Slack block is a boot error; leave the key out to mean every channel
+  the app was invited to (tenishai/daedalus#77).
+- **`github.open_pr` branches are named `daedalus/<agent>/<slug>`** (was
+  `kobo/<agent>/<slug>`). Set `tools.github.branch_prefix: kobo` to keep the old names
+  (tenishai/daedalus#144).
+- **The `slack` extra needs slack-sdk 3.40 or later** for streamed replies
+  (tenishai/daedalus#147). `wake: thread` and `wake: channel` also need `message.channels` /
+  `message.groups` subscribed in the Slack app manifest.
 
 ### Added
 
@@ -53,14 +67,13 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   `message.groups` subscribed in the Slack app manifest. In `thread` mode the
   followed threads are kept in memory, so a restart forgets them: an old thread
   then needs a mention on every message, and a new thread started with a mention
-  is followed again.
+  is followed again (tenishai/daedalus#147).
 - **Slack replies stream, with progress.** The working message is a `chat.startStream`
   stream: each tool call, and each memory recall that finds something, appears as a
   progress line under it (a repeat straight after the same line is not shown again), and the answer lands in the same message. Events are stamped with their
   task's context id, so two threads working at once never show each other's steps. A
   workspace that refuses the stream gets the hourglass placeholder as before. The
-  `slack` extra now needs slack-sdk 3.40 or later.
-
+  `slack` extra now needs slack-sdk 3.40 or later (tenishai/daedalus#147).
 - **The Claude Code engine.** `daedalus run` and `daedalus chat` take `--engine claude-code`
   (or `DAEDALUS_ENGINE`) to run a bundle with Claude Code as the agent, on Anthropic's
   Agent SDK. A turn now runs behind an `Engine` seam; the LiteLLM loop is the first
@@ -119,10 +132,14 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   templates, and this changelog (tenishai/daedalus#83, tenishai/daedalus#138).
 - **A DCO check** on every pull request, and a Dependabot config for pip and GitHub Actions
   (tenishai/daedalus#138).
+- **Architecture cards.** `ARCHITECTURE.md` is the repo card and `docs/arch/` holds a card
+  per seam (a2a-wire, approvals, bundle, engines, protocols); each pins the files it
+  describes by blob sha, and `scripts/check_arch_cards.py` fails when an anchored file
+  changes without its card (tenishai/daedalus#109).
 
 ### Changed
 
-- **Slack streamed replies say what the agent is doing** (PR #160). The streamed
+- **Slack streamed replies say what the agent is doing** (tenishai/daedalus#160). The streamed
   message opens with "On it" the instant the stream starts, so a quick turn never
   shows an empty bubble. Each progress line is built from the tool's own name, in
   the present tense, and names only the object that matters ("Reading file
@@ -133,14 +150,13 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   thread did not show at all. Once the stream closes, the message is rewritten
   to the answer alone when the answer fits one Slack message; a longer answer, or a
   rewrite Slack refuses, leaves the trail above the answer.
-
 - **The GitHub tool's default head-branch prefix is now `daedalus/`, and it is configurable.**
   `open_pr` used to name every branch `kobo/<agent>/<slug>`, which hardcoded another
   product's name. The new `tools.github.branch_prefix` bundle setting (default `daedalus`)
   gives `<prefix>/<agent>/<slug>`, the tool description the model sees names the configured
   prefix, and a value that is not a valid git ref component fails at bundle load. Bundles
   that relied on the old `kobo/` prefix should set `branch_prefix: kobo`. An exact `branch`
-  argument still wins. Closes #140.
+  argument still wins (tenishai/daedalus#144, closes tenishai/daedalus#140).
 - **A bare `- kind: slack` transport answers in every channel the app was invited to.** A
   non-empty `channel` list is still an allowlist. An empty `channel` key is now a boot
   error rather than "every channel", and `slack_read.channels: []` now turns the lane on
@@ -155,11 +171,24 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   and `make image` passes both contexts (tenishai/daedalus#128).
 - **Every third-party GitHub Action is pinned to a full commit SHA**, and the CI header
   comment no longer names the CI host (tenishai/daedalus#138).
-- **The distribution is named `tenishai-daedalus`** (pyproject `name`; was `daedalus`). The
-  bare names `daedalus` and `techne` are taken or open to squatting on PyPI. The import
-  package (`import daedalus`) and the CLI (`daedalus`) are unchanged; install extras as
-  `tenishai-daedalus[a2a]`, and `pip show tenishai-daedalus` is how to look it up
-  (tenishai/daedalus#138).
+- **The distribution is named `tenish-daedalus`** (tenishai/daedalus#163; pyproject `name`; was
+  `daedalus` in 0.4.0). The bare name `daedalus` is taken or open to squatting on PyPI, and every
+  released tenish Python distribution is `tenish-<project>`, as techne is `tenish-techne`
+  and liminal `tenish-liminal`. tenishai/daedalus#138 first renamed it to
+  `tenishai-daedalus`, a name no release used; this release settles on `tenish-daedalus`.
+  pyproject's `name`, the install hints in error messages, the runtime image, AGENTS.md,
+  docs/design.md and the repo card change; the import package, the CLI and the GitHub URL
+  (`github.com/tenishai/daedalus`) do not.
+- **The copyright holder is "tenish and the daedalus contributors"** in a new NOTICE file
+  and the README, and pyproject's `authors` is `tenish`. The licence (AGPL-3.0-or-later)
+  is unchanged (tenishai/daedalus#146).
+- **The README says how daedalus was built, and CONTRIBUTING.md gives the policy for
+  AI-assisted contributions** (tenishai/daedalus#153).
+- **The README quickstart starts from a clone**, makes a venv, and lists the environment
+  for an OpenAI-compatible endpoint (`OPENAI_API_BASE`, `OPENAI_API_KEY`,
+  `DAEDALUS_MODEL=openai/<model>`). The tiers example and docstring use a localhost
+  placeholder instead of a private host, and the docs describe the visual builder without
+  naming private repos (tenishai/daedalus#139).
 - **README rewritten**, `AGENTS.md` added, the design doc marked implemented, and the
   capability-seam proposal scrubbed of internal names (tenishai/daedalus#73,
   tenishai/daedalus#75).
@@ -171,6 +200,42 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Fixed
 
+- **A colleague's refusal is shown, and no longer bans it** (tenishai/daedalus#157, closes
+  tenishai/daedalus#155 and tenishai/daedalus#56). `colleagues.ask_colleague` used to
+  answer any non-200 with "Asking X failed: HTTP N." For a 4xx it now includes the switchboard's reason, capped at 300 characters. A 401, 403
+  or 404 is worded as a refusal that won't change on retry, and no longer counts toward
+  marking the colleague down, so a policy refusal can't hide a healthy colleague for five
+  minutes. Other 4xx (400, 422, 429) and 5xx still count.
+- **`colleagues.ask_colleague` is limited per answer** (tenishai/daedalus#150, closes
+  tenishai/daedalus#149). One answer gets at most 3 colleague asks. A repeat ask to the same colleague returns the earlier reply
+  without dispatching and doesn't count. A reply that opens with "I can't" / "I don't have
+  access" turns colleague asks off for the rest of the answer, and the tool result says to
+  tell the user plainly. An agent answering another agent (inbound
+  `cabal_delegation_depth` ≥ 1) is not offered `ask_colleague` at all, so A → B → A can't
+  happen. A resumed task restores its inbound depth from the checkpoint; its ask count
+  starts again at zero, because the ledger isn't checkpointed. Before this, only the turn
+  budget and cabal's depth bound stopped a hunt, because every "I can't" was an HTTP 200
+  and counted as a success.
+- **A failed colleague ask gives back its slot and can be retried** (tenishai/daedalus#159,
+  closes tenishai/daedalus#151). An ask counts toward the per-answer limit, and its reply is
+  reused for a repeat, only when the switchboard answered: a 200, or a 401/403/404 policy
+  refusal that a retry won't change. A transport failure, a 5xx, another 4xx, asking
+  yourself or an unconfigured ask gives the slot back, and a retry to the same colleague goes
+  out again; the colleague-down breaker still bounds it.
+- **A liminal refusal is reported as a refusal, and the turn goes on**
+  (tenishai/daedalus#158, closes tenishai/daedalus#156). A reachable gateway that answers
+  with a JSON-RPC error (such as "no policy grant") now reads "liminal at <url> refused the
+  request: <message>" instead of "unreachable ... is it running?", which is kept for
+  transport failures and whose start-it-yourself hint appears only for loopback URLs. When
+  several tool providers are composed, `MultiToolProvider` drops a refusing provider's
+  tools for the turn; the agent emits `tool_provider_refused` and tells the model, once,
+  that those tools are refused by policy. An outage still fails the turn, and so does a
+  refusal from the only provider.
+- **The runtime image builds against a current liminal.** liminal's distribution became
+  `tenishai-liminal` in its 0.3.0 (tenishai/liminal#118); `docker/Dockerfile` still asked
+  pip for `liminal`, so a build with a current liminal checkout failed with "liminal
+  (unavailable)" (tenishai/daedalus#147). Both the wheel step and the install now name
+  liminal 0.4.0's distribution, `tenish-liminal`; the import package is unchanged.
 - **The README quickstart runs as written on a fresh Ubuntu machine** (tenishai/daedalus#145):
   `sudo apt update` precedes the `python3-venv` install. Found by the 2026-10-02
   clean-machine run (tenishai/agora#47).
@@ -180,6 +245,8 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 - **The MCP provider works with mcp 2.x**, and a string `command` plus `args` is read the way
   most configs write it; a malformed one is refused at load, naming the server
   (tenishai/daedalus#118).
+- **The checkpoint store closes each SQLite connection it opens**, instead of leaving it
+  to garbage collection (tenishai/daedalus#142, closes tenishai/daedalus#95).
 - **`files` builtin `max_bytes` set through `${VAR:-default}`** arrives as a string and made
   every `files.read` fail. It is converted at load, and a bad value is a load error
   (tenishai/daedalus#119).
@@ -196,8 +263,28 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 - **Learnings treat transcript text as untrusted.** Text cannot forge prompt structure, and
   `said_by` must name the speaker whose turn holds the quote (tenishai/daedalus#37).
-- **An open Slack transport keeps tier-2 approvals closed**, and boot warns about it, until
-  the approver allowlist is wired from configuration (tenishai/daedalus#77).
+- **An open Slack transport keeps tier-2 approvals closed**, and boot warns about it
+  (tenishai/daedalus#77).
+- **Slack tier-2 approvers come from the bundle.** The approver allowlist used to exist
+  only as a constructor argument, so any member of an allowlisted channel, the requester
+  included, could approve a tier-2 action. It is now the `approvers` list on the
+  `kind: slack` block; with none, tier-2 is denied. The requester never approves their own
+  request unless they are the sole listed approver, and the requester is tracked per task
+  (tenishai/daedalus#141, closes tenishai/daedalus#53 and tenishai/daedalus#90).
+- **The learnings task goes through the law layer.** It refuses when enforcement is locked
+  and runs its reply through `post_draft` hooks (tenishai/daedalus#142, closes
+  tenishai/daedalus#86).
+- **A cold JWKS cache makes one fetch.** Concurrent A2A verifies on a fresh process share
+  a single JWKS GET instead of each making one (tenishai/daedalus#142, closes
+  tenishai/daedalus#55).
+- **The CloudTrail sidecar names its STS session per agent** (`daedalus-<agent>`, was a
+  constant), so AWS-side audit can tell agents apart, and its `event_data_store` is
+  validated before it reaches the query's `FROM` (tenishai/daedalus#142, closes
+  tenishai/daedalus#88).
+- **The docs say what is open.** Slack DMs bypass the channel allowlist, with the tool
+  ceiling as the only limit, and the A2A `/events` GET endpoint is open even with auth
+  configured, a known hardening item (tenishai/daedalus#142, closes tenishai/daedalus#87,
+  part of tenishai/daedalus#91).
 - **`exec.run` is opt-in and says what it is not.** Its environment allowlist is not a
   boundary, since a command runs as the same user (tenishai/daedalus#121).
 - **`SECURITY.md`** describes how to report a vulnerability privately

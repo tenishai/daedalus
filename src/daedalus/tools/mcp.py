@@ -1,7 +1,7 @@
 """Direct-MCP tool provider — stdio servers declared in agent.yaml.
 
 Tool names are canonical `server.tool`. Requires the `mcp` extra:
-pip install 'tenishai-daedalus[mcp]'. The liminal gateway provider arrives in v0.3.
+pip install 'tenish-daedalus[mcp]'. The liminal gateway provider arrives in v0.3.
 
 Session lifecycle is owned by a dedicated worker task: MCP's stdio client
 opens anyio cancel scopes that must enter and exit in the SAME task, and
@@ -93,7 +93,7 @@ class MCPToolProvider:
         if self._boot_error is not None:
             if isinstance(self._boot_error, ImportError):
                 raise MCPError(
-                    "mcp is not installed — pip install 'tenishai-daedalus[mcp]'"
+                    "mcp is not installed — pip install 'tenish-daedalus[mcp]'"
                 ) from self._boot_error
             raise MCPError(f"mcp sessions failed to start: {self._boot_error}")
 
