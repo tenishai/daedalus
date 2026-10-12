@@ -109,17 +109,145 @@ def wake_notice(mode: object) -> str:
     return _WAKE_NOTICES.get(mode, "") if isinstance(mode, str) else ""
 
 
+# The first line under a streamed message, appended the moment the stream
+# opens (2026-10-12): without it a quick turn showed an empty bubble until
+# the answer landed, because progress lines only follow runtime events and a
+# short turn has none before its answer.
+_OPENING = "On it"
+
+
+def _arg(args: object, *keys: str) -> str:
+    """The first of `keys` in a tool's arguments that is a short scalar, as
+    text; "" otherwise. Only the keys the caller names are ever read, so a
+    query string or a secret never reaches a progress line."""
+    if not isinstance(args, dict):
+        return ""
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (str, int)) and str(value):
+            # No angle brackets: a model-chosen path like "<!channel>" must
+            # never reach Slack as a control sequence.
+            text = str(value).replace("<", "").replace(">", "")
+            if text:
+                return text[:80]
+    return ""
+
+
+# How a tool's name reads as a line. The verb comes from the operation's
+# first word, the noun from the rest of it or from the provider, and the
+# object from the arguments. Nothing here is per tool: a provider added
+# tomorrow reads as "Searching Datadog" or "Reading alerts (Datadog)" with
+# no new entry. Only the spellings a plain title-case would get wrong live
+# in `_PROVIDER_LABELS`.
+_VERBS = {
+    "get": "Reading", "read": "Reading", "view": "Reading", "show": "Reading",
+    "describe": "Reading", "list": "Listing", "search": "Searching", "query": "Searching",
+    "find": "Searching", "grep": "Searching", "glob": "Looking for", "lookup": "Looking up",
+    "open": "Opening", "create": "Creating", "add": "Adding", "push": "Pushing",
+    "commit": "Saving", "save": "Saving", "store": "Saving", "remember": "Noting",
+    "ask": "Asking", "load": "Loading", "recall": "Recalling", "write": "Writing",
+    "edit": "Editing", "update": "Updating", "run": "Running", "exec": "Running",
+    "bash": "Running", "fetch": "Fetching", "download": "Fetching", "send": "Sending",
+    "post": "Posting", "delete": "Removing", "remove": "Removing", "check": "Checking",
+    "test": "Testing", "set": "Setting", "sync": "Syncing", "start": "Starting",
+    "stop": "Stopping", "poll": "Checking", "wait": "Waiting for", "summarize": "Summarizing",
+    "analyze": "Analyzing", "compare": "Comparing", "count": "Counting", "resolve": "Resolving",
+    "apply": "Applying", "plan": "Planning", "render": "Rendering", "notify": "Sending",
+    "reply": "Replying", "react": "Reacting", "merge": "Merging", "close": "Closing",
+    "approve": "Approving", "request": "Requesting", "grant": "Granting", "revoke": "Revoking",
+    "scan": "Scanning", "validate": "Validating", "build": "Building", "deploy": "Deploying",
+    "restart": "Restarting", "label": "Labelling", "convert": "Converting",
+}
+_PROVIDER_LABELS = {
+    "github": "GitHub", "cloudtrail": "CloudTrail", "jira": "Jira", "atlassian": "Atlassian",
+    "slack_read": "Slack", "slack": "Slack", "datadog": "Datadog", "pagerduty": "PagerDuty",
+    "colleagues": "", "skills": "skill", "memory": "memory", "claude": "", "web": "the web",
+    "files": "files", "scratchpad": "the scratchpad", "notify": "a notification",
+}
+_NOUNS = {
+    "prs": "pull requests", "pr": "pull request", "repo": "repository", "msg": "message",
+    "web": "the web",
+}
+# What a verb acts on when the name says nothing more: `claude.Bash` ->
+# "Running a command", `colleagues.remember` -> "Noting that for later".
+_DEFAULT_OBJECTS = {"Running": "a command", "Noting": "that for later", "Saving": "to memory"}
+
+
+def _words(op: str) -> list[str]:
+    """`getJiraIssue` / `list_prs` / `Read` -> ["get", "jira", "issue"] ..."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", op).replace("_", " ").replace("-", " ")
+    return [w.lower() for w in spaced.split() if w]
+
+
+def _describe_tool(name: str, args: object) -> str:
+    """What a tool call is doing, in a reader's words, built from the tool's
+    own name plus the one argument that names its object (a file, a
+    repository, a number, a colleague, a key) and nothing else from the
+    arguments. Present tense throughout: the event fires as the call starts,
+    and a past-tense line under a working agent read as "stuck after it did
+    that" (2026-10-12). `github.read_file {path, repository}` ->
+    "Reading file teams/data.yaml in example/infra";
+    `cloudtrail.query_provisioning {email}` -> "Searching provisioning
+    (CloudTrail)" (the email is not read); `colleagues.ask_colleague {name}`
+    -> "Asking ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1
+    (Atlassian)"."""
+    provider, _, op = name.partition(".")
+    words = _words(op)
+    verb = ""
+    if words and words[0] in _VERBS:
+        verb, rest = _VERBS[words[0]], words[1:]
+    elif len(words) > 1 and words[-1] in _VERBS:
+        verb, rest = _VERBS[words[-1]], words[:-1]  # `WebSearch` -> Searching the web
+    else:
+        rest = words
+    obj = _arg(args, "path", "file_path", "number", "pr", "key", "issue", "issue_key", "name",
+               "target", "skill", "query_id")
+    repo = _arg(args, "repository", "repo")
+    rest = [_NOUNS.get(w, w) for w in rest if w not in {"a", "the"}]
+    if obj and rest == ["colleague"]:
+        rest = []  # "Asking ledger", not "Asking colleague ledger"
+    label = _PROVIDER_LABELS.get(provider, provider.replace("_", " ").replace("-", " ").title())
+    noun = " ".join(rest)
+    if not verb:
+        verb = "Using"
+        noun = (label + (" " + noun if noun else "")).strip() or "a tool"
+    elif not noun and not obj:
+        noun = label or _DEFAULT_OBJECTS.get(verb, "")
+        if label == "memory" and verb in _DEFAULT_OBJECTS:
+            noun = _DEFAULT_OBJECTS[verb]
+    line = f"{verb} {noun}".strip()
+    if obj and obj != noun:
+        line += f" {'#' + obj if obj.isdigit() else obj}"
+    if repo and repo != obj:
+        line += f" in {repo}"
+    if noun != label and label and label not in line and provider not in {
+        "colleagues", "claude", "skills", "memory", "github"
+    }:
+        line += f" ({label})"
+    # The tool's NAME is model-chosen too on the hallucinated-tool path
+    # (engines/litellm.py emits the raw call name), so the whole line gets
+    # the same rule `_arg` applies to argument values.
+    return line.replace("<", "").replace(">", "")
+
+
 def _progress_line(event: dict) -> str | None:
     """One short line of progress for a runtime trace event, or None when the
     event is not worth showing a reader (reasoning text, token counts, the
-    engine's own bookkeeping). Tool names pass through unchanged
-    (`skills.load` -> "Using skills.load"), because the name IS the information."""
+    engine's own bookkeeping). A tool call reads as what it is doing
+    (`_describe_tool`), never as the tool's internal name."""
     kind = event.get("type")
     if kind == "recall":
-        return "Recalling what I know"
+        count = event.get("count")
+        # Fires after the recall, so this is the only line about a finished
+        # step; it reads as the thinking that follows it.
+        if isinstance(count, int) and count > 0:
+            return f"Thinking it over, with {count} thing{'' if count == 1 else 's'} from memory"
+        return "Thinking it over"
     if kind == "tool_call":
-        name = str(event.get("name") or "a tool")
-        return f"Using {name}"[:_TASK_UPDATE_MAX]
+        name = str(event.get("name") or "")
+        return _describe_tool(name, event.get("arguments"))[:_TASK_UPDATE_MAX]
     if kind == "wrap_up":
         return "Writing the answer"
     return None
@@ -427,22 +555,42 @@ class SlackApi:
         return response["ts"]
 
     async def append_progress(self, channel: str, ts: str, line: str) -> None:
-        """One `task_update` chunk: a progress line under the streaming message."""
+        """One progress line under the streaming message, as italic markdown
+        text. Slack's `task_update` chunks were the first choice (2026-10-06),
+        and a channel thread showed nothing for them (2026-10-12: an empty
+        bubble under the eyes reaction until the answer landed), so a line is
+        text the message shows the moment it arrives."""
+        # A trailing ellipsis on every line: the newest reads as still in
+        # progress, and the ones above it as the steps that led here.
         await self._web.chat_appendStream(
-            channel=channel,
-            ts=ts,
-            chunks=[{"type": "task_update", "title": line[:_TASK_UPDATE_MAX]}],
+            channel=channel, ts=ts, markdown_text=f"_{line[:_TASK_UPDATE_MAX]}…_\n"
         )
 
-    async def finish_stream(self, channel: str, ts: str, markdown: str) -> None:
+    async def finish_stream(
+        self, channel: str, ts: str, markdown: str, mrkdwn: str | None = None
+    ) -> None:
         """Append the answer (in pieces under Slack's per-call ceiling) and
         close the stream. Streams take markdown, not mrkdwn, so the caller
-        passes the reply as the model wrote it."""
+        passes the reply as the model wrote it. When `mrkdwn` is given, the
+        closed message is then rewritten to the answer alone, so the progress
+        lines are what a reader sees while the agent works and the answer is
+        what stays; a rewrite Slack refuses leaves the trail above the answer,
+        which still reads."""
+        await self._web.chat_appendStream(channel=channel, ts=ts, markdown_text="\n")
         for start in range(0, len(markdown), _STREAM_PIECE):
             await self._web.chat_appendStream(
                 channel=channel, ts=ts, markdown_text=markdown[start : start + _STREAM_PIECE]
             )
         await self._web.chat_stopStream(channel=channel, ts=ts)
+        # ONLY WHEN IT FITS ONE MESSAGE. chat.update takes a single text, and
+        # Slack truncates around _POST_BUDGET and refuses past 40k, which is
+        # why post() and update() chunk. A longer answer keeps the streamed
+        # message, trail and all, which already shows it whole.
+        if mrkdwn is not None and len(mrkdwn) <= _POST_BUDGET:
+            try:
+                await self._web.chat_update(channel=channel, ts=ts, text=mrkdwn)
+            except Exception:
+                pass
 
 
 class SlackReactionApprover:
@@ -933,10 +1081,18 @@ class SlackTransport:
                 thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
             except Exception:
                 thinking_ts = None
+        else:
+            # The bubble has words from its first instant; a failure here is
+            # the same best-effort as any other progress line.
+            try:
+                await self._api.append_progress(channel, stream_ts, _OPENING)
+            except Exception:
+                pass
         # Subscribe to the runtime's trace BEFORE the handler runs: its first
         # events are published synchronously, before a separate task could
         # attach. The pump task then only reads. A handler without an event
-        # bus (tests, foreign handlers) streams the answer with no progress lines.
+        # bus (tests, foreign handlers) streams the answer with only the opening
+        # line above it.
         pump_done = asyncio.Event()
         pump = None
         bus = getattr(handler, "events", None)
@@ -974,7 +1130,7 @@ class SlackTransport:
         if stream_ts is not None:
             try:
                 # Streams render markdown, so the reply goes as written.
-                await self._api.finish_stream(channel, stream_ts, reply)
+                await self._api.finish_stream(channel, stream_ts, reply, rendered)
                 landed = True
             except Exception:
                 landed = False  # the plain post below is the reply's safety net

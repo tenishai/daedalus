@@ -122,6 +122,18 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Changed
 
+- **Slack streamed replies say what the agent is doing** (PR #160). The streamed
+  message opens with "On it" the instant the stream starts, so a quick turn never
+  shows an empty bubble. Each progress line is built from the tool's own name, in
+  the present tense, and names only the object that matters ("Reading file
+  teams/data.yaml in example/infra", "Asking ledger", "Thinking it over, with 2
+  things from memory"), never a query's text; a tool whose name starts with no known verb reads as
+  "Using" with its provider and name ("Using Datadog mute monitor"). Progress lines
+  are italic text in the message, not `task_update` chunks, which a channel
+  thread did not show at all. Once the stream closes, the message is rewritten
+  to the answer alone when the answer fits one Slack message; a longer answer, or a
+  rewrite Slack refuses, leaves the trail above the answer.
+
 - **The GitHub tool's default head-branch prefix is now `daedalus/`, and it is configurable.**
   `open_pr` used to name every branch `kobo/<agent>/<slug>`, which hardcoded another
   product's name. The new `tools.github.branch_prefix` bundle setting (default `daedalus`)

@@ -1772,8 +1772,9 @@ class StreamingApi(FakeApi):
     async def append_progress(self, channel, ts, line):
         self.progress.append((ts, line))
 
-    async def finish_stream(self, channel, ts, markdown):
+    async def finish_stream(self, channel, ts, markdown, mrkdwn=None):
         self.finished.append((ts, markdown))
+        self.rewritten = (ts, mrkdwn)
 
 
 class BusyHandler(EchoHandler):
@@ -1814,9 +1815,11 @@ async def test_a_streamed_reply_shows_progress_then_becomes_the_answer():
     assert api.streams[0]["thread_ts"] == "70.0"
     assert api.streams[0]["user"] == "U1" and api.streams[0]["team"] == "T1"
     lines = [line for _, line in api.progress]
-    # deduped, no stranger's event, no reasoning text
-    assert lines == ["Recalling what I know", "Using skills.load"]
+    # the opening line first, then deduped, no stranger's event, no reasoning text
+    assert lines == ["On it", "Thinking it over, with 2 things from memory", "Loading skill"]
     assert api.finished == [("stream-1", "echo: **hello**")]  # markdown as written, not mrkdwn
+    # the closed message becomes the answer alone, as mrkdwn
+    assert api.rewritten == ("stream-1", "echo: *hello*")
     assert ("70.0", "white_check_mark") in api.reacts
 
 
@@ -1834,7 +1837,7 @@ async def test_a_stream_that_will_not_open_falls_back_to_the_placeholder():
 
 async def test_a_stream_that_dies_mid_way_still_lands_the_reply():
     class DyingStreamApi(StreamingApi):
-        async def finish_stream(self, channel, ts, markdown):
+        async def finish_stream(self, channel, ts, markdown, mrkdwn=None):
             raise RuntimeError("stream expired")
 
     api = DyingStreamApi()
@@ -1874,15 +1877,157 @@ async def test_progress_collapses_only_back_to_back_repeats():
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
     await transport.handle_event(event("hi", ts="75.0"), AlternatingHandler())
     assert [line for _, line in api.progress] == [
-        "Using skills.load",
-        "Using memory.search",
-        "Using skills.load",
+        "On it",
+        "Loading skill",
+        "Searching memory",
+        "Loading skill",
     ]
 
 
-async def test_a_handler_without_an_event_bus_streams_without_progress_lines():
+async def test_a_handler_without_an_event_bus_streams_only_the_opening_line():
     api = StreamingApi()
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
     await transport.handle_event(event("hi", ts="73.0"), EchoHandler())
-    assert api.progress == []
+    assert [line for _, line in api.progress] == ["On it"]  # never a blank bubble
     assert api.finished == [("stream-1", "echo: hi")]
+
+
+def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
+    from daedalus.transports.slack import _progress_line
+
+    def call(tool, **arguments):
+        return _progress_line({"type": "tool_call", "name": tool, "arguments": arguments})
+
+    repo = "example/infra"
+    assert (
+        call("github.read_file", repository=repo, path="teams/data.yaml", token="xoxb-no")
+        == "Reading file teams/data.yaml in example/infra"
+    )
+    assert (
+        call("github.get_pr", repository=repo, number=352)
+        == "Reading pull request #352 in example/infra"
+    )
+    assert call("colleagues.ask_colleague", name="ledger", question="private") == "Asking ledger"
+    assert call("atlassian.getJiraIssue", key="IE-1") == "Reading jira issue IE-1 (Atlassian)"
+    assert (
+        call("cloudtrail.query_provisioning", email="a@example.com")
+        == "Searching provisioning (CloudTrail)"
+    )
+    assert (
+        _progress_line({"type": "recall", "count": 1})
+        == "Thinking it over, with 1 thing from memory"
+    )
+    assert _progress_line({"type": "recall", "count": 0}) == "Thinking it over"
+    assert _progress_line({"type": "reasoning", "text": "secret"}) is None
+
+
+def test_progress_lines_name_writes_and_builtins_truthfully():
+    from daedalus.transports.slack import _progress_line
+
+    def call(tool, **arguments):
+        return _progress_line({"type": "tool_call", "name": tool, "arguments": arguments})
+
+    # A write is not a search (liminal's memory handler has recall and commit).
+    assert call("memory.commit", content="x") == "Saving to memory"
+    assert call("memory.recall", query="x") == "Recalling memory"
+    assert call("github.push_branch", repository="example/infra") == (
+        "Pushing branch in example/infra"
+    )
+    assert call("claude.Bash", command="rm -rf /") == "Running a command"
+    assert call("claude.Read", file_path="/etc/passwd") == "Reading /etc/passwd"
+    assert call("claude.SomethingNew") == "Using something new"
+
+
+def test_progress_lines_never_carry_angle_brackets():
+    """A model-chosen value must not reach Slack as a control sequence."""
+    from daedalus.transports.slack import _progress_line
+
+    line = _progress_line(
+        {"type": "tool_call", "name": "github.read_file",
+         "arguments": {"repository": "<!channel>", "path": "<@U123>/x"}}
+    )
+    assert "<" not in line and ">" not in line
+    assert line == "Reading file @U123/x in !channel"
+
+
+def test_progress_lines_are_built_from_any_tools_name_not_a_table():
+    from daedalus.transports.slack import _describe_tool
+
+    assert _describe_tool("datadog.list_monitors", {}) == "Listing monitors (Datadog)"
+    assert _describe_tool("pagerduty.getIncident", {"id": 5}) == "Reading incident (PagerDuty)"
+    assert _describe_tool("cloudtrail.start_query", {}) == "Starting query (CloudTrail)"
+    assert _describe_tool("claude.Bash", {"command": "rm -rf /"}) == "Running a command"
+    assert _describe_tool("claude.WebSearch", {"query": "x"}) == "Searching the web"
+    assert _describe_tool("colleagues.remember", {"fact": "x"}) == "Noting that for later"
+    assert _describe_tool("something.frobnicate", {}) == "Using Something frobnicate"
+
+
+# --- the real SlackApi streaming calls, against a recording web client -------
+
+
+class _RecordingWeb:
+    def __init__(self, fail_update=False):
+        self.calls = []
+        self.fail_update = fail_update
+
+    async def chat_appendStream(self, **kw):
+        self.calls.append(("append", kw))
+
+    async def chat_stopStream(self, **kw):
+        self.calls.append(("stop", kw))
+
+    async def chat_update(self, **kw):
+        self.calls.append(("update", kw))
+        if self.fail_update:
+            raise RuntimeError("msg_too_long")
+
+
+async def test_real_append_progress_writes_an_italic_line_with_an_ellipsis():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb()
+    await SlackApi(web).append_progress("C1", "1.0", "Reading file a.yaml")
+    assert web.calls == [
+        ("append", {"channel": "C1", "ts": "1.0", "markdown_text": "_Reading file a.yaml…_\n"})
+    ]
+
+
+async def test_real_finish_stream_separates_streams_closes_then_rewrites():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb()
+    await SlackApi(web).finish_stream("C1", "1.0", "**hi**", mrkdwn="*hi*")
+    assert [kind for kind, _ in web.calls] == ["append", "append", "stop", "update"]
+    assert web.calls[0][1]["markdown_text"] == "\n"  # the answer starts on its own line
+    assert web.calls[1][1]["markdown_text"] == "**hi**"
+    assert web.calls[3][1] == {"channel": "C1", "ts": "1.0", "text": "*hi*"}
+
+
+async def test_real_finish_stream_skips_the_rewrite_for_a_long_answer():
+    """chat.update takes one text, and Slack truncates past ~4000 chars, so an
+    answer that won't fit one message keeps the streamed message instead of
+    being cut short by the rewrite."""
+    from daedalus.transports.slack import _POST_BUDGET, SlackApi
+
+    long = "x" * (_POST_BUDGET + 1)
+    web = _RecordingWeb()
+    await SlackApi(web).finish_stream("C1", "1.0", long, mrkdwn=long)
+    assert "update" not in [kind for kind, _ in web.calls]
+    assert "".join(
+        kw["markdown_text"] for kind, kw in web.calls if kind == "append"
+    ) == "\n" + long
+
+
+async def test_real_finish_stream_survives_a_refused_rewrite():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb(fail_update=True)
+    await SlackApi(web).finish_stream("C1", "1.0", "hi", mrkdwn="hi")
+    assert [kind for kind, _ in web.calls][-1] == "update"
+
+
+def test_a_model_chosen_tool_name_cannot_carry_angle_brackets():
+    from daedalus.transports.slack import _progress_line
+
+    line = _progress_line({"type": "tool_call", "name": "<!channel>.x", "arguments": {}})
+    assert "<" not in line and ">" not in line
