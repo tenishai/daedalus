@@ -525,8 +525,10 @@ class SlackApi:
         and a channel thread showed nothing for them (2026-10-12: an empty
         bubble under the eyes reaction until the answer landed), so a line is
         text the message shows the moment it arrives."""
+        # A trailing ellipsis on every line: the newest reads as still in
+        # progress, and the ones above it as the steps that led here.
         await self._web.chat_appendStream(
-            channel=channel, ts=ts, markdown_text=f"_{line[:_TASK_UPDATE_MAX]}_\n"
+            channel=channel, ts=ts, markdown_text=f"_{line[:_TASK_UPDATE_MAX]}…_\n"
         )
 
     async def finish_stream(
