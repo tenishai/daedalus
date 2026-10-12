@@ -1816,7 +1816,7 @@ async def test_a_streamed_reply_shows_progress_then_becomes_the_answer():
     assert api.streams[0]["user"] == "U1" and api.streams[0]["team"] == "T1"
     lines = [line for _, line in api.progress]
     # the opening line first, then deduped, no stranger's event, no reasoning text
-    assert lines == ["On it", "Thinking it over, with 2 things from memory", "Reading a skill"]
+    assert lines == ["On it", "Thinking it over, with 2 things from memory", "Loading skill"]
     assert api.finished == [("stream-1", "echo: **hello**")]  # markdown as written, not mrkdwn
     # the closed message becomes the answer alone, as mrkdwn
     assert api.rewritten == ("stream-1", "echo: *hello*")
@@ -1878,9 +1878,9 @@ async def test_progress_collapses_only_back_to_back_repeats():
     await transport.handle_event(event("hi", ts="75.0"), AlternatingHandler())
     assert [line for _, line in api.progress] == [
         "On it",
-        "Reading a skill",
-        "Searching my memory",
-        "Reading a skill",
+        "Loading skill",
+        "Searching memory",
+        "Loading skill",
     ]
 
 
@@ -1901,14 +1901,14 @@ def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
     repo = "example/infra"
     assert (
         call("github.read_file", repository=repo, path="teams/data.yaml", token="xoxb-no")
-        == "Reading teams/data.yaml in example/infra"
+        == "Reading file teams/data.yaml in example/infra"
     )
     assert (
         call("github.get_pr", repository=repo, number=352)
         == "Reading pull request #352 in example/infra"
     )
     assert call("colleagues.ask_colleague", name="ledger", question="private") == "Asking ledger"
-    assert call("atlassian.getJiraIssue") == "Using Atlassian"
+    assert call("atlassian.getJiraIssue", key="IE-1") == "Reading jira issue IE-1 (Atlassian)"
     assert call("cloudtrail.query", sql="select") == "Searching CloudTrail"
     assert (
         _progress_line({"type": "recall", "count": 1})
@@ -1926,13 +1926,13 @@ def test_progress_lines_name_writes_and_builtins_truthfully():
 
     # A write is not a search (liminal's memory handler has recall and commit).
     assert call("memory.commit", content="x") == "Saving to memory"
-    assert call("memory.recall", query="x") == "Searching my memory"
+    assert call("memory.recall", query="x") == "Recalling memory"
     assert call("github.push_branch", repository="example/infra") == (
-        "Pushing a branch in example/infra"
+        "Pushing branch in example/infra"
     )
     assert call("claude.Bash", command="rm -rf /") == "Running a command"
-    assert call("claude.Read", file_path="/etc/passwd") == "Reading a file"
-    assert call("claude.SomethingNew") == "Using a tool"
+    assert call("claude.Read", file_path="/etc/passwd") == "Reading /etc/passwd"
+    assert call("claude.SomethingNew") == "Using something new"
 
 
 def test_progress_lines_never_carry_angle_brackets():
@@ -1944,4 +1944,16 @@ def test_progress_lines_never_carry_angle_brackets():
          "arguments": {"repository": "<!channel>", "path": "<@U123>/x"}}
     )
     assert "<" not in line and ">" not in line
-    assert line == "Reading @U123/x in !channel"
+    assert line == "Reading file @U123/x in !channel"
+
+
+def test_progress_lines_are_built_from_any_tools_name_not_a_table():
+    from daedalus.transports.slack import _describe_tool
+
+    assert _describe_tool("datadog.list_monitors", {}) == "Listing monitors (Datadog)"
+    assert _describe_tool("pagerduty.getIncident", {"id": 5}) == "Reading incident (PagerDuty)"
+    assert _describe_tool("cloudtrail.start_query", {}) == "Starting query (CloudTrail)"
+    assert _describe_tool("claude.Bash", {"command": "rm -rf /"}) == "Running a command"
+    assert _describe_tool("claude.WebSearch", {"query": "x"}) == "Searching the web"
+    assert _describe_tool("colleagues.remember", {"fact": "x"}) == "Noting that for later"
+    assert _describe_tool("something.frobnicate", {}) == "Using Something frobnicate"

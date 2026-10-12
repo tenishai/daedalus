@@ -135,70 +135,96 @@ def _arg(args: object, *keys: str) -> str:
     return ""
 
 
-# The Claude Code engine's built-in tools, as `claude.<Tool>` (#108).
-_CLAUDE_BUILTINS = {
-    "Read": "Reading a file",
-    "Write": "Writing a file",
-    "Edit": "Editing a file",
-    "Glob": "Looking for files",
-    "Grep": "Searching files",
-    "Bash": "Running a command",
-    "WebFetch": "Fetching a web page",
-    "WebSearch": "Searching the web",
+# How a tool's name reads as a line. The verb comes from the operation's
+# first word, the noun from the rest of it or from the provider, and the
+# object from the arguments. Nothing here is per tool: a provider added
+# tomorrow reads as "Searching Datadog" or "Reading alerts in Datadog" with
+# no new entry. Only the spellings a plain title-case would get wrong live
+# in `_PROVIDER_LABELS`.
+_VERBS = {
+    "get": "Reading", "read": "Reading", "view": "Reading", "show": "Reading",
+    "describe": "Reading", "list": "Listing", "search": "Searching", "query": "Searching",
+    "find": "Searching", "grep": "Searching", "glob": "Looking for", "lookup": "Looking up",
+    "open": "Opening", "create": "Creating", "add": "Adding", "push": "Pushing",
+    "commit": "Saving", "save": "Saving", "store": "Saving", "remember": "Noting",
+    "ask": "Asking", "load": "Loading", "recall": "Recalling", "write": "Writing",
+    "edit": "Editing", "update": "Updating", "run": "Running", "exec": "Running",
+    "bash": "Running", "fetch": "Fetching", "download": "Fetching", "send": "Sending",
+    "post": "Posting", "delete": "Removing", "remove": "Removing", "check": "Checking",
+    "test": "Testing", "set": "Setting", "sync": "Syncing", "start": "Starting",
+    "stop": "Stopping", "poll": "Checking", "wait": "Waiting for", "summarize": "Summarizing",
+    "analyze": "Analyzing", "compare": "Comparing", "count": "Counting", "resolve": "Resolving",
+    "apply": "Applying", "plan": "Planning", "render": "Rendering", "notify": "Sending",
+    "reply": "Replying", "react": "Reacting", "merge": "Merging", "close": "Closing",
+    "approve": "Approving", "request": "Requesting", "grant": "Granting", "revoke": "Revoking",
+    "scan": "Scanning", "validate": "Validating", "build": "Building", "deploy": "Deploying",
+    "restart": "Restarting", "label": "Labelling", "convert": "Converting",
 }
+_PROVIDER_LABELS = {
+    "github": "GitHub", "cloudtrail": "CloudTrail", "jira": "Jira", "atlassian": "Atlassian",
+    "slack_read": "Slack", "slack": "Slack", "datadog": "Datadog", "pagerduty": "PagerDuty",
+    "colleagues": "", "skills": "skill", "memory": "memory", "claude": "", "web": "the web",
+    "files": "files", "scratchpad": "the scratchpad", "notify": "a notification",
+}
+_NOUNS = {
+    "prs": "pull requests", "pr": "pull request", "repo": "repository", "msg": "message",
+    "web": "the web",
+}
+# What a verb acts on when the name says nothing more: `claude.Bash` ->
+# "Running a command", `colleagues.remember` -> "Noting that for later".
+_DEFAULT_OBJECTS = {"Running": "a command", "Noting": "that for later", "Saving": "to memory"}
+
+
+def _words(op: str) -> list[str]:
+    """`getJiraIssue` / `list_prs` / `Read` -> ["get", "jira", "issue"] ..."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", op).replace("_", " ").replace("-", " ")
+    return [w.lower() for w in spaced.split() if w]
 
 
 def _describe_tool(name: str, args: object) -> str:
-    """What a tool call is doing, in a reader's words, naming the object that
-    matters (the file, the repository, the colleague) and nothing else from
-    the arguments. Present tense throughout: the event fires as the call
-    starts, and a past-tense line under a working agent read as "stuck after
-    it did that" (2026-10-12). Unknown tools fall back to the provider's name
-    as a word: `atlassian.getJiraIssue` -> "Using Atlassian"."""
-    provider, _, _op = name.partition(".")
+    """What a tool call is doing, in a reader's words, built from the tool's
+    own name plus the one argument that names its object (a file, a
+    repository, a number, a colleague, a key) and nothing else from the
+    arguments. Present tense throughout: the event fires as the call starts,
+    and a past-tense line under a working agent read as "stuck after it did
+    that" (2026-10-12). `github.read_file {path, repository}` ->
+    "Reading file teams/data.yaml in example/infra"; `cloudtrail.query` ->
+    "Searching CloudTrail"; `colleagues.ask_colleague {name}` -> "Asking
+    ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1"."""
+    provider, _, op = name.partition(".")
+    words = _words(op)
+    verb = ""
+    if words and words[0] in _VERBS:
+        verb, rest = _VERBS[words[0]], words[1:]
+    elif len(words) > 1 and words[-1] in _VERBS:
+        verb, rest = _VERBS[words[-1]], words[:-1]  # `WebSearch` -> Searching the web
+    else:
+        rest = words
+    obj = _arg(args, "path", "file_path", "number", "pr", "key", "issue", "issue_key", "name",
+               "target", "skill", "query_id")
     repo = _arg(args, "repository", "repo")
-    where = f" in {repo}" if repo else ""
-    if name == "github.read_file":
-        return f"Reading {_arg(args, 'path') or 'a file'}{where}"
-    if name == "github.list_prs":
-        return f"Listing pull requests{where}"
-    if name == "github.search_prs":
-        return f"Searching pull requests{where}"
-    if name == "github.get_pr":
-        number = _arg(args, "number", "pr")
-        return f"Reading pull request{' #' + number if number else ''}{where}"
-    if name == "github.list_releases":
-        return f"Listing releases{where}"
-    if name == "github.open_pr":
-        return f"Opening a pull request{where}"
-    if name == "github.push_branch":
-        return f"Pushing a branch{where}"
-    if name == "colleagues.ask_colleague":
-        who = _arg(args, "name", "target", "colleague")
-        return f"Asking {who}" if who else "Asking a colleague"
-    if name == "colleagues.list_colleagues":
-        return "Checking who I can ask"
-    if name == "colleagues.remember":
-        return "Noting that for later"
-    if name == "skills.load":
-        skill = _arg(args, "name", "skill")
-        return f"Reading the {skill} skill" if skill else "Reading a skill"
-    if provider == "cloudtrail":
-        return "Searching CloudTrail"
-    if provider == "jira":
-        key = _arg(args, "key", "issue", "issue_key")
-        return f"Looking up {key} in Jira" if key else "Searching Jira"
-    if provider in {"slack_read", "slack"}:
-        return "Reading the Slack thread"
-    if name == "memory.commit":
-        return "Saving to memory"
-    if provider == "memory":
-        return "Searching my memory"
-    if provider == "claude":
-        return _CLAUDE_BUILTINS.get(_op, "Using a tool")
-    if provider:
-        return f"Using {provider.replace('_', ' ').replace('-', ' ').title()}"
-    return "Using a tool"
+    rest = [_NOUNS.get(w, w) for w in rest if w not in {"a", "the"}]
+    if obj and rest == ["colleague"]:
+        rest = []  # "Asking ledger", not "Asking colleague ledger"
+    label = _PROVIDER_LABELS.get(provider, provider.replace("_", " ").replace("-", " ").title())
+    noun = " ".join(rest)
+    if not verb:
+        verb = "Using"
+        noun = (label + (" " + noun if noun else "")).strip() or "a tool"
+    elif not noun and not obj:
+        noun = label or _DEFAULT_OBJECTS.get(verb, "")
+        if label == "memory" and verb in _DEFAULT_OBJECTS:
+            noun = _DEFAULT_OBJECTS[verb]
+    line = f"{verb} {noun}".strip()
+    if obj and obj != noun:
+        line += f" {'#' + obj if obj.isdigit() else obj}"
+    if repo and repo != obj:
+        line += f" in {repo}"
+    if noun != label and label and label not in line and provider not in {
+        "colleagues", "claude", "skills", "memory", "github"
+    }:
+        line += f" ({label})"
+    return line
 
 
 def _progress_line(event: dict) -> str | None:
