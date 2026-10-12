@@ -28,10 +28,11 @@ def _techne_installed() -> bool:
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, malformed=False):
+    def __init__(self, status_code=200, payload=None, malformed=False, text=""):
         self.status_code = status_code
         self._payload = payload
         self._malformed = malformed
+        self.text = text
 
     def json(self):
         if self._malformed:
@@ -1545,3 +1546,70 @@ async def test_handle_task_gives_each_answer_a_fresh_ledger(monkeypatch):
         assert _asked(client) == ["rin", "ana", "bo"]
         await agent.handle_task(Task.from_text("two"))
         assert _asked(client) == ["rin", "ana", "bo", "cy"]
+
+
+# --- 4xx refusals (#155, #56) ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_403_carries_the_switchboards_reason(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    reason = "agent:me is not a colleague of rin yet"
+    client = FakeHTTPClient(post_responses=[FakeResponse(403, {"detail": reason})])
+    text = await make_provider(client)._ask_colleague("rin", "q")
+    assert reason in text
+    assert "refused" in text
+    assert "HTTP 403" in text
+
+
+@pytest.mark.asyncio
+async def test_a_4xx_with_a_non_json_body_uses_the_bounded_raw_text(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    body = "no " * 500
+    client = FakeHTTPClient(post_responses=[FakeResponse(422, malformed=True, text=body)])
+    text = await make_provider(client)._ask_colleague("rin", "q")
+    assert "no no no" in text
+    assert len(text) < 600
+
+
+@pytest.mark.asyncio
+async def test_a_503_keeps_the_transport_wording(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(503, {"detail": "upstream gone"}, text="x")]
+    )
+    text = await make_provider(client)._ask_colleague("rin", "q")
+    assert text == "Asking rin failed: HTTP 503."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_a_policy_refusal_never_marks_a_colleague_down(monkeypatch, status):
+    """#56: two policy refusals used to ban a healthy colleague for five
+    minutes. Three in a row must all reach the network."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(status, {"detail": "no"})] * 3
+    )
+    provider = make_provider(client)
+    for _ in range(3):
+        text = await provider._ask_colleague("rin", "q")
+        assert "stopped trying" not in text
+    assert len(client.post_calls) == 3
+    assert "rin" not in provider._failures
+
+
+@pytest.mark.asyncio
+async def test_a_policy_refusal_does_not_clear_a_transport_failure(monkeypatch):
+    """A 403 says nothing about whether the colleague is up, so it neither
+    counts toward the ban nor clears a failure already recorded."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(503), FakeResponse(403), FakeResponse(503)]
+    )
+    provider = make_provider(client)
+    await provider._ask_colleague("rin", "q")
+    await provider._ask_colleague("rin", "q")
+    await provider._ask_colleague("rin", "q")
+    assert "stopped trying" in await provider._ask_colleague("rin", "q")
+    assert len(client.post_calls) == 3
