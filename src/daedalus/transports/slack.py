@@ -137,79 +137,83 @@ def _arg(args: object, *keys: str) -> str:
 
 # The Claude Code engine's built-in tools, as `claude.<Tool>` (#108).
 _CLAUDE_BUILTINS = {
-    "Read": "Read a file",
-    "Write": "Wrote a file",
-    "Edit": "Edited a file",
-    "Glob": "Searched for files",
-    "Grep": "Searched files",
-    "Bash": "Ran a command",
-    "WebFetch": "Fetched a web page",
-    "WebSearch": "Searched the web",
+    "Read": "Reading a file",
+    "Write": "Writing a file",
+    "Edit": "Editing a file",
+    "Glob": "Looking for files",
+    "Grep": "Searching files",
+    "Bash": "Running a command",
+    "WebFetch": "Fetching a web page",
+    "WebSearch": "Searching the web",
 }
 
 
 def _describe_tool(name: str, args: object) -> str:
-    """What a tool call did, in a reader's words, naming the object that
+    """What a tool call is doing, in a reader's words, naming the object that
     matters (the file, the repository, the colleague) and nothing else from
-    the arguments. Unknown tools fall back to the provider's name as a word:
-    `atlassian.getJiraIssue` -> "Used Atlassian"."""
+    the arguments. Present tense throughout: the event fires as the call
+    starts, and a past-tense line under a working agent read as "stuck after
+    it did that" (2026-10-12). Unknown tools fall back to the provider's name
+    as a word: `atlassian.getJiraIssue` -> "Using Atlassian"."""
     provider, _, _op = name.partition(".")
     repo = _arg(args, "repository", "repo")
     where = f" in {repo}" if repo else ""
     if name == "github.read_file":
-        return f"Read {_arg(args, 'path') or 'a file'}{where}"
+        return f"Reading {_arg(args, 'path') or 'a file'}{where}"
     if name == "github.list_prs":
-        return f"Listed pull requests{where}"
+        return f"Listing pull requests{where}"
     if name == "github.search_prs":
-        return f"Searched pull requests{where}"
+        return f"Searching pull requests{where}"
     if name == "github.get_pr":
         number = _arg(args, "number", "pr")
-        return f"Read pull request{' #' + number if number else ''}{where}"
+        return f"Reading pull request{' #' + number if number else ''}{where}"
     if name == "github.list_releases":
-        return f"Listed releases{where}"
+        return f"Listing releases{where}"
     if name == "github.open_pr":
-        return f"Opened a pull request{where}"
+        return f"Opening a pull request{where}"
     if name == "github.push_branch":
-        return f"Pushed a branch{where}"
+        return f"Pushing a branch{where}"
     if name == "colleagues.ask_colleague":
         who = _arg(args, "name", "target", "colleague")
-        return f"Asked {who}" if who else "Asked a colleague"
+        return f"Asking {who}" if who else "Asking a colleague"
     if name == "colleagues.list_colleagues":
-        return "Checked who I can ask"
+        return "Checking who I can ask"
     if name == "colleagues.remember":
-        return "Noted that for later"
+        return "Noting that for later"
     if name == "skills.load":
         skill = _arg(args, "name", "skill")
-        return f"Read the {skill} skill" if skill else "Read a skill"
+        return f"Reading the {skill} skill" if skill else "Reading a skill"
     if provider == "cloudtrail":
-        return "Searched CloudTrail"
+        return "Searching CloudTrail"
     if provider == "jira":
         key = _arg(args, "key", "issue", "issue_key")
-        return f"Looked up {key} in Jira" if key else "Searched Jira"
+        return f"Looking up {key} in Jira" if key else "Searching Jira"
     if provider in {"slack_read", "slack"}:
-        return "Read the Slack thread"
+        return "Reading the Slack thread"
     if name == "memory.commit":
-        return "Saved to memory"
+        return "Saving to memory"
     if provider == "memory":
-        return "Searched my memory"
+        return "Searching my memory"
     if provider == "claude":
-        return _CLAUDE_BUILTINS.get(_op, "Used a tool")
+        return _CLAUDE_BUILTINS.get(_op, "Using a tool")
     if provider:
-        return f"Used {provider.replace('_', ' ').replace('-', ' ').title()}"
-    return "Used a tool"
+        return f"Using {provider.replace('_', ' ').replace('-', ' ').title()}"
+    return "Using a tool"
 
 
 def _progress_line(event: dict) -> str | None:
     """One short line of progress for a runtime trace event, or None when the
     event is not worth showing a reader (reasoning text, token counts, the
-    engine's own bookkeeping). A tool call reads as what it did
+    engine's own bookkeeping). A tool call reads as what it is doing
     (`_describe_tool`), never as the tool's internal name."""
     kind = event.get("type")
     if kind == "recall":
         count = event.get("count")
+        # Fires after the recall, so this is the only line about a finished
+        # step; it reads as the thinking that follows it.
         if isinstance(count, int) and count > 0:
-            return f"Recalled {count} thing{'' if count == 1 else 's'} from memory"
-        return "Checked my memory"
+            return f"Thinking it over, with {count} thing{'' if count == 1 else 's'} from memory"
+        return "Thinking it over"
     if kind == "tool_call":
         name = str(event.get("name") or "")
         return _describe_tool(name, event.get("arguments"))[:_TASK_UPDATE_MAX]
