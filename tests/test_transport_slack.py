@@ -1884,7 +1884,7 @@ async def test_progress_collapses_only_back_to_back_repeats():
     ]
 
 
-async def test_a_handler_without_an_event_bus_streams_without_progress_lines():
+async def test_a_handler_without_an_event_bus_streams_only_the_opening_line():
     api = StreamingApi()
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
     await transport.handle_event(event("hi", ts="73.0"), EchoHandler())
@@ -1909,7 +1909,10 @@ def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
     )
     assert call("colleagues.ask_colleague", name="ledger", question="private") == "Asking ledger"
     assert call("atlassian.getJiraIssue", key="IE-1") == "Reading jira issue IE-1 (Atlassian)"
-    assert call("cloudtrail.query", sql="select") == "Searching CloudTrail"
+    assert (
+        call("cloudtrail.query_provisioning", email="a@example.com")
+        == "Searching provisioning (CloudTrail)"
+    )
     assert (
         _progress_line({"type": "recall", "count": 1})
         == "Thinking it over, with 1 thing from memory"

@@ -188,9 +188,10 @@ def _describe_tool(name: str, args: object) -> str:
     arguments. Present tense throughout: the event fires as the call starts,
     and a past-tense line under a working agent read as "stuck after it did
     that" (2026-10-12). `github.read_file {path, repository}` ->
-    "Reading file teams/data.yaml in example/infra"; `cloudtrail.query` ->
-    "Searching CloudTrail"; `colleagues.ask_colleague {name}` -> "Asking
-    ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1
+    "Reading file teams/data.yaml in example/infra";
+    `cloudtrail.query_provisioning {email}` -> "Searching provisioning
+    (CloudTrail)" (the email is not read); `colleagues.ask_colleague {name}`
+    -> "Asking ledger"; `atlassian.getJiraIssue {key}` -> "Reading jira issue IE-1
     (Atlassian)"."""
     provider, _, op = name.partition(".")
     words = _words(op)
