@@ -1814,8 +1814,8 @@ async def test_a_streamed_reply_shows_progress_then_becomes_the_answer():
     assert api.streams[0]["thread_ts"] == "70.0"
     assert api.streams[0]["user"] == "U1" and api.streams[0]["team"] == "T1"
     lines = [line for _, line in api.progress]
-    # deduped, no stranger's event, no reasoning text
-    assert lines == ["Recalling what I know", "Using skills.load"]
+    # the opening line first, then deduped, no stranger's event, no reasoning text
+    assert lines == ["On it", "Recalled 2 things from memory", "Read a skill"]
     assert api.finished == [("stream-1", "echo: **hello**")]  # markdown as written, not mrkdwn
     assert ("70.0", "white_check_mark") in api.reacts
 
@@ -1874,9 +1874,10 @@ async def test_progress_collapses_only_back_to_back_repeats():
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
     await transport.handle_event(event("hi", ts="75.0"), AlternatingHandler())
     assert [line for _, line in api.progress] == [
-        "Using skills.load",
-        "Using memory.search",
-        "Using skills.load",
+        "On it",
+        "Read a skill",
+        "Searched my memory",
+        "Read a skill",
     ]
 
 
@@ -1884,5 +1885,27 @@ async def test_a_handler_without_an_event_bus_streams_without_progress_lines():
     api = StreamingApi()
     transport = SlackTransport(CH, bot_token="x", app_token="y", api=api)
     await transport.handle_event(event("hi", ts="73.0"), EchoHandler())
-    assert api.progress == []
+    assert [line for _, line in api.progress] == ["On it"]  # never a blank bubble
     assert api.finished == [("stream-1", "echo: hi")]
+
+
+def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
+    from daedalus.transports.slack import _progress_line
+
+    def call(name, **arguments):
+        return _progress_line({"type": "tool_call", "name": name, "arguments": arguments})
+
+    assert (
+        call("github.read_file", repository="example/infra", path="teams/data.yaml", token="xoxb-no")
+        == "Read teams/data.yaml in example/infra"
+    )
+    assert (
+        call("github.get_pr", repository="example/infra", number=352)
+        == "Read pull request #352 in example/infra"
+    )
+    assert call("colleagues.ask_colleague", name="ledger", question="a private question") == "Asked ledger"
+    assert call("atlassian.getJiraIssue") == "Used Atlassian"
+    assert call("cloudtrail.query", sql="select") == "Searched CloudTrail"
+    assert _progress_line({"type": "recall", "count": 1}) == "Recalled 1 thing from memory"
+    assert _progress_line({"type": "recall", "count": 0}) == "Checked my memory"
+    assert _progress_line({"type": "reasoning", "text": "secret"}) is None

@@ -109,17 +109,87 @@ def wake_notice(mode: object) -> str:
     return _WAKE_NOTICES.get(mode, "") if isinstance(mode, str) else ""
 
 
+# The first line under a streamed message, appended the moment the stream
+# opens (2026-10-12): without it a quick turn showed an empty bubble until
+# the answer landed, because progress lines only follow runtime events and a
+# short turn has none before its answer.
+_OPENING = "On it"
+
+
+def _arg(args: object, *keys: str) -> str:
+    """The first of `keys` in a tool's arguments that is a short scalar, as
+    text; "" otherwise. Only the keys the caller names are ever read, so a
+    query string or a secret never reaches a progress line."""
+    if not isinstance(args, dict):
+        return ""
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (str, int)) and str(value):
+            return str(value)[:80]
+    return ""
+
+
+def _describe_tool(name: str, args: object) -> str:
+    """What a tool call did, in a reader's words, naming the object that
+    matters (the file, the repository, the colleague) and nothing else from
+    the arguments. Unknown tools fall back to the provider's name as a word:
+    `atlassian.getJiraIssue` -> "Used Atlassian"."""
+    provider, _, _op = name.partition(".")
+    repo = _arg(args, "repository", "repo")
+    where = f" in {repo}" if repo else ""
+    if name == "github.read_file":
+        return f"Read {_arg(args, 'path') or 'a file'}{where}"
+    if name == "github.list_prs":
+        return f"Listed pull requests{where}"
+    if name == "github.search_prs":
+        return f"Searched pull requests{where}"
+    if name == "github.get_pr":
+        number = _arg(args, "number", "pr")
+        return f"Read pull request{' #' + number if number else ''}{where}"
+    if name == "github.list_releases":
+        return f"Listed releases{where}"
+    if name == "github.open_pr":
+        return f"Opened a pull request{where}"
+    if name == "colleagues.ask_colleague":
+        who = _arg(args, "name", "target", "colleague")
+        return f"Asked {who}" if who else "Asked a colleague"
+    if name == "colleagues.list_colleagues":
+        return "Checked who I can ask"
+    if name == "colleagues.remember":
+        return "Noted that for later"
+    if name == "skills.load":
+        skill = _arg(args, "name", "skill")
+        return f"Read the {skill} skill" if skill else "Read a skill"
+    if provider == "cloudtrail":
+        return "Searched CloudTrail"
+    if provider == "jira":
+        key = _arg(args, "key", "issue", "issue_key")
+        return f"Looked up {key} in Jira" if key else "Searched Jira"
+    if provider in {"slack_read", "slack"}:
+        return "Read the Slack thread"
+    if provider == "memory":
+        return "Searched my memory"
+    if provider:
+        return f"Used {provider.replace('_', ' ').replace('-', ' ').title()}"
+    return "Used a tool"
+
+
 def _progress_line(event: dict) -> str | None:
     """One short line of progress for a runtime trace event, or None when the
     event is not worth showing a reader (reasoning text, token counts, the
-    engine's own bookkeeping). Tool names pass through unchanged
-    (`skills.load` -> "Using skills.load"), because the name IS the information."""
+    engine's own bookkeeping). A tool call reads as what it did
+    (`_describe_tool`), never as the tool's internal name."""
     kind = event.get("type")
     if kind == "recall":
-        return "Recalling what I know"
+        count = event.get("count")
+        if isinstance(count, int) and count > 0:
+            return f"Recalled {count} thing{'' if count == 1 else 's'} from memory"
+        return "Checked my memory"
     if kind == "tool_call":
-        name = str(event.get("name") or "a tool")
-        return f"Using {name}"[:_TASK_UPDATE_MAX]
+        name = str(event.get("name") or "")
+        return _describe_tool(name, event.get("arguments"))[:_TASK_UPDATE_MAX]
     if kind == "wrap_up":
         return "Writing the answer"
     return None
@@ -933,6 +1003,13 @@ class SlackTransport:
                 thinking_ts = await self._api.post(channel, _THINKING, thread_ts=thread)
             except Exception:
                 thinking_ts = None
+        else:
+            # The bubble has words from its first instant; a failure here is
+            # the same best-effort as any other progress line.
+            try:
+                await self._api.append_progress(channel, stream_ts, _OPENING)
+            except Exception:
+                pass
         # Subscribe to the runtime's trace BEFORE the handler runs: its first
         # events are published synchronously, before a separate task could
         # attach. The pump task then only reads. A handler without an event
