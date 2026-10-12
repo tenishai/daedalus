@@ -6,16 +6,6 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
-### Changed
-
-- **Slack streamed replies read as what the agent did.** The streamed message
-  opens with "On it" the instant the stream starts, so a quick turn never shows
-  an empty bubble; each progress line says what the step did and names only the
-  object that matters ("Read teams/data.yaml in example/infra", "Asked ledger",
-  "Recalled 2 things from memory"), never a tool's internal name or a query's
-  text; unknown tools read as their provider ("Used Atlassian").
-
-
 Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Upgrading
@@ -131,6 +121,13 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   (tenishai/daedalus#138).
 
 ### Changed
+
+- **Slack streamed replies read as what the agent did** (PR #160). The streamed
+  message opens with "On it" the instant the stream starts, so a quick turn never
+  shows an empty bubble. Each progress line says what the step did and names only
+  the object that matters ("Read teams/data.yaml in example/infra", "Asked
+  ledger", "Recalled 2 things from memory"), never a tool's internal name or a
+  query's text; unknown tools read as their provider ("Used Atlassian").
 
 - **The GitHub tool's default head-branch prefix is now `daedalus/`, and it is configurable.**
   `open_pr` used to name every branch `kobo/<agent>/<slug>`, which hardcoded another

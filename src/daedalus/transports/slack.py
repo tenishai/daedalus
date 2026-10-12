@@ -127,8 +127,25 @@ def _arg(args: object, *keys: str) -> str:
         if isinstance(value, bool):
             continue
         if isinstance(value, (str, int)) and str(value):
-            return str(value)[:80]
+            # No angle brackets: a model-chosen path like "<!channel>" must
+            # never reach Slack as a control sequence.
+            text = str(value).replace("<", "").replace(">", "")
+            if text:
+                return text[:80]
     return ""
+
+
+# The Claude Code engine's built-in tools, as `claude.<Tool>` (#108).
+_CLAUDE_BUILTINS = {
+    "Read": "Read a file",
+    "Write": "Wrote a file",
+    "Edit": "Edited a file",
+    "Glob": "Searched for files",
+    "Grep": "Searched files",
+    "Bash": "Ran a command",
+    "WebFetch": "Fetched a web page",
+    "WebSearch": "Searched the web",
+}
 
 
 def _describe_tool(name: str, args: object) -> str:
@@ -152,6 +169,8 @@ def _describe_tool(name: str, args: object) -> str:
         return f"Listed releases{where}"
     if name == "github.open_pr":
         return f"Opened a pull request{where}"
+    if name == "github.push_branch":
+        return f"Pushed a branch{where}"
     if name == "colleagues.ask_colleague":
         who = _arg(args, "name", "target", "colleague")
         return f"Asked {who}" if who else "Asked a colleague"
@@ -169,8 +188,12 @@ def _describe_tool(name: str, args: object) -> str:
         return f"Looked up {key} in Jira" if key else "Searched Jira"
     if provider in {"slack_read", "slack"}:
         return "Read the Slack thread"
+    if name == "memory.commit":
+        return "Saved to memory"
     if provider == "memory":
         return "Searched my memory"
+    if provider == "claude":
+        return _CLAUDE_BUILTINS.get(_op, "Used a tool")
     if provider:
         return f"Used {provider.replace('_', ' ').replace('-', ' ').title()}"
     return "Used a tool"

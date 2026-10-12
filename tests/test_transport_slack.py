@@ -1910,3 +1910,32 @@ def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
     assert _progress_line({"type": "recall", "count": 1}) == "Recalled 1 thing from memory"
     assert _progress_line({"type": "recall", "count": 0}) == "Checked my memory"
     assert _progress_line({"type": "reasoning", "text": "secret"}) is None
+
+
+def test_progress_lines_name_writes_and_builtins_truthfully():
+    from daedalus.transports.slack import _progress_line
+
+    def call(tool, **arguments):
+        return _progress_line({"type": "tool_call", "name": tool, "arguments": arguments})
+
+    # A write is not a search (liminal's memory handler has recall and commit).
+    assert call("memory.commit", content="x") == "Saved to memory"
+    assert call("memory.recall", query="x") == "Searched my memory"
+    assert call("github.push_branch", repository="example/infra") == (
+        "Pushed a branch in example/infra"
+    )
+    assert call("claude.Bash", command="rm -rf /") == "Ran a command"
+    assert call("claude.Read", file_path="/etc/passwd") == "Read a file"
+    assert call("claude.SomethingNew") == "Used a tool"
+
+
+def test_progress_lines_never_carry_angle_brackets():
+    """A model-chosen value must not reach Slack as a control sequence."""
+    from daedalus.transports.slack import _progress_line
+
+    line = _progress_line(
+        {"type": "tool_call", "name": "github.read_file",
+         "arguments": {"repository": "<!channel>", "path": "<@U123>/x"}}
+    )
+    assert "<" not in line and ">" not in line
+    assert line == "Read @U123/x in !channel"
