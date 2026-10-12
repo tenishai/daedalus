@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 
-from daedalus.protocols import ToolProvider
+from daedalus.protocols import ToolProvider, ToolProviderRefused
 
 
 class MultiToolProvider:
@@ -15,12 +15,23 @@ class MultiToolProvider:
         self.providers = providers
         self._owner: dict[str, ToolProvider] = {}
         self._warned: set[str] = set()
+        # Why each refusing provider's tools are missing from the last listing.
+        self.refused: list[str] = []
 
     async def tools(self) -> list[dict]:
         specs: list[dict] = []
         self._owner = {}
+        self.refused = []
         for provider in self.providers:
-            for spec in await provider.tools():
+            try:
+                listed = await provider.tools()
+            except ToolProviderRefused as exc:
+                # One gateway refusing this caller is not a reason to fail a
+                # turn the other providers can serve (daedalus#156). An outage
+                # still raises.
+                self.refused.append(str(exc))
+                continue
+            for spec in listed:
                 name = spec["name"]
                 if name in self._owner:
                     if name not in self._warned:  # once, not every turn

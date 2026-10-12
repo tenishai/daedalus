@@ -75,6 +75,15 @@ class ToolProvider(Protocol):
     async def call(self, name: str, payload: dict) -> str: ...
 
 
+class ToolProviderRefused(RuntimeError):
+    """A provider's server answered and refused this caller (daedalus#156).
+
+    Distinct from an outage: the server is up and has said no, so retrying or
+    restarting it changes nothing. MultiToolProvider drops that provider's
+    tools for the turn instead of failing the whole turn.
+    """
+
+
 @runtime_checkable
 class CheckpointStore(Protocol):
     async def save(self, task_id: str, state: dict) -> None: ...

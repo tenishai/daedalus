@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
 updated: 2026-09-28
-anchor: src/daedalus/protocols.py sha=0cae6075386ada5922019f975aeb5ed3a0ee3cde
+anchor: src/daedalus/protocols.py sha=163b54174617e9facf5411dc1211ea8eabe58dad
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -10,7 +10,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
 - `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact")`
-- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`
+- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`
 Data: `ToolCall(id, name, arguments)` (name = exactly what the model said), `LLMResponse(text, reasoning, tool_calls, input_tokens, output_tokens, finish_reason)`.
