@@ -31,33 +31,38 @@ _REFUSAL_DETAIL_MAX = 300
 
 
 def _refusal_detail(response) -> str:
-    """The reason a 4xx gives, from cabal's {"detail": ...} body or the raw
-    text, bounded. Empty when the body says nothing readable."""
-    detail = ""
+    """The reason a 4xx gives, from cabal's {"detail": ...} body, or the raw
+    text when the body isn't JSON; bounded, and ending in punctuation."""
     try:
         body = response.json()
-        if isinstance(body, dict) and body.get("detail") is not None:
-            detail = str(body["detail"])
     except Exception:
-        pass
-    if not detail:
         detail = str(getattr(response, "text", "") or "")
+    else:
+        detail = str(body.get("detail") or "") if isinstance(body, dict) else ""
     detail = " ".join(detail.split())
     if len(detail) > _REFUSAL_DETAIL_MAX:
         detail = detail[:_REFUSAL_DETAIL_MAX] + "..."
+    if detail and detail[-1] not in ".!?":
+        detail += "."
     return detail
 
 
 def _refusal_text(target: str, response) -> str:
-    """What the model sees for a 4xx (#155): the switchboard's reason, worded
-    as a refusal so it is not read as an outage worth retrying."""
+    """What the model sees for a 4xx (#155): the switchboard's reason. A
+    policy status (#56) is worded as a refusal that won't change on retry;
+    any other 4xx (400, 422, 429 ...) only says it was rejected, since a 429
+    in particular means "try later"."""
     detail = _refusal_detail(response)
-    reason = f": {detail}" if detail else "."
-    return (
-        f"The request to ask {target} was refused (HTTP {response.status_code})"
-        f"{reason} This is a refusal, not an outage; asking again will be "
-        "refused the same way."
-    )
+    status = response.status_code
+    if status in _POLICY_STATUSES:
+        head = f"The request to ask {target} was refused (HTTP {status})"
+        tail = " This is a refusal, not an outage; asking again will be refused the same way."
+    else:
+        head = f"The request to ask {target} was rejected (HTTP {status})"
+        tail = ""
+    return head + (f": {detail}" if detail else ".") + tail
+
+
 #: Task states that mean the question was refused rather than answered.
 #: A guardrail refusal is one of these carrying explanatory text, which is
 #: exactly what makes it readable as an answer if nobody checks (#40 r2).

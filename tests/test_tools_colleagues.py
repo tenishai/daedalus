@@ -1570,6 +1570,7 @@ async def test_a_4xx_with_a_non_json_body_uses_the_bounded_raw_text(monkeypatch)
     text = await make_provider(client)._ask_colleague("rin", "q")
     assert "no no no" in text
     assert len(text) < 600
+    assert "will be refused the same way" not in text
 
 
 @pytest.mark.asyncio
@@ -1613,3 +1614,39 @@ async def test_a_policy_refusal_does_not_clear_a_transport_failure(monkeypatch):
     await provider._ask_colleague("rin", "q")
     assert "stopped trying" in await provider._ask_colleague("rin", "q")
     assert len(client.post_calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 422, 429])
+async def test_a_non_policy_4xx_still_counts_toward_the_ban(monkeypatch, status):
+    """The other half of #56: only 401/403/404 are exempt. Two of any other
+    4xx ban the colleague, like two 503s."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(post_responses=[FakeResponse(status, {"detail": "slow down"})] * 2)
+    provider = make_provider(client)
+    first = await provider._ask_colleague("rin", "q")
+    await provider._ask_colleague("rin", "q")
+    assert "slow down" in first and "rejected" in first
+    assert "stopped trying" in await provider._ask_colleague("rin", "q")
+    assert len(client.post_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_reason_without_punctuation_gets_a_full_stop(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(403, {"detail": "agent:me is not a colleague of rin yet"})]
+    )
+    text = await make_provider(client)._ask_colleague("rin", "q")
+    assert "rin yet. This is a refusal" in text
+
+
+@pytest.mark.asyncio
+async def test_an_empty_json_detail_is_not_echoed_as_raw_text(monkeypatch):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(403, {"detail": ""}, text='{"detail": ""}')]
+    )
+    text = await make_provider(client)._ask_colleague("rin", "q")
+    assert "detail" not in text
+    assert text.startswith("The request to ask rin was refused (HTTP 403).")
