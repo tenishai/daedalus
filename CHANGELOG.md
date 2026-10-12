@@ -127,7 +127,10 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   shows an empty bubble. Each progress line says what the step did and names only
   the object that matters ("Read teams/data.yaml in example/infra", "Asked
   ledger", "Recalled 2 things from memory"), never a tool's internal name or a
-  query's text; unknown tools read as their provider ("Used Atlassian").
+  query's text; unknown tools read as their provider ("Used Atlassian"). Progress lines
+  are italic text in the message, not `task_update` chunks, which a channel
+  thread did not show at all; once the stream closes the message is rewritten
+  to the answer alone, and a rewrite Slack refuses leaves the trail above it.
 
 - **The GitHub tool's default head-branch prefix is now `daedalus/`, and it is configurable.**
   `open_pr` used to name every branch `kobo/<agent>/<slug>`, which hardcoded another

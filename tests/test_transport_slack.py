@@ -1772,8 +1772,9 @@ class StreamingApi(FakeApi):
     async def append_progress(self, channel, ts, line):
         self.progress.append((ts, line))
 
-    async def finish_stream(self, channel, ts, markdown):
+    async def finish_stream(self, channel, ts, markdown, mrkdwn=None):
         self.finished.append((ts, markdown))
+        self.rewritten = (ts, mrkdwn)
 
 
 class BusyHandler(EchoHandler):
@@ -1817,6 +1818,8 @@ async def test_a_streamed_reply_shows_progress_then_becomes_the_answer():
     # the opening line first, then deduped, no stranger's event, no reasoning text
     assert lines == ["On it", "Recalled 2 things from memory", "Read a skill"]
     assert api.finished == [("stream-1", "echo: **hello**")]  # markdown as written, not mrkdwn
+    # the closed message becomes the answer alone, as mrkdwn
+    assert api.rewritten == ("stream-1", "echo: *hello*")
     assert ("70.0", "white_check_mark") in api.reacts
 
 
@@ -1834,7 +1837,7 @@ async def test_a_stream_that_will_not_open_falls_back_to_the_placeholder():
 
 async def test_a_stream_that_dies_mid_way_still_lands_the_reply():
     class DyingStreamApi(StreamingApi):
-        async def finish_stream(self, channel, ts, markdown):
+        async def finish_stream(self, channel, ts, markdown, mrkdwn=None):
             raise RuntimeError("stream expired")
 
     api = DyingStreamApi()

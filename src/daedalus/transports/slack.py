@@ -520,22 +520,36 @@ class SlackApi:
         return response["ts"]
 
     async def append_progress(self, channel: str, ts: str, line: str) -> None:
-        """One `task_update` chunk: a progress line under the streaming message."""
+        """One progress line under the streaming message, as italic markdown
+        text. Slack's `task_update` chunks were the first choice (2026-10-06),
+        and a channel thread showed nothing for them (2026-10-12: an empty
+        bubble under the eyes reaction until the answer landed), so a line is
+        text the message shows the moment it arrives."""
         await self._web.chat_appendStream(
-            channel=channel,
-            ts=ts,
-            chunks=[{"type": "task_update", "title": line[:_TASK_UPDATE_MAX]}],
+            channel=channel, ts=ts, markdown_text=f"_{line[:_TASK_UPDATE_MAX]}_\n"
         )
 
-    async def finish_stream(self, channel: str, ts: str, markdown: str) -> None:
+    async def finish_stream(
+        self, channel: str, ts: str, markdown: str, mrkdwn: str | None = None
+    ) -> None:
         """Append the answer (in pieces under Slack's per-call ceiling) and
         close the stream. Streams take markdown, not mrkdwn, so the caller
-        passes the reply as the model wrote it."""
+        passes the reply as the model wrote it. When `mrkdwn` is given, the
+        closed message is then rewritten to the answer alone, so the progress
+        lines are what a reader sees while the agent works and the answer is
+        what stays; a rewrite Slack refuses leaves the trail above the answer,
+        which still reads."""
+        await self._web.chat_appendStream(channel=channel, ts=ts, markdown_text="\n")
         for start in range(0, len(markdown), _STREAM_PIECE):
             await self._web.chat_appendStream(
                 channel=channel, ts=ts, markdown_text=markdown[start : start + _STREAM_PIECE]
             )
         await self._web.chat_stopStream(channel=channel, ts=ts)
+        if mrkdwn is not None:
+            try:
+                await self._web.chat_update(channel=channel, ts=ts, text=mrkdwn)
+            except Exception:
+                pass
 
 
 class SlackReactionApprover:
@@ -1074,7 +1088,7 @@ class SlackTransport:
         if stream_ts is not None:
             try:
                 # Streams render markdown, so the reply goes as written.
-                await self._api.finish_stream(channel, stream_ts, reply)
+                await self._api.finish_stream(channel, stream_ts, reply, rendered)
                 landed = True
             except Exception:
                 landed = False  # the plain post below is the reply's safety net
