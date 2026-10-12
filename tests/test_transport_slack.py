@@ -1957,3 +1957,74 @@ def test_progress_lines_are_built_from_any_tools_name_not_a_table():
     assert _describe_tool("claude.WebSearch", {"query": "x"}) == "Searching the web"
     assert _describe_tool("colleagues.remember", {"fact": "x"}) == "Noting that for later"
     assert _describe_tool("something.frobnicate", {}) == "Using Something frobnicate"
+
+
+# --- the real SlackApi streaming calls, against a recording web client -------
+
+
+class _RecordingWeb:
+    def __init__(self, fail_update=False):
+        self.calls = []
+        self.fail_update = fail_update
+
+    async def chat_appendStream(self, **kw):
+        self.calls.append(("append", kw))
+
+    async def chat_stopStream(self, **kw):
+        self.calls.append(("stop", kw))
+
+    async def chat_update(self, **kw):
+        self.calls.append(("update", kw))
+        if self.fail_update:
+            raise RuntimeError("msg_too_long")
+
+
+async def test_real_append_progress_writes_an_italic_line_with_an_ellipsis():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb()
+    await SlackApi(web).append_progress("C1", "1.0", "Reading file a.yaml")
+    assert web.calls == [
+        ("append", {"channel": "C1", "ts": "1.0", "markdown_text": "_Reading file a.yaml…_\n"})
+    ]
+
+
+async def test_real_finish_stream_separates_streams_closes_then_rewrites():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb()
+    await SlackApi(web).finish_stream("C1", "1.0", "**hi**", mrkdwn="*hi*")
+    assert [kind for kind, _ in web.calls] == ["append", "append", "stop", "update"]
+    assert web.calls[0][1]["markdown_text"] == "\n"  # the answer starts on its own line
+    assert web.calls[1][1]["markdown_text"] == "**hi**"
+    assert web.calls[3][1] == {"channel": "C1", "ts": "1.0", "text": "*hi*"}
+
+
+async def test_real_finish_stream_skips_the_rewrite_for_a_long_answer():
+    """chat.update takes one text, and Slack truncates past ~4000 chars, so an
+    answer that won't fit one message keeps the streamed message instead of
+    being cut short by the rewrite."""
+    from daedalus.transports.slack import _POST_BUDGET, SlackApi
+
+    long = "x" * (_POST_BUDGET + 1)
+    web = _RecordingWeb()
+    await SlackApi(web).finish_stream("C1", "1.0", long, mrkdwn=long)
+    assert "update" not in [kind for kind, _ in web.calls]
+    assert "".join(
+        kw["markdown_text"] for kind, kw in web.calls if kind == "append"
+    ) == "\n" + long
+
+
+async def test_real_finish_stream_survives_a_refused_rewrite():
+    from daedalus.transports.slack import SlackApi
+
+    web = _RecordingWeb(fail_update=True)
+    await SlackApi(web).finish_stream("C1", "1.0", "hi", mrkdwn="hi")
+    assert [kind for kind, _ in web.calls][-1] == "update"
+
+
+def test_a_model_chosen_tool_name_cannot_carry_angle_brackets():
+    from daedalus.transports.slack import _progress_line
+
+    line = _progress_line({"type": "tool_call", "name": "<!channel>.x", "arguments": {}})
+    assert "<" not in line and ">" not in line

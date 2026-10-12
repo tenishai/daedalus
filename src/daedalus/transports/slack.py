@@ -224,7 +224,10 @@ def _describe_tool(name: str, args: object) -> str:
         "colleagues", "claude", "skills", "memory", "github"
     }:
         line += f" ({label})"
-    return line
+    # The tool's NAME is model-chosen too on the hallucinated-tool path
+    # (engines/litellm.py emits the raw call name), so the whole line gets
+    # the same rule `_arg` applies to argument values.
+    return line.replace("<", "").replace(">", "")
 
 
 def _progress_line(event: dict) -> str | None:
@@ -577,7 +580,11 @@ class SlackApi:
                 channel=channel, ts=ts, markdown_text=markdown[start : start + _STREAM_PIECE]
             )
         await self._web.chat_stopStream(channel=channel, ts=ts)
-        if mrkdwn is not None:
+        # ONLY WHEN IT FITS ONE MESSAGE. chat.update takes a single text, and
+        # Slack truncates around _POST_BUDGET and refuses past 40k, which is
+        # why post() and update() chunk. A longer answer keeps the streamed
+        # message, trail and all, which already shows it whole.
+        if mrkdwn is not None and len(mrkdwn) <= _POST_BUDGET:
             try:
                 await self._web.chat_update(channel=channel, ts=ts, text=mrkdwn)
             except Exception:
@@ -1082,7 +1089,8 @@ class SlackTransport:
         # Subscribe to the runtime's trace BEFORE the handler runs: its first
         # events are published synchronously, before a separate task could
         # attach. The pump task then only reads. A handler without an event
-        # bus (tests, foreign handlers) streams the answer with no progress lines.
+        # bus (tests, foreign handlers) streams the answer with only the opening
+        # line above it.
         pump_done = asyncio.Event()
         pump = None
         bus = getattr(handler, "events", None)
