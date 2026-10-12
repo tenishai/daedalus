@@ -646,7 +646,14 @@ class ColleaguesToolProvider:
             )
         ledger.asks += 1
         ledger.replies[target] = None
-        reply = await self._ask_colleague(target, question)
+        reply, counted = await self._ask_outcome(target, question)
+        if not counted:
+            # NEVER REACHED THE COLLEAGUE (#151): give the slot back and drop
+            # the in-flight marker, so a retry can go out. The breaker (#38)
+            # still bounds retries to a colleague that keeps failing.
+            ledger.asks -= 1
+            del ledger.replies[target]
+            return reply
         ledger.replies[target] = reply
         if is_cant_help(reply):
             ledger.cant_help = target
@@ -659,11 +666,19 @@ class ColleaguesToolProvider:
         return reply
 
     async def _ask_colleague(self, target: str, question: str) -> str:
+        return (await self._ask_outcome(target, question))[0]
+
+    async def _ask_outcome(self, target: str, question: str) -> tuple[str, bool]:
+        """The reply, and whether the ask counts as made (#151): True when the
+        switchboard answered (a 200, or a 401/403/404 policy refusal, which
+        won't change on a retry). False when it never got that far -- a local
+        refusal, a transport failure, a 5xx or another 4xx -- so the per-answer
+        ledger gives back the slot and a retry can go out."""
         token = self._token()
         if token is None:
-            return _NOT_CONFIGURED
+            return _NOT_CONFIGURED, False
         if target == self.self_name:
-            return "I cannot ask myself a question. Try asking one of my colleagues instead."
+            return "I cannot ask myself a question. Try asking one of my colleagues instead.", False
         now = time.time()
         if self._is_marked_down(target, now):
             # A TERMINAL STATE, not another transient-looking failure
@@ -676,7 +691,7 @@ class ColleaguesToolProvider:
                 "not a transient failure -- retrying it will fail the same way. "
                 "Ask a different colleague, answer from what you have, or say "
                 "you cannot."
-            )
+            ), False
         client = self._ensure_client()
         headers = {"Authorization": f"Bearer {token}"}
         # Dialect note: this is the SWITCHBOARD's inbound routing envelope
@@ -729,19 +744,19 @@ class ColleaguesToolProvider:
             # timeout, which is the incident's own shape and the case where the
             # ban shrank most.
             self._record_failure(target, time.time())
-            return f"Could not reach {target}: {exc}"
+            return f"Could not reach {target}: {exc}", False
         if response.status_code in _POLICY_STATUSES:
             # A POLICY ANSWER, NOT AN OUTAGE (#56). The switchboard answered,
             # promptly, and said no; counting that toward the down-ban hid a
             # healthy colleague from every conversation in the process. Nor is
             # it a success: it says nothing about whether the colleague can
             # answer, so the record is left as it was.
-            return _refusal_text(target, response)
+            return _refusal_text(target, response), True
         if response.status_code != 200:
             self._record_failure(target, time.time())
             if 400 <= response.status_code < 500:
-                return _refusal_text(target, response)
-            return f"Asking {target} failed: HTTP {response.status_code}."
+                return _refusal_text(target, response), False
+            return f"Asking {target} failed: HTTP {response.status_code}.", False
         # CLEARED HERE, ON THE SAME EVENT CLASS THE COUNTER COUNTS (#38 r1
         # Important 2). It used to clear after the parse and the empty-text
         # check, so a colleague answering a perfectly good 200 with no text
@@ -753,9 +768,9 @@ class ColleaguesToolProvider:
             data = response.json()
             text = _text_parts_of(data["status"]["message"])
         except Exception:
-            return _UNREADABLE_REPLY
+            return _UNREADABLE_REPLY, True
         if not text:
-            return _UNREADABLE_REPLY
+            return _UNREADABLE_REPLY, True
         # A REFUSAL ARRIVES AS HTTP 200 (#40 r2 Important). cabal turns a
         # guardrail BLOCK into an annotated Task -- state="failed", the refusal
         # as the single agent text part -- and `routes/tasks.py` returns it
@@ -785,11 +800,11 @@ class ColleaguesToolProvider:
         # must be ready before either lands.
         state = (data.get("status") or {}).get("state")
         if state in _UNANSWERED_STATES:
-            return f"{target} did not answer: {text}"
+            return f"{target} did not answer: {text}", True
         ledger = consulted_colleagues.get()
         if ledger is not None and target not in ledger:
             ledger.append(target)
-        return text
+        return text, True
 
     async def _remember(self, fact: str, learned_from: str) -> str:
         """Remember a fact a named colleague told the agent: low confidence,
