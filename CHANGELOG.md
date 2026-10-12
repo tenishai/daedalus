@@ -127,8 +127,8 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
   shows an empty bubble. Each progress line is built from the tool's own name, in
   the present tense, and names only the object that matters ("Reading file
   teams/data.yaml in example/infra", "Asking ledger", "Thinking it over, with 2
-  things from memory"), never a query's text; a tool with no recognised verb reads
-  as its provider ("Using Datadog"). Progress lines
+  things from memory"), never a query's text; a tool whose name starts with no known verb reads as
+  "Using" with its provider and name ("Using Datadog mute monitor"). Progress lines
   are italic text in the message, not `task_update` chunks, which a channel
   thread did not show at all. Once the stream closes, the message is rewritten
   to the answer alone when the answer fits one Slack message; a longer answer, or a

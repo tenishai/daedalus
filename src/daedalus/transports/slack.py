@@ -138,7 +138,7 @@ def _arg(args: object, *keys: str) -> str:
 # How a tool's name reads as a line. The verb comes from the operation's
 # first word, the noun from the rest of it or from the provider, and the
 # object from the arguments. Nothing here is per tool: a provider added
-# tomorrow reads as "Searching Datadog" or "Reading alerts in Datadog" with
+# tomorrow reads as "Searching Datadog" or "Reading alerts (Datadog)" with
 # no new entry. Only the spellings a plain title-case would get wrong live
 # in `_PROVIDER_LABELS`.
 _VERBS = {
