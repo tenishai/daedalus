@@ -1,14 +1,14 @@
 ---
 card: repo-card:daedalus
-updated: 2026-10-07
-anchor: pyproject.toml sha=6f56cff806e2bdd6c22f0b621c1970022a4fd950
-anchor: src/daedalus/agent.py sha=55c0dbba32bae1f49f4e2468dbbe730d65323682
+updated: 2026-10-12
+anchor: pyproject.toml sha=8702b23fbaeba9c0c44076ddeb7da63597125f09
+anchor: src/daedalus/agent.py sha=4879806a8b8931de26b16d8a90dd592cc7be65b9
 ---
 # daedalus — repo card
 
 WHAT: the agent runtime. An agent is a directory (bundle: agent.yaml + persona.md + agent-card.json, optional skills/, tools/, knowledge/); daedalus loads it and serves it over CLI / A2A / Slack, with tool allowlists, approval gates, enforcement hooks, and optional techne memory.
-STATE: main, v0.4.0 (version lives in src/daedalus/__init__.py; pyproject reads it via [tool.hatch.version]); everything since is under CHANGELOG [Unreleased]. Since 2026-09-28: model tiers (#127, #129, #132: model.id may name fast|balanced|best, resolved from $DAEDALUS_TIERS), the exec builtin (#121), Claude Code engine in the runtime image (#112), go-public prep (#138 distribution tenishai-daedalus, community files; DCO check in CI), Slack approver allowlist (#141) and wake modes (#147), per-answer colleague ask limits (#150). Before that, the ENGINE seam (#104, #105, #107, #108; 2026-09-27).
-STACK: Python ≥3.11, hatchling; the distribution is `tenishai-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm. Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (`tenish-techne[vectors]>=0.18.2`; install via requirements-sources.txt, which pins the v0.18.2 tag), dev. Runtime image: docker/Dockerfile (techne + liminal from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
+STATE: main, v0.5.0 (2026-10-12; version lives in src/daedalus/__init__.py; pyproject reads it via [tool.hatch.version]); everything since is under CHANGELOG [Unreleased]. 0.5.0 renamed the distribution to tenish-daedalus (it shipped as `daedalus` through v0.4.0). In 0.5.0, since 2026-09-28: model tiers (#127, #129, #132: model.id may name fast|balanced|best, resolved from $DAEDALUS_TIERS), the exec builtin (#121), Claude Code engine in the runtime image (#112), go-public prep (#138 community files; DCO check in CI), Slack approver allowlist (#141) and wake modes (#147), per-answer colleague ask limits (#150), colleague and liminal refusals reported as refusals (#157, #158, #159), Slack progress lines (#160). Before that, the ENGINE seam (#104, #105, #107, #108; 2026-09-27).
+STACK: Python ≥3.11, hatchling; the distribution is `tenish-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm. Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (`tenish-techne[vectors]>=0.18.2`; install via requirements-sources.txt, which pins the v0.18.2 tag), dev. Runtime image: docker/Dockerfile (techne + liminal, as tenish-techne and tenish-liminal >=0.4.0, from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
 ENTRY:
 - CLI `daedalus` → src/daedalus/cli.py:main (version, schema, create, run, chat; run/chat take --engine)
 - library → daedalus.Agent (src/daedalus/agent.py), Agent.load(path) / handle_task / serve

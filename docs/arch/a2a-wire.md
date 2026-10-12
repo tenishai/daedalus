@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-a2a-wire
 updated: 2026-10-07
-anchor: src/daedalus/transports/a2a.py sha=a4346c664231abbb5482d71d567d17e709a04a4f
+anchor: src/daedalus/transports/a2a.py sha=67d3ffe317b0368d6b916baeb73f230dd7f44fb6
 anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
 anchor: src/daedalus/memory/teach.py sha=071a92f1761e0447c4d0064ca6897d03c4748c48
 ---

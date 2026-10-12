@@ -3,7 +3,7 @@ card: arch-card:daedalus-engines
 updated: 2026-10-07
 anchor: src/daedalus/engines/base.py sha=b1e58daa59388bd729dcbaba1ab6ad9f6d69a1ff
 anchor: src/daedalus/engines/litellm.py sha=6fa5ec275e072e189b200289308d096a6097070b
-anchor: src/daedalus/engines/claude_code.py sha=319df26136d5be80556fb538d5303a9480efc15f
+anchor: src/daedalus/engines/claude_code.py sha=14f2b58d12da3876867cc8bf282f37171d1612a1
 anchor: src/daedalus/engines/bridge.py sha=bfadb495652bec27bb0239ebd00c0f6d1c97cf7e
 ---
 # engines — what runs one task turn (tenishai/agents#51)

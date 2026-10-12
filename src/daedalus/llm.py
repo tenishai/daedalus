@@ -90,7 +90,7 @@ class LiteLLMClient:
         try:
             import litellm
         except ImportError as exc:  # pragma: no cover
-            raise LLMError("litellm is not installed — pip install tenishai-daedalus") from exc
+            raise LLMError("litellm is not installed — pip install tenish-daedalus") from exc
 
         kwargs: dict = {
             "model": self.model,

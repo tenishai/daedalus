@@ -269,7 +269,7 @@ async def test_a_missing_sdk_says_how_to_install_it(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
     task = await ClaudeCodeEngine(ClaudeCodeSpec()).run(_turn(tmp_path))
     assert task.state is TaskState.FAILED
-    assert "tenishai-daedalus[claude-code]" in task.agent_text()
+    assert "tenish-daedalus[claude-code]" in task.agent_text()
 
 
 # -- choosing the engine ---------------------------------------------------------

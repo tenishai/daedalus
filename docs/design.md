@@ -1,7 +1,7 @@
 # Daedalus — design
 
 **Status: IMPLEMENTED AND RELEASED.** This began as a pre-implementation design
-doc and is kept as the architectural rationale, not as a plan. daedalus 0.4.0 has
+doc and is kept as the architectural rationale, not as a plan. daedalus 0.5.0 has
 shipped; §8 was written against live behaviour. Where this document and the code
 disagree, the code is right — `src/daedalus/protocols.py` is the authority on the
 Protocol seams.
@@ -103,7 +103,7 @@ tools:
     - files.read
 
 memory:
-  personal: techne                      # techne | none  (extra: tenishai-daedalus[techne])
+  personal: techne                      # techne | none  (extra: tenish-daedalus[techne])
                                         # recalls 5 entries on the prompt, or on the
                                         # task's daedalus_recall metadata (run --recall)
   team: none                            # reserved: only `none` is accepted until the
@@ -240,8 +240,8 @@ class Transport(Protocol):           # start/stop; delivers Tasks to the handler
 
 Default implementations ship in-tree (in-memory/no-op/SQLite). Real backends
 arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
-`daedalus.transports`): `tenishai-daedalus[techne]`, `tenishai-daedalus[liminal]`,
-`tenishai-daedalus[slack]`. Third parties add backends without touching core.
+`daedalus.transports`): `tenish-daedalus[techne]`, `tenish-daedalus[liminal]`,
+`tenish-daedalus[slack]`. Third parties add backends without touching core.
 
 ### 2.3 LLM invocation
 
