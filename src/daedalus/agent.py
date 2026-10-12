@@ -80,6 +80,25 @@ def _with_withheld_note(messages: list[dict], withheld: set[str]) -> list[dict]:
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
 
+_REFUSED_HEADING = "## Tools refused to you in this run"
+
+
+def _with_refused_note(messages: list[dict], refused: list[str]) -> list[dict]:
+    """Tell the model a provider's tools are missing by policy, not by outage,
+    once (#156). Same once-only rule as _with_withheld_note."""
+    system = messages[0]
+    if system.get("role") != "system" or _REFUSED_HEADING in str(system.get("content")):
+        return messages
+    note = (
+        f"\n\n{_REFUSED_HEADING}\n"
+        "A tool server refused this agent, so its tools are not available. This is "
+        "a policy decision, not an outage; don't ask colleagues to work around it. "
+        "If the task needs those tools, say so and name the refusal:\n"
+        + "\n".join(f"- {reason}" for reason in refused)
+    )
+    return [{**system, "content": system["content"] + note}, *messages[1:]]
+
+
 def _inbound_depth(task: Task, key: str) -> int:
     """The inbound hop count from task metadata; anything unreadable is 0 (see
     the comment in handle_task for why OverflowError is caught)."""
@@ -929,6 +948,10 @@ class Agent:
                 state=TaskState.FAILED,
                 reason=ReasonCode.ESCALATION,
             )
+        refused = getattr(self.tools, "refused", None)
+        if refused:
+            self._emit("tool_provider_refused", errors=list(refused))
+            messages = _with_refused_note(messages, refused)
         withheld = self._unapprovable(allowed)
         if withheld:
             # Nobody can approve a gated tool in this run, so don't offer it: a model

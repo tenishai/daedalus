@@ -794,3 +794,48 @@ async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path
     offered = [t["function"]["name"] for t in llm.tools_seen[0]]
     assert offered == ["files__read"]
     assert seen_ledger[0] is not None
+
+
+async def test_a_refusing_provider_drops_its_tools_and_the_turn_continues(tmp_path):
+    """#156: one gateway refusing this agent (no policy grant) used to fail the
+    whole turn as "tool provider unavailable". With other providers wired, the
+    turn runs on their tools and the model is told why the rest are missing."""
+    from daedalus.protocols import ToolProviderRefused
+    from daedalus.tools.compose import MultiToolProvider
+
+    class RefusingGateway:
+        async def tools(self):
+            raise ToolProviderRefused("liminal at http://gw refused the request: no policy grant")
+
+        async def call(self, name, payload):
+            raise AssertionError("never reached")
+
+    llm = ScriptedLLM("answered without the gateway")
+    tools = MultiToolProvider([RefusingGateway(), FakeTools([READ_SPEC])])
+    events: list[dict] = []
+    agent = make_agent(tmp_path, allow=["files.*"], llm=llm, tools=tools)
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.state is TaskState.COMPLETED
+    assert [t["function"]["name"] for t in llm.tools_seen[0]] == ["files__read"]
+    system = llm.calls[0][0]["content"]
+    assert "Tools refused to you in this run" in system
+    assert "no policy grant" in system
+    assert any(e["type"] == "tool_provider_refused" for e in events)
+
+
+async def test_an_outage_behind_the_composer_still_fails_the_turn(tmp_path):
+    from daedalus.tools.compose import MultiToolProvider
+
+    class DeadGateway:
+        async def tools(self):
+            raise ConnectionError("connection refused :9100")
+
+        async def call(self, name, payload):
+            raise AssertionError("never reached")
+
+    tools = MultiToolProvider([DeadGateway(), FakeTools([READ_SPEC])])
+    agent = make_agent(tmp_path, allow=["files.*"], tools=tools)
+    task = await agent.handle_task(Task.from_text("hi"))
+    assert task.state is TaskState.FAILED
+    assert "connection refused :9100" in task.agent_text()

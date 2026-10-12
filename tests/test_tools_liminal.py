@@ -61,6 +61,76 @@ async def test_down_gateway_error_names_liminal_and_its_url():
         await provider.tools()
 
 
+def _raising_client(exc):
+    class Client:
+        async def list_tools(self):
+            raise exc
+
+    return Client()
+
+
+async def test_unreachable_remote_gateway_gets_no_start_it_yourself_hint():
+    provider = LiminalToolProvider(
+        "https://liminal.example:443", client=_raising_client(ConnectionError("refused"))
+    )
+    with pytest.raises(RuntimeError) as info:
+        await provider.tools()
+    assert "liminal at https://liminal.example:443 is unreachable (refused)" in str(info.value)
+    assert "is it running" not in str(info.value)
+
+
+async def test_unreachable_localhost_gateway_keeps_the_hint():
+    provider = LiminalToolProvider(
+        "http://localhost:9100", client=_raising_client(ConnectionError("refused"))
+    )
+    with pytest.raises(RuntimeError, match="is it running"):
+        await provider.tools()
+
+
+@pytest.mark.skipif(not LIMINAL_INSTALLED, reason="liminal not importable")
+async def test_a_gateway_refusal_is_reported_as_a_refusal_not_an_outage():
+    """#156: a reachable gateway answering -32001 (no grant) was reported as
+    "unreachable ... is it running?"."""
+    from liminal.client.mcp import MCPRemoteError
+
+    from daedalus.protocols import ToolProviderRefused
+
+    refusal = MCPRemoteError(-32001, "no policy grant for ('a-cabal', 'rook')")
+    provider = LiminalToolProvider("https://gw.example", client=_raising_client(refusal))
+    with pytest.raises(ToolProviderRefused) as info:
+        await provider.tools()
+    message = str(info.value)
+    assert message == (
+        "liminal at https://gw.example refused the request: "
+        "no policy grant for ('a-cabal', 'rook')"
+    )
+
+
+async def test_a_refusal_is_recognised_without_a_liminal_install(monkeypatch):
+    """CI runs without liminal, so the real-class test above skips there; this
+    one stands in a module with the same class name and shape."""
+    import sys
+    import types
+
+    from daedalus.protocols import ToolProviderRefused
+
+    class MCPRemoteError(RuntimeError):
+        def __init__(self, code, message):
+            super().__init__(f"[{code}] {message}")
+            self.code, self.message = code, message
+
+    fake = types.ModuleType("liminal.client.mcp")
+    fake.MCPRemoteError = MCPRemoteError
+    for name in ("liminal", "liminal.client"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "liminal.client.mcp", fake)
+    provider = LiminalToolProvider(
+        "https://gw.example", client=_raising_client(MCPRemoteError(-32001, "no grant"))
+    )
+    with pytest.raises(ToolProviderRefused, match="refused the request: no grant$"):
+        await provider.tools()
+
+
 async def test_call_returns_text_and_error_outcomes_raise():
     client = FakeLiminalClient()
     provider = LiminalToolProvider("http://x", client=client)

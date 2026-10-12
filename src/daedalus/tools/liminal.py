@@ -8,13 +8,36 @@ pip install -e path/to/liminal. Tool names arrive already dotted
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import time
 from datetime import datetime
+from urllib.parse import urlparse
+
+from daedalus.protocols import ToolProviderRefused
 
 # Refresh the exchanged token this many seconds before it expires -- a
 # token that dies mid-call helps nobody.
 _EXCHANGE_SLACK_S = 60.0
+
+
+def _is_remote_error(exc: BaseException) -> bool:
+    """Did the gateway answer with a JSON-RPC error, rather than fail to answer?"""
+    try:
+        from liminal.client.mcp import MCPRemoteError
+    except ImportError:
+        return False
+    return isinstance(exc, MCPRemoteError)
+
+
+def _is_loopback(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class LiminalToolProvider:
@@ -99,13 +122,25 @@ class LiminalToolProvider:
         try:
             listed = await client.list_tools()
         except Exception as exc:
+            # THE SERVER ANSWERED, SO IT IS NOT DOWN (#156). A policy refusal
+            # (no grant for this issuer and persona) used to get the
+            # "is it running?" text below, and operators checked connectivity
+            # first.
+            if _is_remote_error(exc):
+                raise ToolProviderRefused(
+                    f"liminal at {self.url} refused the request: "
+                    f"{getattr(exc, 'message', None) or exc}"
+                ) from exc
             # Name the gateway and its address — "connection failed" without
             # a WHERE sends the operator hunting (finding #23: the person who
             # always forgets to start liminal deserves an error that says so).
-            raise RuntimeError(
-                f"liminal at {self.url} is unreachable ({exc}) — is it running? "
-                f"e.g. LIMINAL_AUTH_DISABLED=1 liminal serve --port <port>"
-            ) from exc
+            # The start-it-yourself hint only fits a gateway on this machine.
+            hint = (
+                " — is it running? e.g. LIMINAL_AUTH_DISABLED=1 liminal serve --port <port>"
+                if _is_loopback(self.url)
+                else ""
+            )
+            raise RuntimeError(f"liminal at {self.url} is unreachable ({exc}){hint}") from exc
         return [
             {
                 "name": tool.name,

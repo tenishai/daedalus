@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-10-07
 anchor: pyproject.toml sha=6f56cff806e2bdd6c22f0b621c1970022a4fd950
-anchor: src/daedalus/agent.py sha=ba1f01fb4d326583a2539348ed775af186e119db
+anchor: src/daedalus/agent.py sha=55c0dbba32bae1f49f4e2468dbbe730d65323682
 ---
 # daedalus — repo card
 
@@ -22,7 +22,7 @@ SEAMS → card:
 - bundle      src/daedalus/bundle.py         (AgentSpec = agent.yaml schema, drift-pinned JSON Schema) → docs/arch/bundle.md
 - (uncarded) transports/slack.py (Socket Mode; reaction approver; one transport for all slack blocks); transports/cli.py
 - (uncarded) tiers.py (the deployment's tiers file: tier word → model, endpoint, engine, limits)
-- (uncarded) tools/*: builtin files.* and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins)
+- (uncarded) tools/*: builtin files.* and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
 - (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes), journal.py (7-day journal.db), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file validator)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 
