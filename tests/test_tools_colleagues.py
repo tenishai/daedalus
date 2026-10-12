@@ -1650,3 +1650,55 @@ async def test_an_empty_json_detail_is_not_echoed_as_raw_text(monkeypatch):
     text = await make_provider(client)._ask_colleague("rin", "q")
     assert "detail" not in text
     assert text.startswith("The request to ask rin was refused (HTTP 403).")
+
+
+# --- #151: only asks that reached the colleague use a slot --------------------
+
+
+async def test_after_a_transport_failure_a_retry_is_dispatched(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[FakeResponse(502), _answer("ok")])
+    provider = make_provider(client)
+    first = await _ask(provider, "rin")
+    second = await _ask(provider, "rin")
+    assert "HTTP 502" in first
+    assert second == "ok"
+    assert _asked(client) == ["rin", "rin"]
+    assert ledger.asks == 1
+
+
+async def test_failed_asks_give_their_slot_back(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(
+        post_responses=[FakeResponse(503), FakeResponse(429)] + [_answer("ok")] * 3
+    )
+    provider = make_provider(client)
+    await _ask(provider, "rin")
+    await _ask(provider, "ana")
+    for name in ("rin", "ana", "bo"):
+        assert await _ask(provider, name) == "ok"
+    assert _asked(client) == ["rin", "ana", "rin", "ana", "bo"]
+
+
+async def test_asking_yourself_does_not_use_a_slot(monkeypatch, ledger):
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[_answer("ok")] * 3)
+    provider = make_provider(client)
+    assert "cannot ask myself" in await _ask(provider, "me")
+    for name in ("rin", "ana", "bo"):
+        await _ask(provider, name)
+    assert _asked(client) == ["rin", "ana", "bo"]
+    assert ledger.asks == 3
+
+
+async def test_a_policy_refusal_is_cached_and_counted(monkeypatch, ledger):
+    """A 403 won't change on a retry, so it stays in the ledger: a repeat is
+    answered from it, and it uses a slot so refusals can't fuel a hunt."""
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "secret")
+    client = FakeHTTPClient(post_responses=[FakeResponse(403, {"detail": "not a colleague"})])
+    provider = make_provider(client)
+    await _ask(provider, "rin")
+    again = await _ask(provider, "rin")
+    assert "already asked rin" in again and "not a colleague" in again
+    assert _asked(client) == ["rin"]
+    assert ledger.asks == 1
