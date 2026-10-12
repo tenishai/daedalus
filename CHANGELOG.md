@@ -19,6 +19,12 @@ Everything since v0.4.0 (2026-09-14). `__version__` is still 0.4.0.
 
 ### Fixed
 
+- **A colleague's refusal is shown, and no longer bans it** (issues #155 and #56).
+  `colleagues.ask_colleague` used to answer any non-200 with "Asking X failed: HTTP N."
+  For a 4xx it now includes the switchboard's reason, capped at 300 characters. A 401, 403
+  or 404 is worded as a refusal that won't change on retry, and no longer counts toward
+  marking the colleague down, so a policy refusal can't hide a healthy colleague for five
+  minutes. Other 4xx (400, 422, 429) and 5xx still count.
 - **`colleagues.ask_colleague` is limited per answer** (issue #149). One answer gets at
   most 3 colleague asks. A repeat ask to the same colleague returns the earlier reply
   without dispatching and doesn't count. A reply that opens with "I can't" / "I don't have

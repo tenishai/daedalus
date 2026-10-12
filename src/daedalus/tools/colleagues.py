@@ -21,6 +21,48 @@ from pathlib import Path
 
 _NOT_CONFIGURED = "The colleague pass is not configured."
 _UNREADABLE_REPLY = "The colleague answered in a shape I could not read."
+
+# Statuses that are deterministic policy answers from the switchboard: not
+# counted toward the down-ban (#56).
+_POLICY_STATUSES = frozenset({401, 403, 404})
+
+# The refusal reason is put in front of the model, so it is bounded.
+_REFUSAL_DETAIL_MAX = 300
+
+
+def _refusal_detail(response) -> str:
+    """The reason a 4xx gives, from cabal's {"detail": ...} body, or the raw
+    text when the body isn't JSON; bounded, and ending in punctuation."""
+    try:
+        body = response.json()
+    except Exception:
+        detail = str(getattr(response, "text", "") or "")
+    else:
+        detail = str(body.get("detail") or "") if isinstance(body, dict) else ""
+    detail = " ".join(detail.split())
+    if len(detail) > _REFUSAL_DETAIL_MAX:
+        detail = detail[:_REFUSAL_DETAIL_MAX] + "..."
+    if detail and detail[-1] not in ".!?":
+        detail += "."
+    return detail
+
+
+def _refusal_text(target: str, response) -> str:
+    """What the model sees for a 4xx (#155): the switchboard's reason. A
+    policy status (#56) is worded as a refusal that won't change on retry;
+    any other 4xx (400, 422, 429 ...) only says it was rejected, since a 429
+    in particular means "try later"."""
+    detail = _refusal_detail(response)
+    status = response.status_code
+    if status in _POLICY_STATUSES:
+        head = f"The request to ask {target} was refused (HTTP {status})"
+        tail = " This is a refusal, not an outage; asking again will be refused the same way."
+    else:
+        head = f"The request to ask {target} was rejected (HTTP {status})"
+        tail = ""
+    return head + (f": {detail}" if detail else ".") + tail
+
+
 #: Task states that mean the question was refused rather than answered.
 #: A guardrail refusal is one of these carrying explanatory text, which is
 #: exactly what makes it readable as an answer if nobody checks (#40 r2).
@@ -688,8 +730,17 @@ class ColleaguesToolProvider:
             # ban shrank most.
             self._record_failure(target, time.time())
             return f"Could not reach {target}: {exc}"
+        if response.status_code in _POLICY_STATUSES:
+            # A POLICY ANSWER, NOT AN OUTAGE (#56). The switchboard answered,
+            # promptly, and said no; counting that toward the down-ban hid a
+            # healthy colleague from every conversation in the process. Nor is
+            # it a success: it says nothing about whether the colleague can
+            # answer, so the record is left as it was.
+            return _refusal_text(target, response)
         if response.status_code != 200:
             self._record_failure(target, time.time())
+            if 400 <= response.status_code < 500:
+                return _refusal_text(target, response)
             return f"Asking {target} failed: HTTP {response.status_code}."
         # CLEARED HERE, ON THE SAME EVENT CLASS THE COUNTER COUNTS (#38 r1
         # Important 2). It used to clear after the parse and the empty-text
