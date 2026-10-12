@@ -1892,18 +1892,19 @@ async def test_a_handler_without_an_event_bus_streams_without_progress_lines():
 def test_progress_lines_say_what_a_tool_did_and_name_only_the_object():
     from daedalus.transports.slack import _progress_line
 
-    def call(name, **arguments):
-        return _progress_line({"type": "tool_call", "name": name, "arguments": arguments})
+    def call(tool, **arguments):
+        return _progress_line({"type": "tool_call", "name": tool, "arguments": arguments})
 
+    repo = "example/infra"
     assert (
-        call("github.read_file", repository="example/infra", path="teams/data.yaml", token="xoxb-no")
+        call("github.read_file", repository=repo, path="teams/data.yaml", token="xoxb-no")
         == "Read teams/data.yaml in example/infra"
     )
     assert (
-        call("github.get_pr", repository="example/infra", number=352)
+        call("github.get_pr", repository=repo, number=352)
         == "Read pull request #352 in example/infra"
     )
-    assert call("colleagues.ask_colleague", name="ledger", question="a private question") == "Asked ledger"
+    assert call("colleagues.ask_colleague", name="ledger", question="private") == "Asked ledger"
     assert call("atlassian.getJiraIssue") == "Used Atlassian"
     assert call("cloudtrail.query", sql="select") == "Searched CloudTrail"
     assert _progress_line({"type": "recall", "count": 1}) == "Recalled 1 thing from memory"
