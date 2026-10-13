@@ -6,6 +6,16 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **The learnings task no longer sends unattributed candidates.** This changes what the
+  room receives (tenishai/daedalus#165). An empty `said_by` used to mean either a plain
+  `user:` turn (a user with no sender id, which is how the room's own chat arrives) or an
+  attribution that failed verification, and the room couldn't tell which. A plain `user:`
+  turn now comes back as `said_by: "user"`, checked against those turns like any named
+  speaker, and a candidate whose quote isn't in the named speaker's own turns is dropped.
+  A room that shows `said_by` verbatim will show `user` for candidates from its own chat.
+
 ## [0.5.0] — 2026-10-12
 
 Everything since v0.4.0 (2026-09-14), 57 commits.
