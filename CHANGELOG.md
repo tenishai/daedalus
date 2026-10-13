@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-13
+
+### Upgrading
+
+- No bundle or config change. A room that receives learnings sees two differences: a
+  candidate from its own chat carries `said_by: "user"`, and a candidate whose attribution
+  fails verification isn't sent. kobo's `learnings_require_attribution` switch is safe to
+  turn on once every agent runs 0.5.1.
+
 ### Changed
 
 - **The learnings task no longer sends unattributed candidates.** This changes what the
