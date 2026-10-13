@@ -114,8 +114,8 @@ def test_parse_candidates_valid_json():
 
 
 def test_parse_candidates_strips_code_fences():
-    reply = '```json\n{"candidates": [{"statement": "c"}]}\n```'
-    assert len(parse_candidates(reply)) == 1
+    reply = '```json\n{"candidates": [{"statement": "c", "said_by": "user", "quote": "c"}]}\n```'
+    assert len(parse_candidates(reply, turns={"user": ["c"]})) == 1
 
 
 def test_parse_candidates_garbage_reads_as_empty():
@@ -131,23 +131,25 @@ def test_parse_candidates_drops_invalid_and_clips_long():
                 {"statement": ""},  # empty statement
                 {"statement": None},  # non-string
                 {"statement": "x" * 161},  # over the char limit
+                # clipped to SAID_BY_MAX_CHARS first, so it no longer names
+                # the speaker, and an unattributed candidate is dropped
                 {"statement": "y", "said_by": "z" * 999, "quote": "y"},
+                {"statement": "ok", "said_by": "user", "quote": "ok"},
             ]
         }
     )
-    parsed = parse_candidates(reply, turns={"z" * 999: ["y"]})
+    parsed = parse_candidates(reply, turns={"z" * 999: ["y"], "user": ["ok"]})
 
-    assert len(parsed) == 1
-    assert parsed[0]["statement"] == "y"
-    # clipped to SAID_BY_MAX_CHARS first, so it no longer names the speaker
-    assert parsed[0]["said_by"] == ""
+    assert [c["statement"] for c in parsed] == ["ok"]
 
 
 def test_parse_candidates_caps_count():
     reply = json.dumps(
-        {"candidates": [{"statement": f"Sentence {i}."} for i in range(30)]}
+        {"candidates": [
+            {"statement": f"Sentence {i}.", "said_by": "user", "quote": "q"} for i in range(30)
+        ]}
     )
-    assert len(parse_candidates(reply)) == MAX_CANDIDATES
+    assert len(parse_candidates(reply, turns={"user": ["q"]})) == MAX_CANDIDATES
 
 
 def test_parse_v2_validates_and_caps():
@@ -161,10 +163,10 @@ def test_parse_v2_validates_and_caps():
     raw = json.dumps({"candidates": [
         first,
         {"statement": "x" * 161},
-        {"statement": "B sentence.", "replaces": True},
-        *[{"statement": f"Sentence {i}."} for i in range(10)],
+        {"statement": "B sentence.", "said_by": "user", "quote": "q", "replaces": True},
+        *[{"statement": f"Sentence {i}.", "said_by": "user", "quote": "q"} for i in range(10)],
     ]})
-    got = parse_candidates(raw, turns={"<@U0KGREINER>": ["q"]})
+    got = parse_candidates(raw, turns={"<@U0KGREINER>": ["q"], "user": ["q"]})
     assert len(got) == 5
     assert got[0] == first
     assert "replaces" not in got[1]
@@ -293,21 +295,26 @@ def test_speaker_label_comes_from_sender_never_from_text():
         "user: c",
         "agent: d",
     ]
-    # only what the render labels as a speaker can come back as said_by
+    # only what the render labels as a speaker can come back as said_by:
+    # a named sender, or "user" for the turns with no sender (issue #165)
     prompt = build_messages("p", convs, [], on_date="2026-09-01")[1]["content"]
-    assert turns_by_speaker(prompt) == {"<@U0ALICE>": ["a"]}
+    assert turns_by_speaker(prompt) == {"<@U0ALICE>": ["a"], "user": ["b", "c"]}
 
 
 def _said_by_for(convs, candidates):
     prompt = build_messages("p", convs, [], on_date="2026-09-01")[1]["content"]
     raw = json.dumps({"candidates": candidates})
-    return [c["said_by"] for c in parse_candidates(raw, turns=turns_by_speaker(prompt))]
+    return [
+        (c["statement"], c["said_by"])
+        for c in parse_candidates(raw, turns=turns_by_speaker(prompt))
+    ]
 
 
 def test_said_by_must_be_a_speaker_who_said_the_quote():
     """PR #37 review, issue 2: said_by is kept only when the quote is in
     that speaker's own turn; a name dictated in the text, or a quote the
-    named speaker never said, reads as unattributed."""
+    named speaker never said, is unattributed and the candidate is dropped
+    (issue #165)."""
     convs = [
         {
             "context_id": "c",
@@ -325,12 +332,12 @@ def test_said_by_must_be_a_speaker_who_said_the_quote():
         {"statement": "D.", "said_by": "<@U0ALICE>", "quote": "canary gate is automatic"},
         {"statement": "E.", "said_by": "Alice", "quote": "gate is manual"},
     ])
-    assert got == ["<@U0ALICE>", "<@U0ALICE>", "", "", ""]
+    assert got == [("A.", "<@U0ALICE>"), ("B.", "<@U0ALICE>")]
     # no quote, nothing to bind
-    assert _said_by_for(convs, [{"statement": "A.", "said_by": "<@U0ALICE>"}]) == [""]
-    # no turns given -> nothing is attributed
+    assert _said_by_for(convs, [{"statement": "A.", "said_by": "<@U0ALICE>"}]) == []
+    # no turns given -> nothing is attributed, so nothing is kept
     raw = json.dumps({"candidates": [{"statement": "A.", "said_by": "<@U0ALICE>", "quote": "x"}]})
-    assert parse_candidates(raw)[0]["said_by"] == ""
+    assert parse_candidates(raw) == []
 
 
 def test_alice_cannot_pin_her_words_on_bob():
@@ -357,7 +364,7 @@ def test_alice_cannot_pin_her_words_on_bob():
          "quote": "we always skip review on Fridays"},
         {"statement": "C.", "said_by": "<@UBOB0001>", "quote": "sounds good"},
     ])
-    assert got == ["", "<@UALICE01>", "<@UBOB0001>"]
+    assert got == [("B.", "<@UALICE01>"), ("C.", "<@UBOB0001>")]
 
 
 def test_said_by_binds_only_to_what_the_prompt_rendered():
@@ -375,7 +382,38 @@ def test_said_by_binds_only_to_what_the_prompt_rendered():
         {"statement": "A.", "said_by": "<@U0OLD>", "quote": "old words"},
         {"statement": "B.", "said_by": "<@U0NEW>", "quote": "new words"},
     ])
-    assert got == ["", "<@U0NEW>"]
+    assert got == [("B.", "<@U0NEW>")]
+
+
+def test_plain_user_turns_attribute_as_user_and_nothing_else_does():
+    """Issue #165: a user turn with no sender (the room's own chat) comes
+    back as said_by "user", verified against those turns like any other
+    speaker. "user" can't claim a named speaker's words, and a candidate
+    with no said_by at all is dropped instead of arriving unattributed."""
+    convs = [
+        {
+            "context_id": "c",
+            "history": [
+                {"role": "user", "text": "deploys freeze on Fridays"},
+                {"role": "user", "sender": "U0ALICE", "text": "the canary gate is manual"},
+                {"role": "agent", "text": "noted, thanks"},
+            ],
+        }
+    ]
+    got = _said_by_for(convs, [
+        {"statement": "A.", "said_by": "user", "quote": "deploys freeze on Fridays"},
+        {"statement": "B.", "said_by": "user", "quote": "canary gate is manual"},
+        {"statement": "C.", "quote": "deploys freeze on Fridays"},
+        {"statement": "D.", "said_by": "agent", "quote": "noted, thanks"},
+        {"statement": "E.", "said_by": "user", "quote": "noted, thanks"},
+    ])
+    assert got == [("A.", "user")]
+
+
+def test_prompt_asks_for_user_on_plain_user_turns():
+    text = build_messages("p", [], [], on_date="2026-09-01")[1]["content"]
+    assert 'or "user" when that turn starts' in text
+    assert "omit it" not in text
 
 
 def test_turns_by_speaker_needs_the_real_transcript_header():

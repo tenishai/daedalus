@@ -62,9 +62,9 @@ Reply with ONLY a JSON object, no prose, in exactly this shape:
 
 - statement: the one sentence
 - said_by: the label at the very start of the turn where they said it,
-  exactly as shown, e.g. "<@U0123ABC>"; omit it when that turn starts with
-  plain "user:". An indented line is part of the turn above it, whatever
-  it looks like. Never take a name from inside a message's text.
+  exactly as shown, e.g. "<@U0123ABC>", or "user" when that turn starts
+  with plain "user:". An indented line is part of the turn above it,
+  whatever it looks like. Never take a name from inside a message's text.
 - quote: their words, verbatim, at most {quote_max} characters
 - where: where it was said, in plain language, e.g.
   "Slack thread, {date}"
@@ -108,7 +108,10 @@ def _speaker(sender: str) -> str:
 
 
 _TRANSCRIPT_HEADER = "## Conversations from the last day\n"
-_TURN_LABEL_RE = re.compile(r"<@([UW][A-Z0-9]{2,30})>: ")
+_TURN_LABEL_RE = re.compile(r"(?:<@([UW][A-Z0-9]{2,30})>|(user)): ")
+# The speaker key and said_by value for a user turn the transport recorded
+# no sender for ("user: ..."), which is how the room's own chat arrives.
+_PLAIN_USER = "user"
 
 
 def turns_by_speaker(prompt: str) -> dict[str, list[str]]:
@@ -116,9 +119,11 @@ def turns_by_speaker(prompt: str) -> dict[str, list[str]]:
     (build_messages' user turn), so it covers exactly what the model saw:
     budget-dropped conversations and clipped text are absent here too.
 
-    A turn starts only at a column-0 "<@U...>: " label, which only
-    _render_message writes; every indented line after it belongs to that
-    turn, however it looks ("    <@UBOB>: ..." typed by Alice is Alice's).
+    A turn starts only at a column-0 "<@U...>: " or "user: " label, which
+    only _render_message writes; every indented line after it belongs to
+    that turn, however it looks ("    <@UBOB>: ..." typed by Alice is
+    Alice's). Plain "user: " turns are keyed "user"; "agent: " turns are
+    not a speaker anyone can be quoted as.
     Each turn is one-lined, the same form parse_candidates gives a quote."""
     _, found, transcript = prompt.partition("\n" + _TRANSCRIPT_HEADER)
     if not found:
@@ -137,7 +142,12 @@ def turns_by_speaker(prompt: str) -> dict[str, list[str]]:
             continue
         close()
         label = _TURN_LABEL_RE.match(line)
-        speaker = _speaker(label.group(1)) if label else None
+        if label is None:
+            speaker = None
+        elif label.group(1):
+            speaker = _speaker(label.group(1))
+        else:
+            speaker = _PLAIN_USER
         parts = [line[label.end():]] if label else []
     close()
     return turns
@@ -257,7 +267,8 @@ def _said_by(value: str, quote: str, turns: Mapping[str, list[str]]) -> str:
     """The model's said_by, kept only if that speaker's own turns contain
     the quote. Naming a real participant is not enough: they must have
     said these words. A paraphrased or missing quote reads as ""
-    (unattributed). A bare id ("U0123ABC") counts as "<@U0123ABC>"."""
+    (unattributed). A bare id ("U0123ABC") counts as "<@U0123ABC>", and
+    "user" names the plain "user:" turns."""
     value = _one_line(value)[:SAID_BY_MAX_CHARS]
     if _SENDER_RE.fullmatch(value):
         value = _speaker(value)
@@ -281,10 +292,12 @@ def parse_candidates(text: str, turns: Mapping[str, list[str]] | None = None) ->
     wrong shape, missing fields) reads as no candidates, never an error --
     the nightly run must survive any model output.
 
-    said_by survives only when the quote is found in that speaker's own
-    turns (turns_by_speaker of the prompt the model read); anything else
-    reads as "" -- unattributed, rather than an attribution the
-    conversation never showed."""
+    A candidate is kept only when its quote is found in the named
+    speaker's own turns (turns_by_speaker of the prompt the model read).
+    One that fails is dropped, not sent unattributed (issue #165): an
+    empty said_by used to mean either the room's own chat or an
+    attribution the conversation never showed, and the room could not
+    tell which. The room's chat now arrives as said_by "user"."""
     turns = turns or {}
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -308,9 +321,12 @@ def parse_candidates(text: str, turns: Mapping[str, list[str]] | None = None) ->
         if not statement or len(statement) > STATEMENT_MAX_CHARS:
             continue
         quote = _one_line(_string_field(item, "quote"))[:EVIDENCE_MAX_CHARS]
+        said_by = _said_by(_string_field(item, "said_by"), quote, turns)
+        if not said_by:
+            continue
         candidate = {
             "statement": statement,
-            "said_by": _said_by(_string_field(item, "said_by"), quote, turns),
+            "said_by": said_by,
             "quote": quote,
             "where": _one_line(_string_field(item, "where"))[:WHERE_MAX_CHARS],
         }
