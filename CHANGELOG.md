@@ -6,6 +6,16 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-10-14
+
+### Upgrading
+
+- No bundle or config change. The clock line's format changed from
+  `Current time (UTC): <ISO 8601>` to `Current time (UTC): <Weekday> <ISO 8601>`, and it
+  moved from after the skills index to a `## Clock` section right after the persona.
+  Anything that reads or matches the system prompt should expect the weekday and the new
+  position.
+
 ### Changed
 
 - **The clock line names the weekday and has its own heading.** It now reads
