@@ -359,8 +359,8 @@ async def test_every_task_tells_the_model_the_current_utc_time(monkeypatch):
     await agent.handle_task(task)
     second = llm.calls[1][0]["content"]
     assert "Current time (UTC): Wednesday 2026-10-14T00:00:05+00:00" in second
-    assert "2026-10-13" not in second
-    assert "Tuesday" not in second
+    assert "Current time (UTC): Tuesday" not in second
+    assert "Yesterday: Tuesday 2026-10-13" in second
 
 
 async def test_clock_weekday_is_the_utc_weekday_not_the_local_one(monkeypatch):
@@ -378,6 +378,33 @@ async def test_clock_weekday_is_the_utc_weekday_not_the_local_one(monkeypatch):
     llm = ScriptedLLM("ok")
     await make_agent(llm=llm).handle_task(Task.from_text("what day is it?"))
     assert "Current time (UTC): Monday 2026-10-19T01:30:00+00:00" in llm.calls[0][0]["content"]
+
+
+async def test_clock_lists_yesterday_and_the_past_week(monkeypatch):
+    """Issue #181: with only today's weekday, a model still counted back to the
+    wrong "last Tuesday". The past week is listed from the same UTC reading:
+    01:30 on 2 November in UTC is 21:30 on 1 November at UTC-4, and the week
+    behind it crosses into October."""
+    from datetime import datetime, timedelta, timezone
+
+    import daedalus.agent as agent_module
+
+    monkeypatch.setattr(
+        agent_module,
+        "_utc_now",
+        lambda: datetime(2026, 11, 1, 21, 30, tzinfo=timezone(timedelta(hours=-4))),
+    )
+    llm = ScriptedLLM("ok")
+    await make_agent(llm=llm).handle_task(Task.from_text("when was last Tuesday?"))
+    system = llm.calls[0][0]["content"]
+    assert (
+        "## Clock\n"
+        "Current time (UTC): Monday 2026-11-02T01:30:00+00:00\n"
+        "Yesterday: Sunday 2026-11-01\n"
+        "Past week: Sunday 2026-11-01, Saturday 2026-10-31, Friday 2026-10-30, "
+        "Thursday 2026-10-29, Wednesday 2026-10-28, Tuesday 2026-10-27, "
+        "Monday 2026-10-26"
+    ) in system
 
 
 async def test_clock_line_is_not_under_the_skills_heading(monkeypatch, tmp_path):

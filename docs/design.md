@@ -278,10 +278,13 @@ prompt, which names the day it summarises instead of a clock line.
 
 1. **The persona** (`persona.md`).
 2. **`## Clock`**, holding `Current time (UTC): <Weekday> <ISO 8601>`, e.g.
-   `Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00`. It is read from the pod's
-   clock when the task starts. The weekday comes from a fixed English list after
-   converting to UTC, so the pod's locale doesn't change it. Turns within a task re-send
-   the same line, so the prompt cache still hits (#171, #173, #175).
+   `Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00`, then
+   `Yesterday: <Weekday> <date>` and `Past week: <Weekday> <date>, …` for the seven
+   days before. It is read from the pod's clock when the task starts. Weekdays come from
+   a fixed English list after converting to UTC, so the pod's locale doesn't change them.
+   The past week is there so the model reads "last Tuesday" instead of counting back.
+   Turns within a task re-send the same section, so the prompt cache still hits
+   (#171, #173, #175, #181).
 3. **`## Skills`**, one line per assigned skill (``- `id` — summary``) and an instruction
    to call `skills.load(name)` before acting on one. It appears only when `tools.allow`
    admits `skills.load` (#63).
