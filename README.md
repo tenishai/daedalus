@@ -59,7 +59,8 @@ including a local endpoint via `api_base` in agent.yaml. The other commands are
 prudence/
 ├── agent-card.json    # who the agent is (A2A standard)
 ├── persona.md         # how it behaves
-└── agent.yaml         # what it's wired to
+├── agent.yaml         # what it's wired to
+└── skills/            # optional: <id>/SKILL.md, loaded on demand with skills.load
 ```
 
 ```bash
@@ -68,7 +69,11 @@ daedalus run  ./prudence     # serve its declared transports
 ```
 
 Same bundle, three runtimes — a chat REPL, an A2A endpoint, a Slack
-presence. A companion GUI is planned to edit the same files. No code generation,
+presence. Each turn runs on an engine: the built-in LiteLLM loop, or Claude Code
+(`--engine claude-code`, extra `tenish-daedalus[claude-code]`). A bundle can ask for a
+model tier (`fast`, `balanced`, `best`) instead of a model, and each deployment maps the
+tiers once in a file named by `DAEDALUS_TIERS`; see [docs/design.md](docs/design.md) §1.2a.
+Every task's system prompt carries the current UTC time and weekday (§2.3a). A companion GUI is planned to edit the same files. No code generation,
 ever: the bundle is the source of truth, diffable and PR-reviewable.
 
 ## How this was built

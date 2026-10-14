@@ -101,6 +101,8 @@ tools:
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read
+    - skills.load                       # needed for the skills index (§2.3a) when
+                                        # skills/ is non-empty; boot warns without it
 
 memory:
   personal: techne                      # techne | none  (extra: tenish-daedalus[techne])
@@ -252,6 +254,36 @@ provider degrades all loops together rather than thundering.
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
 DeepSeek R1 on vLLM). They will feed the visual builder's trace pane over SSE.
+
+### 2.3a What the model sees each task
+
+`Agent._messages` builds the system prompt fresh for every task, in this order:
+
+1. **The persona** (`persona.md`).
+2. **`## Clock`**, holding `Current time (UTC): <Weekday> <ISO 8601>`, e.g.
+   `Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00`. It is read from the pod's
+   clock when the task starts. The weekday comes from a fixed English list after
+   converting to UTC, so the pod's locale doesn't change it. Turns within a task re-send
+   the same line, so the prompt cache still hits (#171, #173, #175).
+3. **`## Skills`**, one line per assigned skill (``- `id` — summary``) and an instruction
+   to call `skills.load(name)` before acting on one. It appears only when `tools.allow`
+   admits `skills.load` (#63).
+4. **`## Recalled context`**: what personal memory recalled for this task.
+5. **`## Notices`**: what `pre_task` law hooks returned, and the Slack wake mode when
+   the task came from Slack (#147).
+
+The loop may add one note each when it withholds or drops tools: gated tools nobody can
+approve (#105), a tool provider that refused by policy (#156), and `ask_colleague` when
+this task is itself an answer to a colleague (#149).
+
+**The learnings lane** is a system task (`metadata.system_task: learnings`), sent by the
+room, not a chat turn. It reads the last 24 hours of the conversation journal (kept 7
+days) and replies with JSON candidate statements for the room's owner to approve.
+Nothing is stored by daedalus. Each candidate's `said_by` must name the speaker whose own
+turn holds its quote: a Slack sender as `<@U...>`, or `user` for a plain user turn such as
+the room's own chat. A candidate that fails that check is dropped (#165). The lane runs
+under the law layer: locked enforcement refuses it, and its reply goes through
+`post_draft` (#142).
 
 ### 2.4 Transports
 
