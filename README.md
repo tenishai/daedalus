@@ -16,7 +16,7 @@ gateway still runs.
 - **daedalus** — agent construction kit (this repo)
 - a visual builder GUI — a companion project, in development
 
-> Status: 0.5.3, released. Bundle loader, runtime, CLI/A2A/Slack transports,
+> Status: 0.5.4, released. Bundle loader, runtime, CLI/A2A/Slack transports,
 > approvals and enforcement have all shipped. Design rationale:
 > [docs/design.md](docs/design.md) — where it disagrees with the code, the
 > code is right.

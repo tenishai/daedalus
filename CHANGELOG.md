@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-10-14
+
+### Upgrading
+
+- No bundle or config change. The `## Clock` section is two lines longer: after
+  `Current time (UTC): …` it now carries `Yesterday: <Weekday> <date>` and
+  `Past week: <Weekday> <date>, …` for the seven days before. Anything that reads or
+  matches the system prompt should expect them.
+
 ### Changed
 
 - **The `## Clock` section lists yesterday and the past week.** After the current-time
@@ -13,7 +22,8 @@ Issue and pull request numbers all refer to this repository, written in full.
   `Past week: Tuesday 2026-10-13, Monday 2026-10-12, …`, seven days back, all from the
   same UTC reading. With only today's weekday, one model asked "What is today's weekday?
   Then give the date of last Tuesday." named a Wednesday or a Thursday, contradicting
-  its own count (tenishai/daedalus#181). The section is two lines longer.
+  its own count (tenishai/daedalus#181). The section is two lines longer. Pull request
+  tenishai/daedalus#182.
 
 ## [0.5.3] — 2026-10-14
 
