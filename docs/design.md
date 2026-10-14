@@ -98,9 +98,18 @@ tools:
       commands: [python, pytest, git]   # optional allowlist of bare program names
       env: [PIP_INDEX_URL]              # passed through on top of PATH/HOME/locale; the
       timeout: 300                      # agent's own env isn't passed (not a boundary: same user)
+  github:
+    branch_prefix: daedalus             # open_pr branches: <prefix>/<agent>/<slug>
+  max_steps: 10
+  on_exhausted: stop                    # stop | wrap_up: one last tool-free call for
+                                        # a partial answer when steps or context run out
+  context_tokens: 45000                 # optional: exhausted once a prompt reaches this
+  max_repeats: 3                        # optional: exhausted after the same call N times
   allow:                                # namespaced allowlist (ceiling)
     - github.pr_view
     - files.read
+    - skills.load                       # needed for the skills index (§2.3a) when
+                                        # skills/ is non-empty; boot warns without it
 
 memory:
   personal: techne                      # techne | none  (extra: tenish-daedalus[techne])
@@ -108,6 +117,14 @@ memory:
                                         # task's daedalus_recall metadata (run --recall)
   team: none                            # reserved: only `none` is accepted until the
                                         # team outbox exists (see section 7)
+
+engine:                                 # used with --engine claude-code (§2.3b)
+  claude_code:
+    builtin_tools: [Read, Grep]         # Claude Code built-ins allowed; default none
+    permission_mode: default            # default | dontAsk | acceptEdits | plan
+    on_denied: continue                 # continue | stop, when a gate denies a built-in
+    # binary, model, config_dir: optional; unset = the SDK's bundled CLI,
+    # the config dir's model, the operator's CLAUDE_CONFIG_DIR
 
 approvals:
   ceiling:                              # tier 1 — hard capability ceiling
@@ -166,7 +183,7 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
   your side): logged at load, emitted as the `model_resolved`
   event (shown by `run -v`, replayed on `/events`), and served on the a2a agent card
   as `daedalus_model`.
-- `model.tier` and `model.min_tier` (PR 127) are removed: a bundle that still sets
+- `model.tier` and `model.min_tier`, added in PR 127, are removed (issue #129, PR #132): a bundle that still sets
   either fails at load, pointing at `model.id`. The tiers *file* format is unchanged.
 
 ### 1.3 Task envelope
@@ -214,7 +231,7 @@ agent = Agent.load("./prudence")     # reads the bundle
 agent.serve()                        # starts declared transports
 ```
 
-`Agent` wires an LLM loop (LiteLLM), the persona, tools, and collaborators.
+`Agent` wires an engine (§2.3b), the persona, tools, and collaborators.
 A deterministic (non-LLM) agent implements `Handler` directly and still gets
 transports, approvals, and the bundle format.
 
@@ -252,6 +269,67 @@ provider degrades all loops together rather than thundering.
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
 DeepSeek R1 on vLLM). They will feed the visual builder's trace pane over SSE.
+
+### 2.3a What the model sees each task
+
+`Agent._messages` builds the system prompt fresh for every chat task, in this order. The
+operator lanes (teach, knowledge, tool, learnings) don't use it; learnings builds its own
+prompt, which names the day it summarises instead of a clock line.
+
+1. **The persona** (`persona.md`).
+2. **`## Clock`**, holding `Current time (UTC): <Weekday> <ISO 8601>`, e.g.
+   `Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00`. It is read from the pod's
+   clock when the task starts. The weekday comes from a fixed English list after
+   converting to UTC, so the pod's locale doesn't change it. Turns within a task re-send
+   the same line, so the prompt cache still hits (#171, #173, #175).
+3. **`## Skills`**, one line per assigned skill (``- `id` — summary``) and an instruction
+   to call `skills.load(name)` before acting on one. It appears only when `tools.allow`
+   admits `skills.load` (#63).
+4. **`## Recalled context`**: what personal memory recalled for this task.
+5. **`## Notices`**: what `pre_task` law hooks returned, and the Slack wake mode when
+   the task came from Slack (#147).
+
+The loop may add one note each when it withholds or drops tools: gated tools nobody can
+approve (#105), a tool provider that refused by policy (#156), and `ask_colleague` when
+this task is itself an answer to a colleague (#149).
+
+### 2.3b Engines
+
+A task's turn runs behind an `Engine` seam (#104). The engine is chosen by
+`--engine` / `DAEDALUS_ENGINE`, then by the engine of the model tier when `model.id`
+names one, then defaults to `litellm`. An explicit engine that disagrees with the tier is
+refused at load.
+
+- **`litellm`** is daedalus's own loop (§2.3): checkpoints, budget, and the
+  `on_exhausted`, `context_tokens` and `max_repeats` limits.
+- **`claude-code`** runs Claude Code as the agent on Anthropic's Agent SDK
+  (#108, extra `tenish-daedalus[claude-code]`; the runtime image ships it, #112). The
+  bundle's tools reach it through an in-process MCP server, and every call still goes
+  through the bundle's allowlist and gates. Its own built-ins are offered only when
+  listed in `engine.claude_code.builtin_tools`; a built-in that needs permission is gated
+  as `claude.<Tool>` (e.g. `match: "claude.Bash"`).
+
+What a bundle author needs to know about `claude-code`:
+- **Claude Code approves some built-in calls itself**, such as read-only tools, what the
+  permission mode auto-approves, and allow rules in the agent's own user settings. Those
+  never reach our gates. Leaving a built-in out of `builtin_tools` is the only way to be
+  sure it can't run.
+- **Not honoured:** checkpoints and resume, `tools.on_exhausted`, `tools.context_tokens`
+  and `tools.max_repeats`. `tools.max_steps` becomes Claude Code's turn limit.
+- **`model.budget.per_task_tokens` is refused at load**, because a token budget can't
+  stop a loop Claude Code runs itself.
+
+Engines hold no policy: the allowlist, gates and approver live in `Agent`, so every engine
+gets the same enforcement. `docs/arch/engines.md` has the details.
+
+**The learnings lane** is a system task (`metadata.system_task: learnings`), sent by the
+room, not a chat turn. It reads the last 24 hours of the conversation journal (kept 7
+days) and replies with JSON candidate statements for the room's owner to approve.
+Nothing is stored by daedalus. Each candidate's `said_by` must name the speaker whose own
+turn holds its quote: a Slack sender as `<@U...>`, or `user` for a plain user turn such as
+the room's own chat. A candidate that fails that check is dropped (#165). The lane runs
+under the law layer: locked enforcement refuses it, and its reply goes through
+`post_draft` (#142).
 
 ### 2.4 Transports
 

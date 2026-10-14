@@ -24,7 +24,7 @@ Issue and pull request numbers all refer to this repository, written in full.
   date called a Wednesday a Thursday and placed "last Tuesday" on a Monday
   (tenishai/daedalus#175). The weekday comes from the UTC reading and a fixed English
   list, not the pod's locale. Before, with skills assigned, the line followed the skills
-  index and read as part of it (tenishai/daedalus#173).
+  index and read as part of it (tenishai/daedalus#173). Pull request tenishai/daedalus#176.
 
 ## [0.5.2] — 2026-10-14
 
@@ -42,7 +42,7 @@ Issue and pull request numbers all refer to this repository, written in full.
   pod's clock when the task starts (tenishai/daedalus#171). Before, nothing in the prompt
   carried a date: one agent said it didn't know the date, and another invented one and
   named a source that doesn't exist. The learnings task already passes the day it
-  summarises, so it is unchanged.
+  summarises, so it is unchanged. Pull request tenishai/daedalus#172.
 
 ## [0.5.1] — 2026-10-13
 
@@ -62,6 +62,7 @@ Issue and pull request numbers all refer to this repository, written in full.
   turn now comes back as `said_by: "user"`, checked against those turns like any named
   speaker, and a candidate whose quote isn't in the named speaker's own turns is dropped.
   A room that shows `said_by` verbatim will show `user` for candidates from its own chat.
+  Pull request tenishai/daedalus#166.
 
 ## [0.5.0] — 2026-10-12
 
@@ -107,6 +108,11 @@ Everything since v0.4.0 (2026-09-14), 57 commits.
 - **`github.open_pr` branches are named `daedalus/<agent>/<slug>`** (was
   `kobo/<agent>/<slug>`). Set `tools.github.branch_prefix: kobo` to keep the old names
   (tenishai/daedalus#144).
+- **A bundle with skills needs `skills.load` in `tools.allow`.** 0.5.0 delivers assigned
+  skills as an index in the system prompt plus a `skills.load(name)` tool. Without
+  `skills.load` admitted, the index is left out, boot logs "N skill(s) assigned but
+  tools.allow does not admit 'skills.load'", and the agent gets only the memory recall it
+  had in 0.4.0 (tenishai/daedalus#63).
 - **The `slack` extra needs slack-sdk 3.40 or later** for streamed replies
   (tenishai/daedalus#147). `wake: thread` and `wake: channel` also need `message.channels` /
   `message.groups` subscribed in the Slack app manifest.
@@ -179,9 +185,14 @@ Everything since v0.4.0 (2026-09-14), 57 commits.
   identity federation; `github.push_branch`, `github.search_prs` and an exact-branch override
   on `github.open_pr`; a `liminal` sidecar; Slack markdown tables render as aligned
   monospace blocks; and the stable prompt prefix is cached.
-- **Skills are addressable.** Skills assigned to a bundle are listed to the agent, and a
-  skill that cannot work says so. The seeder's summary breaks the count down by knowledge
-  and skills (tenishai/daedalus#63, tenishai/daedalus#62).
+- **Skills are addressable.** When `tools.allow` admits `skills.load`, the system prompt
+  carries a `## Skills` index, one line per assigned skill with its id and summary, and
+  the model calls `skills.load(name)` to read a skill in full before acting on it. The
+  index is left out when the tool isn't allowed, since the agent couldn't open anything
+  it names. Boot warns when a bundle has skills but no `skills.load`, and when a skill's
+  `requires:` names tools the allowlist doesn't admit; neither stops the load. The
+  seeder's summary breaks the count down by knowledge and skills
+  (tenishai/daedalus#63, tenishai/daedalus#62).
 - **A `techne` extra** with a source pin (`requirements-sources.txt`), since techne is not on
   PyPI (tenishai/daedalus#65).
 - **Open-source community files.** `CONTRIBUTING.md` with the Developer Certificate of
@@ -247,13 +258,15 @@ Everything since v0.4.0 (2026-09-14), 57 commits.
   placeholder instead of a private host, and the docs describe the visual builder without
   naming private repos (tenishai/daedalus#139).
 - **README rewritten**, `AGENTS.md` added, the design doc marked implemented, and the
-  capability-seam proposal scrubbed of internal names (tenishai/daedalus#73,
-  tenishai/daedalus#75).
+  capability-seam proposal scrubbed of internal names (tenishai/daedalus#73, which
+  re-applies tenishai/daedalus#68, tenishai/daedalus#70 and tenishai/daedalus#71 after the
+  history rewrite dropped them; tenishai/daedalus#75).
 - **CI** runs on a self-hosted pool with a fork guard, with a manual `techne` leg that fails
   rather than skips when techne is missing, uv-managed Python so `exec` tests can start it,
   and `docker/` collected and linted (tenishai/daedalus#76, tenishai/daedalus#92,
   tenishai/daedalus#134, tenishai/daedalus#61). pytest imports the checkout it runs in
-  (tenishai/daedalus#74).
+  (tenishai/daedalus#74), and a test fails if any self-hosted job loses its fork guard
+  (tenishai/daedalus#154).
 
 ### Fixed
 
