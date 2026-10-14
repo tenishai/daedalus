@@ -8,7 +8,7 @@ import logging
 import os
 import warnings
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -69,6 +69,19 @@ def _utc_now() -> datetime:
 # English names by index, not strftime("%A"), which follows the pod's locale.
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _CLOCK_HEADING = "## Clock"
+
+
+def _clock_lines(now: datetime) -> str:
+    """The ## Clock body for a UTC reading: the time, yesterday, the past week."""
+    def day(d: datetime) -> str:
+        return f"{_WEEKDAYS[d.weekday()]} {d.date().isoformat()}"
+
+    past = [now - timedelta(days=n) for n in range(1, 8)]
+    return (
+        f"Current time (UTC): {_WEEKDAYS[now.weekday()]} {now.isoformat(timespec='seconds')}\n"
+        f"Yesterday: {day(past[0])}\n"
+        f"Past week: {', '.join(day(d) for d in past)}"
+    )
 
 _WITHHELD_HEADING = "## Tools you can't use in this run"
 _INBOUND_HEADING = "## You are answering a colleague"
@@ -1133,13 +1146,11 @@ class Agent:
         # cache (llm.cache_marked). The weekday is spelled out because a model
         # given only the ISO date named the wrong one (issue #175), and the line
         # has its own heading so it never reads as part of the skills index or
-        # whatever section the persona ends with (issue #173).
+        # whatever section the persona ends with (issue #173). The past week is
+        # listed, from the same reading, because a model given today's weekday
+        # still counted back to the wrong "last Tuesday" (issue #181).
         now = _utc_now().astimezone(UTC)
-        system = (
-            self.bundle.persona
-            + f"\n\n{_CLOCK_HEADING}\nCurrent time (UTC): "
-            + f"{_WEEKDAYS[now.weekday()]} {now.isoformat(timespec='seconds')}"
-        )
+        system = self.bundle.persona + f"\n\n{_CLOCK_HEADING}\n" + _clock_lines(now)
         index = self._skills_index()
         if index:
             system += index

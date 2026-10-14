@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `## Clock` section lists yesterday and the past week.** After the current-time
+  line it now carries `Yesterday: Tuesday 2026-10-13` and
+  `Past week: Tuesday 2026-10-13, Monday 2026-10-12, …`, seven days back, all from the
+  same UTC reading. With only today's weekday, one model asked "What is today's weekday?
+  Then give the date of last Tuesday." named a Wednesday or a Thursday, contradicting
+  its own count (tenishai/daedalus#181). The section is two lines longer.
+
 ## [0.5.3] — 2026-10-14
 
 ### Upgrading
