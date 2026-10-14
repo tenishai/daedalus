@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **Every task tells the model the current time.** The system prompt now carries a
+  `Current time (UTC): <ISO 8601>` line after the persona and skills index, read from the
+  pod's clock when the task starts (tenishai/daedalus#171). Before, nothing in the prompt
+  carried a date: one agent said it didn't know the date, and another invented one and
+  named a source that doesn't exist. The learnings task already passes the day it
+  summarises, so it is unchanged.
+
 ## [0.5.1] — 2026-10-13
 
 ### Upgrading
