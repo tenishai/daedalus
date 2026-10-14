@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-10-14
+
+### Upgrading
+
+- No bundle or config change. The system prompt gains a `Current time (UTC)` line after
+  the persona and skills index, so it is a few tokens longer and differs from one task to
+  the next. Within a task it is re-sent unchanged, so turns after the first still hit the
+  prompt cache.
+
 ### Added
 
 - **Every task tells the model the current time.** The system prompt now carries a
