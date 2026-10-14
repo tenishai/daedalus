@@ -70,11 +70,13 @@ daedalus run  ./prudence     # serve its declared transports
 
 Same bundle, three runtimes — a chat REPL, an A2A endpoint, a Slack
 presence. Each turn runs on an engine: the built-in LiteLLM loop, or Claude Code
-(`--engine claude-code`, extra `tenish-daedalus[claude-code]`). A bundle can ask for a
-model tier (`fast`, `balanced`, `best`) instead of a model, and each deployment maps the
-tiers once in a file named by `DAEDALUS_TIERS`; see [docs/design.md](docs/design.md) §1.2a.
-Every task's system prompt carries the current UTC time and weekday (§2.3a). A companion GUI is planned to edit the same files. No code generation,
-ever: the bundle is the source of truth, diffable and PR-reviewable.
+(`--engine claude-code`, extra `tenish-daedalus[claude-code]`; read
+[docs/design.md](docs/design.md) §2.3b before giving it built-in tools). A bundle can ask
+for a model tier (`fast`, `balanced`, `best`) instead of a model, and each deployment maps
+the tiers once in a file named by `DAEDALUS_TIERS` (§1.2a). Every chat task's system
+prompt carries the current UTC time and weekday (§2.3a). A companion GUI is planned to
+edit the same files. No code generation, ever: the bundle is the source of truth,
+diffable and PR-reviewable.
 
 ## How this was built
 
