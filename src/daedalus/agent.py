@@ -8,6 +8,7 @@ import logging
 import os
 import warnings
 from collections.abc import Callable
+from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -58,6 +59,11 @@ from daedalus.tiers import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    """The pod's clock, read once per task (issue #171). A seam for tests."""
+    return datetime.now(UTC)
 
 
 _WITHHELD_HEADING = "## Tools you can't use in this run"
@@ -1120,6 +1126,13 @@ class Agent:
         index = self._skills_index()
         if index:
             system += index
+        # The model has no clock of its own: without this line one agent said it
+        # didn't know the date and another invented one (issue #171). Read when the
+        # task starts, so a long thread sees the date change; the loop re-sends
+        # these messages unchanged, so turns within a task still hit the prompt
+        # cache (llm.cache_marked).
+        now = _utc_now().astimezone(UTC).isoformat(timespec="seconds")
+        system += f"\n\nCurrent time (UTC): {now}"
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
         # Where the conversation is happening, when a transport says so. The

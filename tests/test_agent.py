@@ -337,3 +337,26 @@ async def test_an_unreadable_inbound_depth_serves_the_task_at_the_top(junk) -> N
     assert current_delegation_depth.get() == 0, (
         "a malformed depth must read as the top of the chain"
     )
+
+
+async def test_every_task_tells_the_model_the_current_utc_time(monkeypatch):
+    """Issue #171: without a clock line one agent invented a date."""
+    from datetime import UTC, datetime, timedelta, timezone
+
+    import daedalus.agent as agent_module
+
+    # A non-UTC clock reading still lands as UTC.
+    clock = [datetime(2026, 10, 13, 19, 59, 30, tzinfo=timezone(timedelta(hours=-4)))]
+    monkeypatch.setattr(agent_module, "_utc_now", lambda: clock[0])
+    llm = ScriptedLLM("first", "second")
+    agent = make_agent(llm=llm)
+    task = await agent.handle_task(Task.from_text("what day is it?"))
+    assert "Current time (UTC): 2026-10-13T23:59:30+00:00" in llm.calls[0][0]["content"]
+
+    # The next message in the same thread, after midnight UTC, sees the new date.
+    clock[0] = datetime(2026, 10, 14, 0, 0, 5, tzinfo=UTC)
+    task.history.append(task.history[0].model_copy(update={"text": "and now?"}))
+    await agent.handle_task(task)
+    second = llm.calls[1][0]["content"]
+    assert "Current time (UTC): 2026-10-14T00:00:05+00:00" in second
+    assert "2026-10-13" not in second
