@@ -66,6 +66,10 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+# English names by index, not strftime("%A"), which follows the pod's locale.
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_CLOCK_HEADING = "## Clock"
+
 _WITHHELD_HEADING = "## Tools you can't use in this run"
 _INBOUND_HEADING = "## You are answering a colleague"
 _ASK_TOOL = "colleagues.ask_colleague"
@@ -1122,17 +1126,23 @@ class Agent:
     def _messages(
         self, task: Task, recalled: list[str], notices: list[str] | None = None
     ) -> list[dict]:
-        system = self.bundle.persona
-        index = self._skills_index()
-        if index:
-            system += index
         # The model has no clock of its own: without this line one agent said it
         # didn't know the date and another invented one (issue #171). Read when the
         # task starts, so a long thread sees the date change; the loop re-sends
         # these messages unchanged, so turns within a task still hit the prompt
-        # cache (llm.cache_marked).
-        now = _utc_now().astimezone(UTC).isoformat(timespec="seconds")
-        system += f"\n\nCurrent time (UTC): {now}"
+        # cache (llm.cache_marked). The weekday is spelled out because a model
+        # given only the ISO date named the wrong one (issue #175), and the line
+        # has its own heading so it never reads as part of the skills index or
+        # whatever section the persona ends with (issue #173).
+        now = _utc_now().astimezone(UTC)
+        system = (
+            self.bundle.persona
+            + f"\n\n{_CLOCK_HEADING}\nCurrent time (UTC): "
+            + f"{_WEEKDAYS[now.weekday()]} {now.isoformat(timespec='seconds')}"
+        )
+        index = self._skills_index()
+        if index:
+            system += index
         if recalled:
             system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
         # Where the conversation is happening, when a transport says so. The

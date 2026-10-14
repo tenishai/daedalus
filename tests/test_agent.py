@@ -351,12 +351,51 @@ async def test_every_task_tells_the_model_the_current_utc_time(monkeypatch):
     llm = ScriptedLLM("first", "second")
     agent = make_agent(llm=llm)
     task = await agent.handle_task(Task.from_text("what day is it?"))
-    assert "Current time (UTC): 2026-10-13T23:59:30+00:00" in llm.calls[0][0]["content"]
+    assert "Current time (UTC): Tuesday 2026-10-13T23:59:30+00:00" in llm.calls[0][0]["content"]
 
     # The next message in the same thread, after midnight UTC, sees the new date.
     clock[0] = datetime(2026, 10, 14, 0, 0, 5, tzinfo=UTC)
     task.history.append(task.history[0].model_copy(update={"text": "and now?"}))
     await agent.handle_task(task)
     second = llm.calls[1][0]["content"]
-    assert "Current time (UTC): 2026-10-14T00:00:05+00:00" in second
+    assert "Current time (UTC): Wednesday 2026-10-14T00:00:05+00:00" in second
     assert "2026-10-13" not in second
+    assert "Tuesday" not in second
+
+
+async def test_clock_weekday_is_the_utc_weekday_not_the_local_one(monkeypatch):
+    """Issue #175: the weekday comes from the UTC reading. 21:30 on a Sunday at
+    UTC-4 is 01:30 on Monday in UTC, so the line must say Monday."""
+    from datetime import datetime, timedelta, timezone
+
+    import daedalus.agent as agent_module
+
+    monkeypatch.setattr(
+        agent_module,
+        "_utc_now",
+        lambda: datetime(2026, 10, 18, 21, 30, tzinfo=timezone(timedelta(hours=-4))),
+    )
+    llm = ScriptedLLM("ok")
+    await make_agent(llm=llm).handle_task(Task.from_text("what day is it?"))
+    assert "Current time (UTC): Monday 2026-10-19T01:30:00+00:00" in llm.calls[0][0]["content"]
+
+
+async def test_clock_line_is_not_under_the_skills_heading(monkeypatch, tmp_path):
+    """Issue #173: with a skills index present, the clock line used to follow it
+    and read as one of the skills. It now sits under its own heading, ahead of
+    the index."""
+    from datetime import UTC, datetime
+
+    import daedalus.agent as agent_module
+
+    now = datetime(2026, 10, 14, 11, 38, 14, tzinfo=UTC)
+    monkeypatch.setattr(agent_module, "_utc_now", lambda: now)
+    llm = ScriptedLLM("ok")
+    agent = make_agent(llm=llm)
+    index = "\n\n## Skills\nAssigned skills.\n- `a` — b"
+    monkeypatch.setattr(agent, "_skills_index", lambda: index)
+    await agent.handle_task(Task.from_text("hi"))
+    system = llm.calls[0][0]["content"]
+    clock = system.index("Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00")
+    assert system.rindex("\n## ", 0, clock) == system.index("\n## Clock")
+    assert clock < system.index("## Skills")

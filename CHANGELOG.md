@@ -6,6 +6,16 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **The clock line names the weekday and has its own heading.** It now reads
+  `Current time (UTC): Wednesday 2026-10-14T11:38:14+00:00`, under a `## Clock` heading
+  placed right after the persona and before the skills index. An agent given only the ISO
+  date called a Wednesday a Thursday and placed "last Tuesday" on a Monday
+  (tenishai/daedalus#175). The weekday comes from the UTC reading and a fixed English
+  list, not the pod's locale. Before, with skills assigned, the line followed the skills
+  index and read as part of it (tenishai/daedalus#173).
+
 ## [0.5.2] — 2026-10-14
 
 ### Upgrading
