@@ -137,7 +137,7 @@ approvals:
     - match: "github.pr_merge"
       require: plan_approval
   escalation:                           # tier 3 — human in the loop
-    route: slack:#pr-reviews            # or: cli, webhook:<url>
+    route: slack:#pr-reviews            # or: cli (only slack: routes are delivered today)
 ```
 
 Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
@@ -441,7 +441,8 @@ FastAPI stays at the edge: nothing below a transport imports it.
    default posture for anything matched.
 3. **Escalation** (tier 3): the agent itself, or a tripped gate/budget, emits
    700/704 and the configured route carries it to a human; the task parks in
-   `input-required` until answered.
+   `input-required` until answered. (Not built yet: only `slack:` routes are
+   delivered, and no code sets a task to `input-required`.)
 
 **Approver routing is process-wide, by design.** The approver is an agent
 collaborator, not a transport property: when a Slack transport is serving

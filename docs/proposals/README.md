@@ -19,4 +19,4 @@ Treat every build-status claim as dated.
 
 | file | what it is |
 |---|---|
-| `capability-seam.md` | 2026-07 design discussion: how tool groups and capability cards should compose across a fleet. Its ground-truth line (version and test count) was refreshed 2026-09-22 and matches the current release; the *design* discussion around it is still from July. |
+| `capability-seam.md` | 2026-07 design discussion: how tool groups and capability cards should compose across a fleet. Its ground-truth line (version and test count) was refreshed 2026-09-22 to match the release of that day, 0.4.0; the *design* discussion around it is still from July. |

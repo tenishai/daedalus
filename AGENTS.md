@@ -60,7 +60,7 @@ right.
   `AgentSpec` field and you must run `daedalus schema --out docs/bundle.schema.json` in
   the same commit or CI fails.
 - **Operator-gate events are matched by exact name**, in the `_OPERATOR_GATE_EVENTS`
-  frozenset at `src/daedalus/cli.py:85` — deliberately not by suffix. The comment there
+  frozenset at `src/daedalus/cli.py:92` — deliberately not by suffix. The comment there
   records the incident (#49) where a suffix match swallowed two unrelated events. Adding a
   gate event means adding it to that set explicitly.
 - **Golden bundles are documentation.** `tests/golden/<name>/` bundles are loaded and
@@ -77,7 +77,7 @@ src/daedalus/
   transports/      cli, a2a, slack — one file per transport
   memory/          techne adapter (optional)
   tools/           tool providers (optional)
-  enforcement.py   the three-tier approval model
+  enforcement.py   the hook law layer (bundle/tools/*.py pre_task/post_draft); tiers 1-2 are in agent.py
 tests/golden/      bundles that are both fixture and worked example
 docs/proposals/    design notes, not documentation of current behaviour
 ```

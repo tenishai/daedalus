@@ -27,15 +27,14 @@ SEAMS → card:
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 
 DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), kaminos (GET /events SSE). tenishai/agents#51 is the engine-seam design issue.
-HEALTH: 44 test files (tests/ + docker/test_seeder.py); 887 collected. Local run 2026-10-07: 875 passed, 15 skipped (techne absent). CI .github/workflows/test.yml: `test` on a SELF-HOSTED runner pool `daedalus-ci` (3.11 dev; 3.12 dev,claude-code), ruff + pytest; `fork-pr` hosted complement; `dco` (every commit a PR adds is signed off, hosted); `techne` leg workflow_dispatch only, DAEDALUS_REQUIRE_TECHNE=1. No branch protection: CI reports, never blocks.
+HEALTH: 45 test files (44 in tests/ + docker/test_seeder.py); 887 collected. Local run 2026-10-07: 875 passed, 15 skipped (techne absent). CI .github/workflows/test.yml: `test` on a SELF-HOSTED runner pool `daedalus-ci` (3.11 dev; 3.12 dev,claude-code), ruff + pytest; `fork-pr` hosted complement; `dco` (every commit a PR adds is signed off, hosted); `techne` leg workflow_dispatch only, DAEDALUS_REQUIRE_TECHNE=1. No branch protection: CI reports, never blocks.
 GOTCHAS:
 - Never add a module-scope import of an optional extra (fastapi, slack_sdk, mcp, claude_agent_sdk, techne, liminal). Dev env has them all, so CI won't catch it.
 - The three techne-path test files (92 tests) collapse to 3 `s` under importorskip. A green default CI run did NOT run them. Use `pytest -rs`.
-- `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py. AGENTS.md's directory map says otherwise; the code wins.
+- `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py.
 - `bundle/tools/` = enforcement hooks; `tools:` in agent.yaml = LLM tool providers. Same word, unrelated.
 - Engine choice is the OPERATOR's (--engine / DAEDALUS_ENGINE), never the bundle's; the bundle only carries engine.claude_code settings.
 - `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; don't describe them as controls. Only `ceiling.exec` is read, at load, where it gates the exec builtin (docs/design.md §3 says the same).
 - No code sets TaskState.INPUT_REQUIRED; design.md's "task parks in input-required" is not implemented.
-- AGENTS.md cites `_OPERATOR_GATE_EVENTS` at cli.py:85; it is at cli.py:92.
 - docs/bundle.schema.json must be regenerated (`daedalus schema --out docs/bundle.schema.json`) with any AgentSpec change, or test_schema fails.
 RELATED DOCS: AGENTS.md (traps, build/test), docs/design.md (rationale; predates the code), docs/proposals/capability-seam.md (proposal, not behaviour), SECURITY.md.
