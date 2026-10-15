@@ -407,6 +407,31 @@ async def test_clock_lists_yesterday_and_the_past_week(monkeypatch):
     ) in system
 
 
+async def test_clock_tells_the_model_to_state_today_before_a_relative_date(monkeypatch):
+    """Issue #184: with "last Tuesday" inside a task, a model counted back from the
+    wrong day although the list had the answer. The section now tells it to write
+    out today's date first and to name the dates of any search window, right after
+    the past-week line."""
+    from datetime import UTC, datetime
+
+    import daedalus.agent as agent_module
+
+    monkeypatch.setattr(
+        agent_module, "_utc_now", lambda: datetime(2026, 10, 14, 11, 38, 14, tzinfo=UTC)
+    )
+    llm = ScriptedLLM("ok")
+    await make_agent(llm=llm).handle_task(Task.from_text("who approved it last Tuesday?"))
+    system = llm.calls[0][0]["content"]
+    assert (
+        "Monday 2026-10-12, Sunday 2026-10-11, Saturday 2026-10-10, Friday 2026-10-09, "
+        "Thursday 2026-10-08, Wednesday 2026-10-07\n"
+        "Before you reason about any relative date (yesterday, last Tuesday, two weeks ago), "
+        "write out today's date and weekday from the lines above, and read the date from the "
+        "list instead of counting. When you build a search window or filter from a relative "
+        "date, say the dates you are using."
+    ) in system
+
+
 async def test_clock_line_is_not_under_the_skills_heading(monkeypatch, tmp_path):
     """Issue #173: with a skills index present, the clock line used to follow it
     and read as one of the skills. It now sits under its own heading, ahead of
