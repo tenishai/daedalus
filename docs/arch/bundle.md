@@ -10,7 +10,7 @@ WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: Ag
 Directory: agent.yaml, persona.md, agent-card.json (required); skills/<id>/SKILL.md (frontmatter when_to_use, requires); tools/*.py (enforcement hooks, not LLM tools); knowledge/*.md and intake/* (seeded into techne by docker/seeder.py, not by the runtime).
 OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursively (undefined without default → BundleError) → AgentSpec.model_validate → require card + persona files → strip persona comments → load_skills. Agent then builds collaborators from spec (see protocols card).
 INVARIANTS:
-- Unknown fields load with a WARNING, never an error and never silently (`_WarnExtra`): forward-compat with newer writers (kobo, kaminos).
+- Unknown fields load with a WARNING, never an error and never silently (`_WarnExtra`): forward-compat with newer writers (kobo, bundle editors).
 - docs/bundle.schema.json is drift-pinned: tests/test_schema.py::test_committed_schema_cannot_drift_from_the_runtime. Any AgentSpec change needs `daedalus schema --out docs/bundle.schema.json` in the same commit. The schema is the contract for non-Python readers (cabal's bundle reader, editors).
 - `tools.allow` empty = deny everything. `tools.provider` ∈ none|mcp|liminal|colleagues picks ONE primary; github, cloudtrail, slack_read, jira, liminal.url are SIDECARS that stack beside it (agent.py _tools_from_spec). `slack_read.channels: []` = lane ON for every invited channel; omitted = OFF (2026-09-23).
 - Which engine runs a bundle is NOT in the bundle; `engine.claude_code` only configures that engine. Same bundle must run with and without Claude Code.

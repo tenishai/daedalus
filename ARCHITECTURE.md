@@ -18,7 +18,7 @@ SEAMS → card:
 - engines     src/daedalus/engines/          (Engine/EngineTurn; litellm loop, claude-code, MCP bridge) → docs/arch/engines.md
 - protocols   src/daedalus/protocols.py      (LLM/MemoryStore/ToolProvider/... + no-op defaults)     → docs/arch/protocols.md
 - approvals   agent.py _call_tool + enforcement.py (tier-1 allowlist, tier-2 gates, law hooks)    → docs/arch/approvals.md
-- a2a-wire    src/daedalus/transports/a2a.py + task.py (cabal/kobo/kaminos wire, operator lanes)   → docs/arch/a2a-wire.md
+- a2a-wire    src/daedalus/transports/a2a.py + task.py (cabal/kobo wire, operator lanes)   → docs/arch/a2a-wire.md
 - bundle      src/daedalus/bundle.py         (AgentSpec = agent.yaml schema, drift-pinned JSON Schema) → docs/arch/bundle.md
 - (uncarded) transports/slack.py (Socket Mode; reaction approver; one transport for all slack blocks); transports/cli.py
 - (uncarded) tiers.py (the deployment's tiers file: tier word → model, endpoint, engine, limits)
@@ -26,7 +26,7 @@ SEAMS → card:
 - (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes), journal.py (7-day journal.db), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file validator)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 
-DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), kaminos (GET /events SSE). tenishai/agents#51 is the engine-seam design issue.
+DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), a UI trace pane (GET /events SSE). tenishai/agents#51 is the engine-seam design issue.
 HEALTH: 45 test files (44 in tests/ + docker/test_seeder.py); 887 collected. Local run 2026-10-07: 875 passed, 15 skipped (techne absent). CI .github/workflows/test.yml: `test` on a SELF-HOSTED runner pool `daedalus-ci` (3.11 dev; 3.12 dev,claude-code), ruff + pytest; `fork-pr` hosted complement; `dco` (every commit a PR adds is signed off, hosted); `techne` leg workflow_dispatch only, DAEDALUS_REQUIRE_TECHNE=1. No branch protection: CI reports, never blocks.
 GOTCHAS:
 - Never add a module-scope import of an optional extra (fastapi, slack_sdk, mcp, claude_agent_sdk, techne, liminal). Dev env has them all, so CI won't catch it.
