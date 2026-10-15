@@ -283,8 +283,10 @@ prompt, which names the day it summarises instead of a clock line.
    days before. It is read from the pod's clock when the task starts. Weekdays come from
    a fixed English list after converting to UTC, so the pod's locale doesn't change them.
    The past week is there so the model reads "last Tuesday" instead of counting back.
+   A last sentence tells the model to write out today's date and weekday before reasoning
+   about a relative date, and to name the dates of any search window it builds from one.
    Turns within a task re-send the same section, so the prompt cache still hits
-   (#171, #173, #175, #181).
+   (#171, #173, #175, #181, #184).
 3. **`## Skills`**, one line per assigned skill (``- `id` — summary``) and an instruction
    to call `skills.load(name)` before acting on one. It appears only when `tools.allow`
    admits `skills.load` (#63).

@@ -6,6 +6,24 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Upgrading
+
+- No bundle or config change. The `## Clock` section ends with one more line, an
+  instruction about relative dates. Anything that reads or matches the system prompt
+  should expect it.
+
+### Changed
+
+- **The `## Clock` section tells the model to state today's date before working out a
+  relative one.** After the past-week line it now says: "Before you reason about any
+  relative date (yesterday, last Tuesday, two weeks ago), write out today's date and
+  weekday from the lines above, and read the date from the list instead of counting.
+  When you build a search window or filter from a relative date, say the dates you are
+  using." On 0.5.4 a model asked a task question containing "last Tuesday" used a
+  Wednesday a week earlier and searched the wrong days, although the list had the right
+  date; with the same instruction in the question it was right (tenishai/daedalus#184).
+  Whether the sentence in the section has the same effect is checked downstream.
+
 ## [0.5.4] — 2026-10-14
 
 ### Upgrading

@@ -69,10 +69,19 @@ def _utc_now() -> datetime:
 # English names by index, not strftime("%A"), which follows the pod's locale.
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _CLOCK_HEADING = "## Clock"
+# Issue #184: with the answer in the list above, a model still counted back from
+# the wrong day when a relative date sat inside a task, unless it wrote today's date first.
+_CLOCK_INSTRUCTIONS = (
+    "Before you reason about any relative date (yesterday, last Tuesday, two weeks ago), "
+    "write out today's date and weekday from the lines above, and read the date from the "
+    "list instead of counting. When you build a search window or filter from a relative "
+    "date, say the dates you are using."
+)
 
 
 def _clock_lines(now: datetime) -> str:
-    """The ## Clock body for a UTC reading: the time, yesterday, the past week."""
+    """The ## Clock body for a UTC reading: the time, yesterday, the past week, and
+    the instruction to state today's date before working out a relative one."""
     def day(d: datetime) -> str:
         return f"{_WEEKDAYS[d.weekday()]} {d.date().isoformat()}"
 
@@ -80,7 +89,8 @@ def _clock_lines(now: datetime) -> str:
     return (
         f"Current time (UTC): {_WEEKDAYS[now.weekday()]} {now.isoformat(timespec='seconds')}\n"
         f"Yesterday: {day(past[0])}\n"
-        f"Past week: {', '.join(day(d) for d in past)}"
+        f"Past week: {', '.join(day(d) for d in past)}\n"
+        f"{_CLOCK_INSTRUCTIONS}"
     )
 
 _WITHHELD_HEADING = "## Tools you can't use in this run"
