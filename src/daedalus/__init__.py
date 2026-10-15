@@ -4,7 +4,7 @@ from daedalus.agent import Agent
 from daedalus.bundle import AgentSpec, Bundle, BundleError
 from daedalus.task import Message, ReasonCode, Task, TaskState
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 __all__ = [
     "Agent",
