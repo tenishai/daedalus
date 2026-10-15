@@ -6,6 +6,8 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-10-15
+
 ### Upgrading
 
 - No bundle or config change. The `## Clock` section ends with one more line, an
@@ -22,7 +24,8 @@ Issue and pull request numbers all refer to this repository, written in full.
   using." On 0.5.4 a model asked a task question containing "last Tuesday" used a
   Wednesday a week earlier and searched the wrong days, although the list had the right
   date; with the same instruction in the question it was right (tenishai/daedalus#184).
-  Whether the sentence in the section has the same effect is checked downstream.
+  Whether the sentence in the section has the same effect is checked downstream. Pull
+  request tenishai/daedalus#185.
 
 ## [0.5.4] — 2026-10-14
 
