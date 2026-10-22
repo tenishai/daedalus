@@ -14,7 +14,10 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "click>=8.1",
-    "litellm>=1.40",
+    # Pinned exactly after litellm 1.107.0 shipped a credential stealer on PyPI
+    # (2026-10-21; 1.82.7/1.82.8 in March): an open lower bound lets any rebuild
+    # take whatever is newest that hour. 1.104.2 is what the runtime image carries.
+    "litellm==1.104.2",
 ]
 
 [project.optional-dependencies]
