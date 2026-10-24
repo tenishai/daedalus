@@ -10,12 +10,13 @@ reaching the model. Three markers exist:
     it and is untouched by this module's knowledge additions.
   - KNOWLEDGE_MARKER ("knowledge"): a FILE with edit/delete semantics, not a
     note. apply_knowledge and apply_knowledge_delete below.
-  - TOOL_MARKER ("tool"): a fast-delivered tool file, re-validated and
-    written into a persistent overlay directory on the agent's own volume.
-    apply_tool lives in daedalus.memory.tooling (a sibling module, not
-    here: the mechanical validation it ports from kobo_api.tooling has
-    nothing in common with this module's techne-store plumbing), and its
-    dispatch is Agent._handle_tool, not a function in this file.
+  - TOOL_MARKER ("tool"): a fast-delivered Python file, linted and
+    written into a persistent overlay directory on the agent's own volume,
+    where the next boot imports it and runs it as the agent. apply_tool
+    lives in daedalus.memory.tooling (a sibling module, not here: the lint
+    it ports from kobo_api.tooling has nothing in common with this module's
+    techne-store plumbing), and its dispatch is Agent._handle_tool, not a
+    function in this file.
 
 Both apply_teach and apply_knowledge mirror the boot seeder (docker/seeder.py)
 byte-for-byte in provenance and outcome for a file's first write: same
@@ -72,10 +73,9 @@ carries exactly this same requirement -- teach_authorized is reused verbatim,
 not reimplemented per marker.
 
 THIS PARAGRAPH USED TO SAY colleagues dispatch as "agent:<name>", and that
-was the false belief the gate was built on (#43): cabal mints `persona:<name>`
-for an agent and `operator:<id>` for a human, never `agent:`. See
-`teach_authorized` for what is actually refused and why the gate is still a
-blocklist.
+was the false belief the gate was built on (#43). The gate is now an
+allowlist (#195): see DEFAULT_OPERATOR_SUBS for which subs are admitted and
+the cabal and kobo code that says why.
 """
 
 from __future__ import annotations
@@ -166,61 +166,98 @@ def is_teach_task(task: Task) -> bool:
     return task.metadata.get(SYSTEM_TASK_KEY) == TEACH_MARKER
 
 
-#: Sub prefixes that are NOT operator-grade, however well a token verifies.
+#: Who may drive an operator lane when the bundle names no `operator_subs`
+#: (#195). An ALLOWLIST: a sub that matches none of these is refused, so a
+#: principal type nobody planned for gets nothing.
 #:
-#: THESE ARE CABAL'S SPELLINGS, AND THE COUPLING IS THE WHOLE POINT (#43).
-#: cabal mints exactly two shapes at bootstrap (`core/routes/auth.py:75-79`):
-#: `operator:<id>` for a human and `persona:<name>` for an agent, and its
-#: dispatch re-mint propagates whichever one started the chain. This gate
-#: previously refused `agent:` -- a prefix nothing in the fleet has ever
-#: minted -- so it refused nothing at all and the operator-only lane was
-#: reachable by any caller whose token merely verified.
+#: WHERE THE TWO ENTRIES COME FROM. kobo relays teach, knowledge, tool and
+#: learnings through cabal's `POST /a2a/tasks` with the bearer in
+#: `CABAL_OPERATOR_TOKEN` (kobo api/kobo_api/clients.py `relay`). kobo's
+#: deploy docs mint that token as
+#: `cbl token mint-service --sub service:kobo --scope operator --aud cabal-core`
+#: (kobo docs/operating.md, "Switchboard"), and the stack's dogfood manifest
+#: mints the same (`cabal-token:service:kobo:operator`). cabal's re-mint for the
+#: target agent copies the caller's `sub` verbatim and replaces its scope with
+#: `["dispatch"]` (cabal src/cabal/core/routes/_dispatch_auth.py
+#: `_dispatch_token`), so kobo arrives here as `service:kobo`. A human
+#: operator's own token is `operator:<operator_id>` (cabal core/routes/auth.py
+#: `bootstrap`). A deployment that minted kobo's token under another sub sets
+#: `operator_subs` on the a2a transport's `auth` block.
 #:
-#: `agent:` is kept because it costs nothing and some future issuer may
-#: use it. The bare string `"operator"` is refused because it is cabal's
-#: fallback when an inbound token carries NO sub at all
-#: (`sub=claims.get("sub", "operator")`, cabal#184): a bearer that failed
-#: to identify itself must not land one character from the most privileged
-#: prefix in the system.
-_NON_OPERATOR_SUBS = ("persona:", "agent:")
+#: An entry ending in `*` matches by prefix; any other entry matches exactly.
+DEFAULT_OPERATOR_SUBS: tuple[str, ...] = ("operator:*", "service:kobo")
+
+#: cabal's fallback when an inbound token carries NO sub at all
+#: (`sub=claims.get("sub", "operator")`, cabal#184). Refused even if a
+#: bundle lists it: a bearer that failed to identify itself must not land on
+#: an operator lane.
 _UNIDENTIFIED_SUB = "operator"
 
 
-def teach_authorized(task: Task) -> bool:
+def operator_subs_from(value: object) -> tuple[str, ...]:
+    """A bundle's `auth.operator_subs` -> the allowlist, or ValueError.
+
+    None means the default. A list must hold non-empty strings, and an entry
+    may not be `*` alone or the unidentified `operator`: either would make
+    the allowlist admit what it exists to refuse."""
+    if value is None:
+        return DEFAULT_OPERATOR_SUBS
+    if not isinstance(value, list) or not value:
+        raise ValueError("operator_subs must be a non-empty list of subs")
+    subs = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(f"operator_subs entry {entry!r} is not a non-empty string")
+        entry = entry.strip()
+        if entry == "*":
+            raise ValueError("operator_subs entry '*' would admit every verified caller")
+        if entry == _UNIDENTIFIED_SUB:
+            raise ValueError(
+                "operator_subs entry 'operator' is cabal's placeholder for a token "
+                "with no sub; list 'operator:<id>' or 'operator:*' instead"
+            )
+        subs.append(entry)
+    return tuple(subs)
+
+
+def _sub_matches(sub: str, pattern: str) -> bool:
+    if pattern.endswith("*"):
+        return sub.startswith(pattern[:-1])
+    return sub == pattern
+
+
+def teach_authorized(
+    task: Task, operator_subs: tuple[str, ...] = DEFAULT_OPERATOR_SUBS
+) -> bool:
     """True when the task's VERIFIED sub may drive an operator-only lane.
 
     WHAT THIS GATE IS THE ONLY CONTROL OVER. The transport strips any
-    wire-supplied sub, so nothing upstream re-checks this. Two writes reach
-    past it, not one: `apply_teach`'s provenance feeds `memory/revision.py`,
-    which auto-promotes the `intake:chat-` slice with no human review and
-    RETIRES what it contradicts -- though only when `memory.revision` is
-    enabled, which is off by default. `apply_knowledge_delete` needs no such
-    setting: it retires entries directly, no revision pass, no model, no
-    config (#49 r1).
+    wire-supplied sub, so nothing upstream re-checks this. The tool lane
+    behind it writes Python that the next boot imports and runs as the agent,
+    with the agent's secrets (#195); memory/tooling.py's checks are a lint,
+    not a sandbox. `apply_teach`'s provenance feeds `memory/revision.py`,
+    which can auto-promote and retire with no human review when
+    `memory.revision` is enabled, and `apply_knowledge_delete` retires
+    entries directly (#49 r1).
 
-    A BLOCKLIST, DELIBERATELY, AND IT SHOULD NOT STAY ONE (#47). An
-    allowlist on `operator:` is the better shape and is what this wants to
-    become -- it fails closed when a new principal type appears, where this
-    fails open.
+    AN ALLOWLIST (#195, closing #47). It used to refuse `persona:`, `agent:`
+    and bare `operator` and admit everything else, so a sub nobody planned
+    for (a service principal minted for something else, `kobo-room`, any
+    future principal type) could deliver code. No verified sub, or one that
+    matches no entry of `operator_subs`, is refused.
 
-    It is not that today because kobo's sub is DEPLOYMENT-CHOSEN, not
-    source-derivable. kobo drives these same lanes, and its primary path
-    relays through cabal carrying whatever token the environment put in
-    `CABAL_OPERATOR_TOKEN` (kobo clients.py:2913-2926, read live per call).
-    cabal verifies that token and propagates its sub to us. So the sub we
-    see is a property of one env var in one cluster, and no amount of
-    reading either repo settles what it is. An `operator:` allowlist is
-    very likely correct and would very likely break nothing -- "very
-    likely" is not a thing to deploy unattended into the room's own teach
-    route. So: close the known hole now, log what real callers actually
-    present, invert once the field data exists.
-    """
+    No scope claim is checked: when cabal relays a task to an agent it
+    re-mints the token for that agent's audience with scope `["dispatch"]`,
+    so the caller's `operator` scope never reaches this runtime and there is
+    nothing here to tell the lanes apart by. (cabal passes a token through
+    unchanged only when it is already aimed at the target's audience, the
+    federated-peer case, which does not land on a plain agent.)"""
     sub = task.metadata.get(VERIFIED_SUB_KEY)
     if not isinstance(sub, str) or not sub:
         return False
     if sub == _UNIDENTIFIED_SUB:
         return False
-    return not sub.startswith(_NON_OPERATOR_SUBS)
+    return any(_sub_matches(sub, pattern) for pattern in operator_subs)
 
 
 def _sections(text: str) -> list[str]:

@@ -54,7 +54,7 @@ def _tool_agent(
 
 
 def _tool_task(
-    content=VALID_TOOL, *, sub="service:room", filename="orchestrator.py"
+    content=VALID_TOOL, *, sub="service:kobo", filename="orchestrator.py"
 ) -> Task:
     task = Task.from_text(content)
     task.metadata[SYSTEM_TASK_KEY] = TOOL_MARKER
@@ -201,8 +201,9 @@ async def test_tool_refused_for_a_PERSONA_sub_which_is_what_cabal_MINTS(tmp_path
     """THE #43 REGRESSION, PINNED WHERE CI CAN SEE IT (#49 r3).
 
     Every other test of this fix lives behind a techne `importorskip`, so
-    reverting `_NON_OPERATOR_SUBS` to `("agent:",)` — the exact regression this
-    PR exists to prevent — leaves CI green. With techne supplied the same
+    reverting the gate to refuse only `agent:` — the exact regression this
+    PR exists to prevent — leaves CI green. (The gate is an allowlist since
+    #195; a `persona:` sub matches none of its entries.) With techne supplied the same
     mutant fails tests in two gated modules, `test_agent_teach.py` and
     `test_memory_teach.py`, and CI executes neither.
 
@@ -228,6 +229,80 @@ async def test_tool_refused_for_a_PERSONA_sub_which_is_what_cabal_MINTS(tmp_path
     assert result.reason_code is ReasonCode.POLICY_VIOLATION
     overlay = home / "tools-overlay"
     assert not overlay.exists() or list(overlay.iterdir()) == []
+
+
+async def test_tool_refused_for_a_sub_nobody_planned_for(tmp_path):
+    """#195: the gate used to be a blocklist, so a verified sub outside
+    `persona:`/`agent:`/`operator` could deliver code the next boot runs.
+    These are the reviewer's two (`svc-account-42`, an operator of another
+    shape) plus `kobo-room`, a sub kobo really mints (its gateway admin
+    token) for a different purpose."""
+    home = tmp_path / "home"
+    agent = _tool_agent(tmp_path / "bundle", home)
+
+    for sub in ("svc-account-42", "kobo-room", "service:liminal", "operatorx", "Operator:x"):
+        result = await agent.handle_task(_tool_task(sub=sub))
+        assert result.state is TaskState.FAILED, sub
+        assert result.reason_code is ReasonCode.POLICY_VIOLATION, sub
+    overlay = home / "tools-overlay"
+    assert not overlay.exists() or list(overlay.iterdir()) == []
+
+
+async def test_tool_admitted_for_kobo_and_a_human_operator_by_default(tmp_path):
+    """The allowlist must not close kobo's own door: kobo relays as
+    `service:kobo` (its deploy docs mint CABAL_OPERATOR_TOKEN with that sub,
+    and cabal's re-mint keeps it), and a human operator is `operator:<id>`."""
+    home = tmp_path / "home"
+    agent = _tool_agent(tmp_path / "bundle", home)
+
+    for sub, name in (("service:kobo", "from_kobo.py"), ("operator:richard", "from_op.py")):
+        result = await agent.handle_task(_tool_task(sub=sub, filename=name))
+        assert result.state is not TaskState.FAILED, sub
+    assert sorted(p.name for p in (home / "tools-overlay").iterdir()) == [
+        "from_kobo.py",
+        "from_op.py",
+    ]
+
+
+def _a2a_bundle(tmp_path: Path, home: Path, operator_subs: str) -> Path:
+    return _bundle(
+        tmp_path,
+        f"memory:\n  home: {home}\n"
+        "transports:\n  - kind: a2a\n    auth:\n"
+        "      jwks_url: http://cabal/.well-known/jwks.json\n"
+        "      issuer: cabal-core\n      audience: x\n"
+        f"      operator_subs: {operator_subs}\n",
+    )
+
+
+async def test_bundle_operator_subs_replace_the_default(tmp_path):
+    """A deployment whose kobo token has another sub names it; the list
+    replaces the default, and a trailing `*` is a prefix match."""
+    home = tmp_path / "home"
+    root = _a2a_bundle(tmp_path / "bundle", home, '["service:room-7", "ops:*"]')
+    agent = Agent.load(root, llm=_NoCallLLM())
+    assert agent.operator_subs == ("service:room-7", "ops:*")
+
+    for sub, admitted in (
+        ("service:room-7", True),
+        ("ops:alice", True),
+        ("service:kobo", False),
+        ("operator:richard", False),
+        ("service:room-77", False),
+    ):
+        result = await agent.handle_task(_tool_task(sub=sub, filename="t.py"))
+        assert (result.state is not TaskState.FAILED) is admitted, sub
+
+
+def test_bundle_operator_subs_refuse_entries_that_reopen_the_gate(tmp_path):
+    import pytest
+
+    from daedalus.bundle import BundleError
+
+    for bad in ('["*"]', '["operator"]', "[]", '"service:kobo"', '[""]'):
+        root = _a2a_bundle(tmp_path / f"b{abs(hash(bad))}", tmp_path / "home", bad)
+        with pytest.raises(BundleError, match="operator_subs"):
+            Agent.load(root, llm=_NoCallLLM())
 
 
 async def test_tool_refused_without_verified_sub(tmp_path):

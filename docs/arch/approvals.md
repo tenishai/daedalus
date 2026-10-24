@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-approvals
-updated: 2026-10-07
-anchor: src/daedalus/agent.py sha=318bb22cd1c0d251537d8d306f854ed1a45de1e6
+updated: 2026-10-24
+anchor: src/daedalus/agent.py sha=c5b44ac537061480e8e08a80722b0700b9d739af
 anchor: src/daedalus/enforcement.py sha=95b336ce124c57932f89cdd533fdeebaeda48590
 ---
 # approvals — what a model may call, and what a reply may say
@@ -20,6 +20,7 @@ INVARIANTS:
 - pre_task denies by raising OR returning {"blocked": True, "reason": …} (#45); allowed keys are notices/blocked/reason only.
 - A blocked post_draft reply is deleted from history, never partially sent: task_to_a2a serializes full history, and persisted tasks feed history back into the model.
 - No hot reload: a hook delivered over the tool lane is inert until the next boot.
+- The tool lane is a code-deploy path (#195): the next boot imports an overlay file and runs its module-level code as the agent, with its env and volumes. memory/tooling.py's checks are a lint (an `__import__("os")` file passes); the operator allowlist (teach_authorized, see a2a-wire) is the only control.
 - `approvals.ceiling.exec: true` is the bundle's consent to the exec builtin; without it tools.builtin.exec is a BundleError at load. `ceiling.write`, `ceiling.hosts` and `escalation` beyond Slack routing are parsed but unenforced; do not describe them as controls.
-CONSUMERS: agent.py (all call sites); engines via EngineTurn.call_tool/approve/withheld; transports/slack.py (SlackReactionApprover, escalation reply formatting); cli.py (CliApprover); A2A card gets `enforcement` stamp (Enforcement.card_stamp: version, hooks, locked) in Agent.transports. kobo writes the hook files and ports its validator into memory/tooling.py.
+CONSUMERS: agent.py (all call sites); engines via EngineTurn.call_tool/approve/withheld; transports/slack.py (SlackReactionApprover, escalation reply formatting); cli.py (CliApprover); A2A card gets `enforcement` stamp (Enforcement.card_stamp: version, hooks, locked) in Agent.transports. kobo writes the hook files; its upload lint is ported into memory/tooling.py (a lint, not a sandbox).
 API: Enforcement.load(tools_dir, overlay_dir), .locked, .active, .run_pre_task → PreTaskResult(blocked, notices, detail), .run_post_draft → PostDraftResult(blocked, text, detail), .card_stamp(). Tests: tests/test_enforcement.py, test_agent_enforcement.py, test_agent_tools.py.

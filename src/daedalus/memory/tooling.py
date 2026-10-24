@@ -1,5 +1,15 @@
 """TOOL_MARKER's handler support: the runtime's own copy of kobo's tooling
-contract, plus the overlay write path.
+lint, plus the overlay write path.
+
+THESE CHECKS ARE A LINT, NOT A SECURITY BOUNDARY (#195). A file that passes
+is imported at the next boot (daedalus.enforcement.Enforcement.load) and its
+module-level code runs as the agent, with the agent's environment, network
+and volumes. The import check reads `import` statements only, so
+`__import__("os")`, `importlib`, `getattr(__builtins__, ...)` and anything
+else Python can do at runtime pass it. It exists to catch a mistaken file
+early, the same way kobo's upload check does. Who may deliver a file at all
+is decided by the operator gate (memory/teach.py `teach_authorized`), and
+that gate is the only control on this lane.
 
 Ported here rather than imported across repos (daedalus and kobo are
 separate deployables with no shared dependency): the fast lane skips CI by
@@ -12,7 +22,7 @@ the top-level `pre_task`/`post_draft` entrypoint shape), kept here so a
 change on one side is a deliberate, visible edit on the other rather than a
 silent drift.
 
-`apply_tool` is the write half: re-validate, then land the file in the
+`apply_tool` is the write half: lint again, then land the file in the
 overlay directory on the agent's own persistent volume (beside the techne
 db, at `<memory.home>/tools-overlay/`) -- never the image bundle
 (`bundle/tools/`), which resets to its baked-in contents on every restart.
@@ -43,8 +53,8 @@ _ENTRYPOINT_NAMES = ("pre_task", "post_draft")
 
 
 class ToolingError(Exception):
-    """A tool filename/content failed the mechanical tooling contract --
-    same failure set as kobo_api.tooling.ToolingError."""
+    """A tool filename/content failed the tooling lint -- same failure set
+    as kobo_api.tooling.ToolingError."""
 
 
 @dataclass
@@ -61,9 +71,14 @@ def validate_filename(filename: str) -> None:
 
 def _check_import_allowlist(tree: ast.AST) -> None:
     """Walk the whole tree, same as kobo_api.tooling._check_import_allowlist:
-    any import beyond the standard library, anywhere in the file, is
-    refused; a relative import is refused outright (the flat overlay
-    directory has no package structure for one to resolve against)."""
+    any import STATEMENT beyond the standard library, anywhere in the file,
+    is refused; a relative import is refused outright (the flat overlay
+    directory has no package structure for one to resolve against).
+
+    It sees statements, not behaviour: the standard library alone reaches
+    the network, subprocesses and the environment, and `__import__` or
+    `importlib` reach anything else. It keeps a mistaken file out; it does
+    not keep a hostile one out (#195)."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -105,9 +120,10 @@ def _check_entrypoint(tree: ast.Module) -> None:
 
 def validate_content(filename: str, raw: bytes) -> str:
     """Size cap, UTF-8 decodability, non-empty, and (for a `.py` file) ast
-    parse plus the import allowlist and entrypoint checks -- same mechanical
-    contract as kobo_api.tooling._validate_content, same order, same
-    messages. Returns the decoded text on success.
+    parse plus the import-statement and entrypoint checks -- the same lint
+    as kobo_api.tooling._validate_content, same order, same messages. Not a
+    safety check: see the module docstring. Returns the decoded text on
+    success.
 
     Takes raw bytes so a caller reading straight off disk can reuse this
     unchanged; `apply_tool` below (fed `Task.user_text()`, an already-
@@ -146,7 +162,7 @@ def validate_content(filename: str, raw: bytes) -> str:
 
 
 def apply_tool(content: str, filename: str, image_tools_dir: Path, overlay_dir: Path) -> ToolResult:
-    """Re-validate `content`/`filename`, then write it into `overlay_dir` --
+    """Lint `content`/`filename` again, then write it into `overlay_dir` --
     never `image_tools_dir`. Refuses before ever touching disk when
     `filename` already names a file under `image_tools_dir`: an overlay
     write is never allowed to shadow a baseline image-bundle tool, or the

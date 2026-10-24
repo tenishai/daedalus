@@ -45,6 +45,14 @@ daedalus is the runtime agents run in. In scope:
 - enforcement: any way around the operator's controls on what an agent may do;
 - identity: JWKS handling, and anything that lets a message or caller
   impersonate the operator or another agent;
+- the operator lanes (`metadata.system_task` teach, knowledge, tool,
+  learnings): anything that reaches them with a verified sub outside the
+  a2a transport's `auth.operator_subs` allowlist (default `operator:*` and
+  `service:kobo`). The tool lane delivers Python that the agent runs at its
+  next boot, with its own secrets. The checks on that file are a lint, not
+  a sandbox: a file that passes them can do anything the agent can. That is
+  by design, so a report that the lint can be bypassed is not new; a way
+  past the allowlist is;
 - untrusted input: anything a chat message, transcript or tool result can use
   to change an agent's instructions, memory or permissions (prompt injection
   that crosses a trust boundary the runtime claims to enforce);
