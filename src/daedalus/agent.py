@@ -23,6 +23,7 @@ from daedalus.engines.litellm import (
 from daedalus.events import current_context as event_context
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
+    DEFAULT_OPERATOR_SUBS,
     DELETE_KEY,
     FILENAME_KEY,
     KNOWLEDGE_MARKER,
@@ -32,6 +33,7 @@ from daedalus.memory.teach import (
     apply_knowledge,
     apply_knowledge_delete,
     apply_teach,
+    operator_subs_from,
     teach_authorized,
 )
 from daedalus.memory.tooling import apply_tool
@@ -206,6 +208,7 @@ class Agent:
                 "enforce it; remove it, or run with --engine litellm (and, if the model "
                 "comes from a tier that runs on claude-code, pin model.id)"
             )
+        self.operator_subs = self._operator_subs_from_spec()
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
@@ -247,24 +250,36 @@ class Agent:
         # simply never uses it.
         self._warn_on_unusable_skills()
 
+    def _operator_subs_from_spec(self) -> tuple[str, ...]:
+        """Who may drive the operator lanes: every a2a transport's
+        `auth.operator_subs`, unioned, or DEFAULT_OPERATOR_SUBS when none
+        names any (#195). A malformed list fails the bundle at load."""
+        listed: list[str] = []
+        named = False
+        for spec in self.bundle.spec.transports:
+            auth = spec.options().get("auth") if spec.kind == "a2a" else None
+            if not isinstance(auth, dict) or "operator_subs" not in auth:
+                continue
+            named = True
+            try:
+                listed.extend(operator_subs_from(auth["operator_subs"]))
+            except ValueError as exc:
+                raise BundleError(f"a2a transport auth: {exc}") from exc
+        return tuple(dict.fromkeys(listed)) if named else DEFAULT_OPERATOR_SUBS
+
     def _operator_gate(self, task: Task, lane: str) -> bool:
-        """The shared gate on the three operator-only lanes, and the ONE place
+        """The shared gate on the operator-only lanes, and the ONE place
         that records which sub reached them.
 
-        EMITS ON BOTH OUTCOMES, and the allow event is the point (#47). The
-        refusal events already existed; refusals alone cannot tell you what
-        your LEGITIMATE callers present, and that is exactly the question
-        blocking the inversion of this gate from a blocklist to an
-        `operator:` allowlist. kobo's sub is a property of one env var in one
-        cluster (`CABAL_OPERATOR_TOKEN`, propagated through cabal's re-mint),
-        so no amount of reading either repo settles it -- it has to be read
-        off a running agent. `<lane>_allowed` is how.
+        EMITS ON BOTH OUTCOMES. `<lane>_allowed` and `<lane>_refused` carry
+        the sub, so a deployment whose kobo token uses a sub outside the
+        allowlist sees exactly what to add to `auth.operator_subs` (#195).
 
         The refusal event names are unchanged on purpose: the kaminos trace
         pane consumes this stream, and renaming a signal to add a sibling is
         how you break a consumer for no reason."""
         sub = task.metadata.get(VERIFIED_SUB_KEY)
-        allowed = teach_authorized(task)
+        allowed = teach_authorized(task, self.operator_subs)
         self._emit(f"{lane}_allowed" if allowed else f"{lane}_refused", sub=sub)
         return allowed
 
@@ -592,7 +607,7 @@ class Agent:
         # the parent's depth. Left as-is: current_context_id inherits the same
         # way, and the two call sites reachable from HERE -- _handle_teach and
         # _handle_knowledge -- both sit behind teach_authorized, which requires
-        # a verified human subject. (There is a third, in serve(), and it is the
+        # a verified sub on the operator allowlist. (There is a third, in serve(), and it is the
         # safe one: it runs at startup outside any handle_task, so it inherits
         # the contextvar's default rather than a chain's depth. Naming two of
         # three was an incomplete enumeration in a comment about which sites are
@@ -902,14 +917,17 @@ class Agent:
         return task.reply("Learned. I will remember that.")
 
     async def _handle_tool(self, task: Task) -> Task:
-        """The operator tool lane (arc3d Task 5): a fast-delivered tool
-        file, re-validated by THIS runtime against the exact same
-        mechanical contract kobo's room applies (the fast lane skips CI by
-        definition, so kobo's own validation is never trusted alone) and,
-        only once it passes, written into the overlay directory on the
-        agent's persistent volume -- never the image bundle, which resets
-        to its baked-in contents on every restart. Same authorization gate
-        as teach/knowledge: tool writes are exactly as operator-grade.
+        """The operator tool lane (arc3d Task 5): a fast-delivered Python
+        file, linted by THIS runtime with the same checks kobo's room runs
+        and written into the overlay directory on the agent's persistent
+        volume -- never the image bundle, which resets to its baked-in
+        contents on every restart.
+
+        THIS IS A CODE-DEPLOY PATH (#195). The next boot imports the file
+        and runs its module-level code as the agent, with the agent's
+        environment and volumes. The lint (memory/tooling.py) does not
+        contain that code: `__import__("os")` passes it. The only control
+        is the operator gate below, the same allowlist as teach/knowledge.
 
         No hot reload: the enforcement loader (daedalus.enforcement.
         Enforcement.load) only re-runs at process boot, so a tool delivered

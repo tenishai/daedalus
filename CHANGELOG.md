@@ -19,6 +19,14 @@ Issue and pull request numbers all refer to this repository, written in full.
   are unchanged. Set `DAEDALUS_TRACE_CONTENT=1` in the agent's environment to send the
   content as before. `run -v` and the Slack progress lines read the in-process bus and
   still see everything.
+- **The operator lanes admit only allowlisted subs.** teach, knowledge, tool and
+  learnings tasks are refused unless the verified sub is `operator:<anything>` or exactly
+  `service:kobo`, the sub kobo's deploy docs mint for `CABAL_OPERATOR_TOKEN`. If your
+  room's token uses another sub, the agent emits `teach_refused` (and the other
+  `<lane>_refused` events) with that sub; add it to the a2a transport's `auth` block:
+  `operator_subs: ["operator:*", "<your kobo sub>"]`. A list replaces the default, and an
+  entry ending in `*` matches by prefix. kobo falls back to its archive commit when the
+  instant lane refuses, so a refused teach lands at the next rebuild instead of being lost.
 
 ### Security
 
@@ -26,6 +34,12 @@ Issue and pull request numbers all refer to this repository, written in full.
   without a token even when `auth` was configured, and its replay of the last 100 events
   included full tool results: files the agent read, Slack threads, colleague answers.
   Anything that could reach the pod's port could read them (issue #196).
+- **The operator-lane gate is an allowlist** (issue #195, closing issue #47). It used to
+  refuse `persona:`, `agent:` and bare `operator` and admit every other verified sub, so a
+  service token minted for something else could deliver a tool file, which the agent runs
+  as itself at its next boot. The code and docs no longer call the tool file's
+  import-statement check validation: it is a lint, and `__import__("os")` passes it.
+
 
 ## [0.5.5] — 2026-10-15
 

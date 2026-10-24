@@ -11,7 +11,7 @@ from tests.test_agent import make_agent
 from tests.test_agent_journal import FakeMemory
 
 
-def _learnings_task(*, sub="service:room", date="2026-09-01"):
+def _learnings_task(*, sub="service:kobo", date="2026-09-01"):
     task = Task.from_text("Summarize your conversations.")
     task.metadata[SYSTEM_TASK_KEY] = LEARNINGS_MARKER
     task.metadata["date"] = date
@@ -292,7 +292,7 @@ async def test_learnings_emits_allowed_and_refused_events(tmp_path):
     agent = make_agent(
         llm=ScriptedLLM(), memory=FakeMemory(tmp_path / "techne.db"), on_event=events.append
     )
-    await agent.handle_task(_learnings_task(sub="service:room"))
+    await agent.handle_task(_learnings_task(sub="service:kobo"))
     await agent.handle_task(_learnings_task(sub=None))
 
     kinds = [e["type"] for e in events]
