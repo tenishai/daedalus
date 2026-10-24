@@ -483,11 +483,59 @@ async def test_the_cooldown_sentinel_is_not_a_real_point_on_the_clock(key, monke
     assert claims["sub"] == "rook:1"
 
 
-def test_gets_stay_open_when_auth_is_configured(client):
-    """Auth gates dispatch. The card is a public document (cabal serves its
-    agents' cards openly too); the events door is the kaminos-auth item."""
+def test_card_and_health_gets_stay_open_when_auth_is_configured(client):
+    """The card is a public document (cabal serves its agents' cards openly
+    too) and healthz carries nothing. /events is gated: see below."""
     assert client.get("/healthz").status_code == 200
     assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+def _bus_with_a_secret():
+    from daedalus.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "tool_result", "name": "files.read", "content": "SECRET-BODY"})
+    return bus
+
+
+def test_events_without_a_token_is_401_when_auth_is_configured(key, monkeypatch):
+    """#196: the replay alone holds the last 100 events, tool results included.
+    A finite stream stands in so a regression fails instead of hanging."""
+    import daedalus.transports.a2a as a2a
+
+    async def finite(events, content=False):
+        yield "data: SECRET-BODY\n\n"
+
+    monkeypatch.setattr(a2a, "sse_stream", finite)
+    client = TestClient(
+        build_a2a_app(
+            EchoHandler(), events=_bus_with_a_secret(), verifier=verifier_with(CountingFetch(key))
+        )
+    )
+    for headers in ({}, auth_header("not-a-jwt"), auth_header(mint(key, aud="someone-else"))):
+        response = client.get("/events", headers=headers)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert "SECRET-BODY" not in response.text
+
+
+def test_events_with_a_valid_token_streams(key, monkeypatch):
+    """The authorised path still reaches the stream. The real stream never
+    ends, and TestClient buffers to completion, so a finite one stands in."""
+    import daedalus.transports.a2a as a2a
+
+    async def finite(events, content=False):
+        yield "data: {}\n\n"
+
+    monkeypatch.setattr(a2a, "sse_stream", finite)
+    client = TestClient(
+        build_a2a_app(
+            EchoHandler(), events=_bus_with_a_secret(), verifier=verifier_with(CountingFetch(key))
+        )
+    )
+    response = client.get("/events", headers=auth_header(mint(key)))
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
 
 
 def test_agent_wiring_validates_auth_config():

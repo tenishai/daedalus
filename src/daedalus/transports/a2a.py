@@ -8,7 +8,8 @@ _dispatch_remote). N.B. the switchboard's own inbound /a2a/tasks speaks a
 different dialect — a routing envelope {target, task} (what the colleagues
 provider POSTs) — the shared path is convention, not compatibility: this
 surface takes the bare Task only. Non-streaming, bound to loopback by default. Optional
-JWT verification (transport `auth` config) gates both POST surfaces; card
+JWT verification (transport `auth` config) gates both POST surfaces and the
+GET /events trace stream (#196); card
 signing stays deferred (cabal accepts an empty card at graduation and does
 not verify cards on dispatch). Requires the a2a extra: pip install
 'tenish-daedalus[a2a]'.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 from fastapi import FastAPI, Request  # module imported only when the extra is present
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -119,15 +121,45 @@ def stamp_verified_sub(task: Task, claims: dict | None) -> None:
         task.metadata[VERIFIED_SUB_KEY] = sub
 
 
-async def sse_stream(events: EventBus):
-    """Replay recent events, then stream live — each as an SSE data frame."""
+#: Set to "1" to put tool arguments, tool results and reasoning text on the
+#: /events wire. Off by default (#196): those fields carry whatever the agent
+#: read (files, Slack threads, colleague answers), and /events is a network
+#: surface. The in-process bus keeps them either way: `run -v` and the Slack
+#: transport's progress lines read them there, not over HTTP.
+TRACE_CONTENT_ENV = "DAEDALUS_TRACE_CONTENT"
+
+#: event type -> the field that carries content. On the wire, without
+#: TRACE_CONTENT_ENV, the field is replaced by `<field>_chars`, its length.
+_CONTENT_FIELDS = {"tool_call": "arguments", "tool_result": "content", "reasoning": "text"}
+
+
+def trace_content_enabled() -> bool:
+    return os.environ.get(TRACE_CONTENT_ENV) == "1"
+
+
+def wire_event(event: dict, content: bool) -> dict:
+    """The event as /events sends it. Names, ids, counts and types always
+    go out; with `content` False the content field becomes its size."""
+    field = _CONTENT_FIELDS.get(event.get("type"))
+    if content or field is None or field not in event:
+        return event
+    value = event[field]
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    redacted = {k: v for k, v in event.items() if k != field}
+    redacted[f"{field}_chars"] = len(text)
+    return redacted
+
+
+async def sse_stream(events: EventBus, content: bool = False):
+    """Replay recent events, then stream live — each as an SSE data frame.
+    `content` False sends each event through wire_event's redaction."""
     replay, queue = events.subscribe()
     try:
         for event in replay:
-            yield f"data: {json.dumps(event, default=str)}\n\n"
+            yield f"data: {json.dumps(wire_event(event, content), default=str)}\n\n"
         while True:
             event = await queue.get()
-            yield f"data: {json.dumps(event, default=str)}\n\n"
+            yield f"data: {json.dumps(wire_event(event, content), default=str)}\n\n"
     finally:
         events.unsubscribe(queue)
 
@@ -137,13 +169,17 @@ def build_a2a_app(
     card: dict | None = None,
     events: EventBus | None = None,
     verifier=None,
+    trace_content: bool | None = None,
 ) -> FastAPI:
     """Separable from serving so tests drive it with a TestClient.
 
-    `verifier` (a JwtVerifier, duck-typed) gates both POST surfaces when
-    present; GETs (card, healthz, events) stay open — the events door is
-    the kaminos-auth hardening item, tracked separately.
+    `verifier` (a JwtVerifier, duck-typed) gates both POST surfaces and
+    GET /events when present (#196); the card and healthz GETs stay open.
+    `trace_content` (default: DAEDALUS_TRACE_CONTENT=1) decides whether
+    /events carries tool arguments, results and reasoning text.
     """
+    if trace_content is None:
+        trace_content = trace_content_enabled()
     app = FastAPI()
     tasks: dict[str, Task] = {}
     lock = asyncio.Lock()
@@ -180,12 +216,19 @@ def build_a2a_app(
         return {"status": "ok"}
 
     @app.get("/events")
-    async def event_stream():
+    async def event_stream(request: Request):
         """The runtime trace over SSE — the kaminos trace pane's feed.
-        Opens with a replay of recent events, then streams live."""
+        Opens with a replay of recent events, then streams live. Behind the
+        same verifier as the POSTs (#196): the replay alone is the last 100
+        events, so an open door here leaks after the fact too."""
+        denied, _claims = await authorize(request)
+        if denied is not None:
+            return denied
         if events is None:
             return JSONResponse({"error": "no event stream wired"}, status_code=404)
-        return StreamingResponse(sse_stream(events), media_type="text/event-stream")
+        return StreamingResponse(
+            sse_stream(events, content=trace_content), media_type="text/event-stream"
+        )
 
     async def message_send(params: dict, claims: dict | None) -> dict:
         message = params.get("message")
