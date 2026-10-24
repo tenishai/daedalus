@@ -246,9 +246,12 @@ def teach_authorized(
     future principal type) could deliver code. No verified sub, or one that
     matches no entry of `operator_subs`, is refused.
 
-    No scope claim is checked: cabal's re-mint sets every dispatch token's
-    scope to `["dispatch"]`, so the caller's `operator` scope never reaches
-    this runtime and there is nothing here to tell the lanes apart by."""
+    No scope claim is checked: when cabal relays a task to an agent it
+    re-mints the token for that agent's audience with scope `["dispatch"]`,
+    so the caller's `operator` scope never reaches this runtime and there is
+    nothing here to tell the lanes apart by. (cabal passes a token through
+    unchanged only when it is already aimed at the target's audience, the
+    federated-peer case, which does not land on a plain agent.)"""
     sub = task.metadata.get(VERIFIED_SUB_KEY)
     if not isinstance(sub, str) or not sub:
         return False
