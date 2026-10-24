@@ -175,3 +175,49 @@ def test_trace_content_flag_puts_content_back(monkeypatch):
     monkeypatch.setenv("DAEDALUS_TRACE_CONTENT", "1")
     assert trace_content_enabled() is True
     assert wire_event(event, content=True) == event
+
+
+@pytest.mark.parametrize("env,expected", [(None, False), ("1", True), ("true", False)])
+def test_the_route_passes_the_trace_flag_to_the_stream(monkeypatch, env, expected):
+    """The redaction a network reader gets is the route's choice, not the
+    stream's parameter default: pin what `event_stream` passes (review of
+    PR #207)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    import daedalus.transports.a2a as a2a
+
+    class Idle:
+        async def handle_task(self, task):
+            return task.reply("ok")
+
+    seen = []
+
+    async def finite(events, content=False):
+        seen.append(content)
+        yield "data: {}\n\n"
+
+    monkeypatch.setattr(a2a, "sse_stream", finite)
+    if env is None:
+        monkeypatch.delenv("DAEDALUS_TRACE_CONTENT", raising=False)
+    else:
+        monkeypatch.setenv("DAEDALUS_TRACE_CONTENT", env)
+    TestClient(a2a.build_a2a_app(Idle(), events=EventBus())).get("/events")
+    assert seen == [expected]
+
+
+async def test_the_live_path_redacts_too():
+    """Frames published after subscribe go through the live loop, not the
+    replay: they must be redacted the same way (review of PR #207)."""
+    from daedalus.transports import a2a
+
+    bus = EventBus()
+    stream = a2a.sse_stream(bus)
+    pending = asyncio.ensure_future(anext(stream))
+    await asyncio.sleep(0)
+    bus.publish({"type": "tool_result", "name": "n", "content": "SECRET-BODY"})
+    frame = await asyncio.wait_for(pending, timeout=2)
+    await stream.aclose()
+    assert json.loads(frame.removeprefix("data: ")) == {
+        "type": "tool_result", "name": "n", "content_chars": 11,
+    }
