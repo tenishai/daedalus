@@ -6,6 +6,27 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`GET /events` needs a token when the a2a transport has `auth`.** Send the same
+  `Authorization: Bearer <cabal-minted JWT>` the POST routes take (same issuer and
+  audience); without it the route returns 401. Bundles with no `auth` block are unchanged.
+  kaminos's trace proxy sends no token, so its trace pane, like its test chat, works only
+  against bundles without `auth`.
+- **`/events` no longer carries tool arguments, tool results or reasoning text by default.**
+  `tool_call`, `tool_result` and `reasoning` events go out with `arguments_chars`,
+  `content_chars` and `text_chars` in place of the content; names and every other event
+  are unchanged. Set `DAEDALUS_TRACE_CONTENT=1` in the agent's environment to send the
+  content as before. `run -v` and the Slack progress lines read the in-process bus and
+  still see everything.
+
+### Security
+
+- **The `/events` trace stream is behind the transport's verifier.** It used to answer
+  without a token even when `auth` was configured, and its replay of the last 100 events
+  included full tool results: files the agent read, Slack threads, colleague answers.
+  Anything that could reach the pod's port could read them (issue #196).
+
 ## [0.5.5] — 2026-10-15
 
 ### Upgrading

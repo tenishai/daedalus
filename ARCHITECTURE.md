@@ -1,14 +1,14 @@
 ---
 card: repo-card:daedalus
-updated: 2026-10-12
-anchor: pyproject.toml sha=8702b23fbaeba9c0c44076ddeb7da63597125f09
+updated: 2026-10-24
+anchor: pyproject.toml sha=fafaad90863050c4ab8cf5f4c033cbc8d0a633b7
 anchor: src/daedalus/agent.py sha=318bb22cd1c0d251537d8d306f854ed1a45de1e6
 ---
 # daedalus — repo card
 
 WHAT: the agent runtime. An agent is a directory (bundle: agent.yaml + persona.md + agent-card.json, optional skills/, tools/, knowledge/); daedalus loads it and serves it over CLI / A2A / Slack, with tool allowlists, approval gates, enforcement hooks, and optional techne memory.
 STATE: main, v0.5.5 (2026-10-15; version lives in src/daedalus/__init__.py; pyproject reads it via [tool.hatch.version]); everything since is under CHANGELOG [Unreleased]. 0.5.5 (#185) ends the `## Clock` section with an instruction to state today's date before reasoning about a relative date; 0.5.4 (#182) adds `Yesterday:` and `Past week:` lines to the `## Clock` section; 0.5.3 (#176) names the weekday in that clock line and gives it its own `## Clock` heading ahead of the skills index; 0.5.2 (#172) put the current UTC time in every task's system prompt; 0.5.1 (#166) made learnings candidates from the room's chat carry `said_by: "user"` and dropped unverified attributions. 0.5.0 renamed the distribution to tenish-daedalus (it shipped as `daedalus` through v0.4.0). In 0.5.0, since 2026-09-28: model tiers (#127, #129, #132: model.id may name fast|balanced|best, resolved from $DAEDALUS_TIERS), the exec builtin (#121), Claude Code engine in the runtime image (#112), go-public prep (#138 community files; DCO check in CI), Slack approver allowlist (#141) and wake modes (#147), per-answer colleague ask limits (#150), colleague and liminal refusals reported as refusals (#157, #158, #159), Slack progress lines (#160). Before that, the ENGINE seam (#104, #105, #107, #108; 2026-09-27).
-STACK: Python ≥3.11, hatchling; the distribution is `tenish-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm. Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (`tenish-techne[vectors]>=0.18.2`; install via requirements-sources.txt, which pins the v0.18.2 tag), dev. Runtime image: docker/Dockerfile (techne + liminal, as tenish-techne and tenish-liminal >=0.4.0, from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
+STACK: Python ≥3.11, hatchling; the distribution is `tenish-daedalus`, the import package and CLI are `daedalus`. Base deps ONLY pydantic, pyyaml, click, litellm (pinned exactly, ==1.104.2, after a compromised litellm release on PyPI; #193). Extras: mcp, claude-code (mcp≥2.2, uvicorn, claude-agent-sdk≥0.2.160), a2a (fastapi, uvicorn, joserfc, httpx), slack, aws (boto3), techne (`tenish-techne[vectors]>=0.18.2`; install via requirements-sources.txt, which pins the v0.18.2 tag), dev. Runtime image: docker/Dockerfile (techne + liminal, as tenish-techne and tenish-liminal >=0.4.0, from sibling build contexts or a package index, #128; extras a2a,slack,aws,claude-code).
 ENTRY:
 - CLI `daedalus` → src/daedalus/cli.py:main (version, schema, create, run, chat; run/chat take --engine)
 - library → daedalus.Agent (src/daedalus/agent.py), Agent.load(path) / handle_task / serve
@@ -26,7 +26,7 @@ SEAMS → card:
 - (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes), journal.py (7-day journal.db), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file validator)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 
-DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), kaminos (GET /events SSE). tenishai/agents#51 is the engine-seam design issue.
+DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), kaminos (GET /events SSE; bearer token required when the a2a transport has `auth`, content fields redacted unless DAEDALUS_TRACE_CONTENT=1, #196). tenishai/agents#51 is the engine-seam design issue.
 HEALTH: 44 test files (tests/ + docker/test_seeder.py); 887 collected. Local run 2026-10-07: 875 passed, 15 skipped (techne absent). CI .github/workflows/test.yml: `test` on a SELF-HOSTED runner pool `daedalus-ci` (3.11 dev; 3.12 dev,claude-code), ruff + pytest; `fork-pr` hosted complement; `dco` (every commit a PR adds is signed off, hosted); `techne` leg workflow_dispatch only, DAEDALUS_REQUIRE_TECHNE=1. No branch protection: CI reports, never blocks.
 GOTCHAS:
 - Never add a module-scope import of an optional extra (fastapi, slack_sdk, mcp, claude_agent_sdk, techne, liminal). Dev env has them all, so CI won't catch it.

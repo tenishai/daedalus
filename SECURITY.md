@@ -49,10 +49,12 @@ daedalus is the runtime agents run in. In scope:
   to change an agent's instructions, memory or permissions (prompt injection
   that crosses a trust boundary the runtime claims to enforce);
 - the a2a HTTP transport and its bearer/JWT authentication: when `auth` is
-  configured, anything that reaches an agent through a POST without passing
-  it. Without an `auth` block the POST surfaces are open by design. The card
-  and health GETs are open by design. The `/events` stream stays open even
-  when `auth` is configured: that is a known hardening item, not a new report;
+  configured, anything that reaches an agent through a POST or through the
+  `GET /events` trace stream without passing it. Without an `auth` block all
+  of these are open by design. The card and health GETs are open by design.
+  By default `/events` sends tool arguments, tool results and reasoning text
+  only as sizes; `DAEDALUS_TRACE_CONTENT=1` puts the content back, and an
+  operator who sets it accepts that the stream carries what the agent reads;
 - the Slack transport and other connectors: anything that lets someone other
   than an intended approver approve an action. Tier-2 approvals need an
   `approvers` list (Slack user ids) and a `channel` allowlist on the Slack
