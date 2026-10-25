@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from daedalus.events import EventBus
 from daedalus.protocols import Handler
-from daedalus.task import VERIFIED_SUB_KEY, Message, Task, TaskState
+from daedalus.task import VERIFIED_SUB_KEY, Message, ReasonCode, Task, TaskState
 
 
 class ParamsError(ValueError):
@@ -108,6 +108,30 @@ def task_from_a2a(payload: dict) -> Task:
     if not task.user_text():
         raise ParamsError("task has no user text")
     return task
+
+
+def mark_failed(task: Task, exc: BaseException) -> None:
+    """End a stored task whose handler raised or was cancelled (#201).
+
+    Without this the task kept the WORKING state the handler set, and
+    tasks/get reported it working until the pod restarted. FAILED with
+    reason 704, the code a down tool provider already gets, so cabal reads
+    it as a failure to pass to the operator."""
+    if isinstance(exc, asyncio.CancelledError):
+        text = "agent error: the task was cancelled before it finished"
+    else:
+        text = f"agent error: {exc}"
+    task.reply(text, state=TaskState.FAILED, reason=ReasonCode.ESCALATION)
+
+
+async def run_handler(handler: Handler, task: Task) -> Task:
+    """handler.handle_task(task), marking `task` (the stored object) FAILED
+    on any exception or cancellation before re-raising it."""
+    try:
+        return await handler.handle_task(task)
+    except BaseException as exc:
+        mark_failed(task, exc)
+        raise
 
 
 def stamp_verified_sub(task: Task, claims: dict | None) -> None:
@@ -248,7 +272,7 @@ def build_a2a_app(
                 task = Task.from_text(text, context_id=message.get("contextId"))
                 stamp_verified_sub(task, claims)
                 tasks[task.id] = task
-        task = await handler.handle_task(task)
+        task = await run_handler(handler, task)
         async with lock:
             tasks[task.id] = task
         return task_to_a2a(task)
@@ -285,7 +309,7 @@ def build_a2a_app(
         async with lock:
             tasks[task.id] = task
         try:
-            task = await handler.handle_task(task)
+            task = await run_handler(handler, task)
         except Exception as exc:  # handler bug: readable body, not a bare 500
             return JSONResponse({"error": f"agent error: {exc}"}, status_code=500)
         async with lock:

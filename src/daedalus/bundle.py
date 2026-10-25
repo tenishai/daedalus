@@ -84,6 +84,12 @@ class ModelSpec(_WarnExtra):
     # id"); it does not fall back to the tier.
     id: str | None = None
     max_tokens: int = 8192
+    # Seconds one model call may take before it fails (#201), passed to litellm as
+    # `timeout`. Without it litellm waits 6000 s. 120 s fits a full max_tokens reply
+    # from a hosted model and stays under kobo's 180 s relay timeout. A tier entry
+    # fills it when the bundle doesn't set it. The litellm engine only: Claude Code
+    # manages its own model calls.
+    request_timeout: float = Field(default=120.0, gt=0)
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
@@ -421,6 +427,11 @@ class AgentSpec(_WarnExtra):
     # run time (daedalus run --engine), not the bundle's: the same bundle must run for
     # someone with Claude Code and someone without.
     engine: EngineSpec = Field(default_factory=EngineSpec)
+    # Seconds a task's engine run may take, model calls and tool calls together
+    # (#201). Past it the run is cancelled, tool calls included, and the task fails
+    # with reason 704. Default 600 s: ten tool steps of ordinary model and tool
+    # latency fit, and a stalled one still ends in minutes, not hours.
+    task_timeout: float = Field(default=600.0, gt=0)
 
 
 #: The placeholder syntax `interpolate()` (above) expands, anchored to match a whole

@@ -173,7 +173,8 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
 - **The tier's engine is the default.** An explicit `--engine` or `DAEDALUS_ENGINE` that
   disagrees is refused at load, not silently obeyed.
 - **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
-  `max_tokens`, `tools.context_tokens`, `tools.max_repeats`, and the Claude Code model.
+  `max_tokens`, `request_timeout`, `tools.context_tokens`, `tools.max_repeats`, and the
+  Claude Code model.
   A value the bundle set wins.
 - **A tier word never reaches LiteLLM as a model name.** With no tiers file named, load
   refuses naming the tier and `DAEDALUS_TIERS`; with a tiers file that doesn't offer the

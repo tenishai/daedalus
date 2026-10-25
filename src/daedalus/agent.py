@@ -222,6 +222,7 @@ class Agent:
                 max_tokens=model_spec.max_tokens,
                 api_base=model_spec.api_base,
                 api_key=api_key,
+                timeout=model_spec.request_timeout,
             )
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
@@ -325,7 +326,7 @@ class Agent:
                 "engine was asked for; drop the engine choice, or pin model.id to a model"
             )
         model.id = entry.id
-        for field in ("api_base", "api_key_env", "max_tokens"):
+        for field in ("api_base", "api_key_env", "max_tokens", "request_timeout"):
             value = getattr(entry, field)
             if value is not None and field not in model.model_fields_set:
                 setattr(model, field, value)
@@ -989,6 +990,33 @@ class Agent:
         return await self._loop(task, state["messages"])
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
+        """The engine run, under the bundle's task deadline (#201).
+
+        Past `task_timeout` the run is cancelled where it stands: a model call
+        or a tool call awaiting inside it gets CancelledError, which nothing on
+        the call path catches (Agent._call_tool catches Exception only), so the
+        exec builtin kills its process group and the claude-code engine closes
+        its SDK stream. The task then fails with reason 704, so every transport
+        ends it like any other failed task instead of leaving it WORKING.
+        """
+        seconds = self.bundle.spec.task_timeout
+        deadline = asyncio.timeout(seconds)
+        try:
+            async with deadline:
+                return await self._run_engine(task, messages)
+        except TimeoutError:
+            if not deadline.expired():
+                raise  # some other timeout escaped the run: not ours to relabel
+        self._emit("task_timeout", seconds=seconds)
+        return task.reply(
+            f"I had to stop: this task ran past its {seconds:g}-second time limit "
+            "before I finished. A narrower ask may fit; my operator can raise the "
+            "limit (task_timeout).",
+            state=TaskState.FAILED,
+            reason=ReasonCode.ESCALATION,
+        )
+
+    async def _run_engine(self, task: Task, messages: list[dict]) -> Task:
         try:
             allowed = await self._allowed_tools()
         except Exception as exc:

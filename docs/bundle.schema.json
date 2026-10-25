@@ -528,6 +528,20 @@
           "title": "Max Tokens",
           "default": 8192
         },
+        "request_timeout": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Request Timeout",
+          "default": 120.0
+        },
         "api_base": {
           "anyOf": [
             {
@@ -816,6 +830,20 @@
     },
     "engine": {
       "$ref": "#/$defs/EngineSpec"
+    },
+    "task_timeout": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+        }
+      ],
+      "title": "Task Timeout",
+      "default": 600.0
     }
   },
   "required": [

@@ -5,6 +5,7 @@ persona: persona.md
 model:
   id: ${GREETER_MODEL:-anthropic/claude-sonnet-4-5}
   max_tokens: 1024
+  request_timeout: 60     # seconds per model call (#201; default 120)
   budget:
     per_task_tokens: 50000
 
@@ -18,6 +19,8 @@ tools:
 memory:
   personal: none
   team: none
+
+task_timeout: 300         # seconds per task, model and tool calls together (#201; default 600)
 
 approvals:
   ceiling:

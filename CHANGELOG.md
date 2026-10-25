@@ -27,6 +27,14 @@ Issue and pull request numbers all refer to this repository, written in full.
   `operator_subs: ["operator:*", "<your kobo sub>"]`. A list replaces the default, and an
   entry ending in `*` matches by prefix. kobo falls back to its archive commit when the
   instant lane refuses, so a refused teach lands at the next rebuild instead of being lost.
+- **Tasks now have a deadline, and model calls a timeout.** An engine run that takes
+  longer than `task_timeout` (agent.yaml top level, seconds, default 600) is cancelled,
+  tool calls included, and the task fails with reason 704. A litellm model call that
+  takes longer than `model.request_timeout` (seconds, default 120; a tiers-file entry can
+  set it for its model) fails with an `LLMError`; before, litellm waited up to 6000 s. A
+  bundle whose tasks legitimately run longer must raise `task_timeout`. Both fields are
+  new in `docs/bundle.schema.json`, so a copy vendored elsewhere (kobo) needs
+  re-vendoring to accept them.
 
 ### Security
 
@@ -39,6 +47,17 @@ Issue and pull request numbers all refer to this repository, written in full.
   service token minted for something else could deliver a tool file, which the agent runs
   as itself at its next boot. The code and docs no longer call the tool file's
   import-statement check validation: it is a lint, and `__import__("os")` passes it.
+
+### Fixed
+
+- **A hung provider no longer holds a task for up to 100 minutes, and a failed a2a task
+  no longer stays WORKING** (issue #201). litellm's default request timeout is 6000 s and
+  nothing else bounded a task, so a stalled provider kept the request open after cabal
+  had given up, `tasks/get` answered WORKING until the pod restarted, and the Slack
+  thread kept its eyes reaction. Model calls now time out, the engine run has a
+  deadline that cancels whatever is in flight, and a run past it ends FAILED with reason
+  704 on every transport. When an a2a handler raises or is cancelled, its stored task is
+  marked FAILED with reason 704; the HTTP and JSON-RPC errors are unchanged.
 
 
 ## [0.5.5] — 2026-10-15
