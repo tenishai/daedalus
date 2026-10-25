@@ -36,6 +36,12 @@ Issue and pull request numbers all refer to this repository, written in full.
   new in `docs/bundle.schema.json`, so a copy vendored elsewhere (kobo) needs
   re-vendoring to accept them.
 
+### Changed
+
+- **CI runs `scripts/check_arch_cards.py`** in the `test` and `fork-pr` jobs (issue
+  #206), so a change to an anchored file without its architecture card fails the build
+  instead of merging.
+
 ### Security
 
 - **The `/events` trace stream is behind the transport's verifier.** It used to answer

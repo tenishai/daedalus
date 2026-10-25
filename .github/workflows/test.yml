@@ -48,6 +48,8 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
       - run: pip install -e ".[${{ matrix.extras }}]"
       - run: ruff check src tests docker conftest.py
+      # Stdlib only. Fails when an anchored file changed without its arch card (#206).
+      - run: python3 scripts/check_arch_cards.py
       - run: pytest -q
 
   # ---- techne: full suite with the private techne sibling --------------------
@@ -118,6 +120,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[dev]
       - run: ruff check src tests docker conftest.py
+      - run: python3 scripts/check_arch_cards.py
       - run: pytest -q
 
   # ---- dco: every commit a PR adds is signed off (CONTRIBUTING.md) -------------
