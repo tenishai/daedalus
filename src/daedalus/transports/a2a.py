@@ -9,7 +9,8 @@ different dialect — a routing envelope {target, task} (what the colleagues
 provider POSTs) — the shared path is convention, not compatibility: this
 surface takes the bare Task only. Non-streaming, bound to loopback by default. Optional
 JWT verification (transport `auth` config) gates both POST surfaces and the
-GET /events trace stream (#196); card
+GET /events trace stream (#196), and binds each stored task to the sub that
+created it (#197); card
 signing stays deferred (cabal accepts an empty card at graduation and does
 not verify cards on dispatch). Requires the a2a extra: pip install
 'tenish-daedalus[a2a]'.
@@ -206,7 +207,33 @@ def build_a2a_app(
         trace_content = trace_content_enabled()
     app = FastAPI()
     tasks: dict[str, Task] = {}
+    # task id -> the verified sub that created it (#197). Kept beside the task,
+    # not in its metadata, so nothing a handler returns can change the owner.
+    owners: dict[str, str | None] = {}
     lock = asyncio.Lock()
+
+    def caller_sub(claims: dict | None) -> str | None:
+        sub = (claims or {}).get("sub")
+        return sub if isinstance(sub, str) and sub else None
+
+    def visible(task_id: object, claims: dict | None) -> Task | None:
+        """The stored task when this caller may see it, else None (#197).
+
+        With no verifier there is no caller identity, so every task is
+        visible, as before. With a verifier, only the sub that created the
+        task sees it; a token without a sub sees none. Callers answer None
+        exactly as they answer a missing id, so through tasks/get and
+        continuation another caller's task id cannot be told apart from one
+        that does not exist. POST /a2a/tasks still answers 409 for any stored
+        id, whoever owns it. Call under lock.
+        """
+        task = tasks.get(task_id) if isinstance(task_id, str) else None
+        if task is None or verifier is None:
+            return task
+        sub = caller_sub(claims)
+        if sub is None or owners.get(task_id) != sub:
+            return None
+        return task
 
     def error(rpc_id, code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
@@ -262,7 +289,7 @@ def build_a2a_app(
         task_id = message.get("taskId")
         async with lock:
             if task_id:
-                task = tasks.get(task_id)
+                task = visible(task_id, claims)
                 if task is None:
                     raise ParamsError(f"unknown taskId {task_id!r}")
                 task.history.append(Message(role="user", text=text))
@@ -272,6 +299,7 @@ def build_a2a_app(
                 task = Task.from_text(text, context_id=message.get("contextId"))
                 stamp_verified_sub(task, claims)
                 tasks[task.id] = task
+                owners[task.id] = caller_sub(claims)
         task = await run_handler(handler, task)
         async with lock:
             tasks[task.id] = task
@@ -280,7 +308,7 @@ def build_a2a_app(
     async def tasks_get(params: dict, claims: dict | None) -> dict:
         task_id = params.get("id")
         async with lock:
-            task = tasks.get(task_id)
+            task = visible(task_id, claims)
         if task is None:
             raise ParamsError(f"unknown task id {task_id!r}")
         return task_to_a2a(task)
@@ -307,7 +335,16 @@ def build_a2a_app(
             return JSONResponse({"error": str(exc)}, status_code=422)
         stamp_verified_sub(task, claims)
         async with lock:
+            if task.id in tasks:
+                # Never replace a stored task (#197): the id is the caller's
+                # choice, so replacing would let any caller overwrite any
+                # other caller's task. cabal and kobo mint a fresh id per hop.
+                return JSONResponse(
+                    {"error": f"task id {task.id!r} already exists; send a new id"},
+                    status_code=409,
+                )
             tasks[task.id] = task
+            owners[task.id] = caller_sub(claims)
         try:
             task = await run_handler(handler, task)
         except Exception as exc:  # handler bug: readable body, not a bare 500

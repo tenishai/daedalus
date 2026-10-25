@@ -94,4 +94,4 @@ Check before you push:
 python3 scripts/check_arch_cards.py
 ```
 
-It fails when an anchored file has changed without its card, or when a card and the index disagree.
+It fails when an anchored file has changed without its card, or when a card and the index disagree. CI runs it in the `test` and `fork-pr` jobs (#206), so a miss fails the build.
