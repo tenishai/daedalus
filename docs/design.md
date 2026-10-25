@@ -133,11 +133,11 @@ approvals:
     exec: true                          # required when tools.builtin.exec is set, or the
                                         # bundle won't load; commands run as the agent in
                                         # its container (not a security boundary)
-  gates:                                # tier 2 — plan/diff/apply
+  gates:                                # tier 2 — approval before the call
     - match: "github.pr_merge"
       require: plan_approval
   escalation:                           # tier 3 — human in the loop
-    route: slack:#pr-reviews            # or: cli, webhook:<url>
+    route: slack:#pr-reviews            # only slack: routes are acted on
 ```
 
 Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
@@ -435,14 +435,22 @@ FastAPI stays at the edge: nothing below a transport imports it.
    `approvals.ceiling.exec` is checked once, at load: without `true`, a bundle
    that configures `tools.builtin.exec` fails to load. `approvals.ceiling.write`
    and `approvals.ceiling.hosts` are parsed but not yet enforced anywhere.
-2. **Gates** (plan/diff/apply, tier 2): matched operations must first render
-   a value-free plan (the intended action as reviewable data). The `Approver`
-   presents it (CLI prompt, Slack message, or PR when the effect targets a
-   repo — "the PR is the approval") and only then executes. Dry-run is the
-   default posture for anything matched.
-3. **Escalation** (tier 3): the agent itself, or a tripped gate/budget, emits
-   700/704 and the configured route carries it to a human; the task parks in
-   `input-required` until answered.
+2. **Gates** (tier 2): a matched operation is first turned into a plan,
+   `{tool, arguments, require}` with the call's full arguments (agent.py),
+   and nothing is masked: the Slack approver posts the arguments verbatim,
+   so a gate on a tool that takes a secret shows it to the approval channel.
+   The `Approver` decides: `CliApprover` asks at the terminal,
+   `SlackReactionApprover` waits for a reaction from a listed approver, and
+   the default `DenyAll` refuses, so with it a matched tool is withheld from
+   the model altogether (`_unapprovable`, #105). On a yes the tool runs for
+   real. Nothing runs in dry-run, no diff is rendered, and no approver defers
+   to a pull request; `require` travels in the plan but nothing reads it.
+3. **Escalation** (tier 3): a task the runtime can't finish (a deadline, a
+   down tool provider, an engine error) ends `failed` with reason 704 in its
+   metadata, and the transport carries it to a human: Slack replies with the
+   escalation, cabal reads the reason code. Nothing parks a task: no code sets
+   `input-required`, and nothing emits 700 today, so an answer arrives as a
+   new message on the task, not as a resumption.
 
 **Approver routing is process-wide, by design.** The approver is an agent
 collaborator, not a transport property: when a Slack transport is serving
@@ -456,8 +464,11 @@ DenyAll and fail closed. (Decided 2026-07-06 after the visual builder's canvas
 surfaced the interplay; documented rather than "fixed" — it is the correct
 behavior, arrived at by accident.)
 
-Secrets hygiene primitives (mask, placeholder-refusal) ship in core and are
-applied to anything approval-bound or logged.
+There are no secrets-hygiene primitives in core: nothing masks values in a
+plan, an approval message or a log line, and nothing refuses a placeholder.
+The one redaction is the a2a `/events` trace, which replaces tool arguments,
+results and reasoning text with their length unless `DAEDALUS_TRACE_CONTENT=1`
+(transports/a2a.py).
 
 ## 4. The visual builder (companion project)
 

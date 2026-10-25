@@ -36,7 +36,7 @@ GOTCHAS:
 - Engine choice is the OPERATOR's (--engine / DAEDALUS_ENGINE), never the bundle's; the bundle only carries engine.claude_code settings.
 - Every engine run has a deadline (#201): Agent._loop wraps it in asyncio.timeout(spec.task_timeout, default 600 s) and a run past it fails 704; the litellm engine also passes model.request_timeout (default 120 s) to litellm, whose own default is 6000 s. The cancellation reaches a running tool call only because nothing on the call path catches BaseException: keep Agent._call_tool's `except Exception`, and don't add `except BaseException` to a tool provider. A tool that runs in a thread (asyncio.to_thread, e.g. cloudtrail) is abandoned, not stopped.
 - `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; don't describe them as controls. Only `ceiling.exec` is read, at load, where it gates the exec builtin (docs/design.md §3 says the same).
-- No code sets TaskState.INPUT_REQUIRED; design.md's "task parks in input-required" is not implemented.
+- No code sets TaskState.INPUT_REQUIRED and nothing emits reason 700; escalation ends a task FAILED with 704 (design.md §3 says so since #203).
 - AGENTS.md cites `_OPERATOR_GATE_EVENTS` at cli.py:85; it is at cli.py:92.
 - docs/bundle.schema.json must be regenerated (`daedalus schema --out docs/bundle.schema.json`) with any AgentSpec change, or test_schema fails.
 RELATED DOCS: AGENTS.md (traps, build/test), docs/design.md (rationale; predates the code), docs/proposals/capability-seam.md (proposal, not behaviour), SECURITY.md.

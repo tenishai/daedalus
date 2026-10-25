@@ -93,6 +93,11 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Fixed
 
+- **`docs/design.md` §3 no longer claims three security properties the code doesn't have**
+  (tenishai/daedalus issue #203). Gate plans carry the call's full arguments and the Slack
+  approver posts them verbatim; nothing parks a task in `input-required`; and core has no
+  masking or placeholder-refusal primitives. The section now says so, and names the one
+  redaction that exists (the `/events` trace).
 - **A hung provider no longer holds a task for up to 100 minutes, and a failed a2a task
   no longer stays WORKING** (issue #201). litellm's default request timeout is 6000 s and
   nothing else bounded a task, so a stalled provider kept the request open after cabal

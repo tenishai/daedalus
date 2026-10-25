@@ -1,9 +1,11 @@
 """RED-first tests for Task 5 (arc3d): the fast tooling lane's runtime half.
 
 TOOL_MARKER's real handler replaces the refusing stub landed alongside
-KNOWLEDGE_MARKER: a tool file relayed over the system-task rail is
-re-validated by THIS runtime (the fast lane skips CI by definition, so kobo's
-own validation can never be the only gate) and, only once it passes, written
+KNOWLEDGE_MARKER: a tool file relayed over the system-task rail is linted by
+THIS runtime too (the fast lane skips CI by definition), which catches a
+mistaken file early. The lint is not a security boundary (memory/tooling.py,
+#195): who may deliver a file at all is the operator_subs gate. Only once
+the file passes is it written
 into a persistent overlay directory beside the techne db on the agent's own
 volume (`spec.memory.home`) -- never `bundle.path / "tools"`, the image
 bundle, which resets to its baked-in contents on every restart.
@@ -64,15 +66,15 @@ def _tool_task(
     return task
 
 
-# ---- property 1: the runtime re-validates before writing, even when the ----
-# ---- room is bypassed (the security-critical test of this task) -----------
+# ---- property 1: the runtime lints before writing, even when the room ------
+# ---- is bypassed (a lint, not a security boundary: memory/tooling.py) ------
 
 
 async def test_invalid_tool_is_refused_at_the_runtime_and_nothing_is_written(tmp_path):
-    """The fast lane skips CI by definition -- a tool that fails the exact
-    mechanical contract kobo applies (here: a non-stdlib import) must be
-    refused by THIS runtime even though nothing upstream stopped it, and the
-    overlay directory must stay empty."""
+    """The fast lane skips CI by definition -- a tool that fails the lint kobo
+    also runs (here: a non-stdlib import) is refused by THIS runtime even
+    though nothing upstream stopped it, and the overlay directory stays
+    empty."""
     home = tmp_path / "home"
     agent = _tool_agent(tmp_path / "bundle", home)
 
@@ -292,6 +294,19 @@ async def test_bundle_operator_subs_replace_the_default(tmp_path):
     ):
         result = await agent.handle_task(_tool_task(sub=sub, filename="t.py"))
         assert (result.state is not TaskState.FAILED) is admitted, sub
+
+
+async def test_bare_operator_sub_is_refused_even_when_a_prefix_admits_it(tmp_path):
+    """cabal falls back to sub "operator" for a token with no sub (cabal#184), so
+    teach.py refuses it outright. Pinned here, outside the techne-gated tests
+    CI never runs (#48, #209): `op*` would otherwise admit it."""
+    home = tmp_path / "home"
+    root = _a2a_bundle(tmp_path / "bundle", home, '["op*"]')
+    agent = Agent.load(root, llm=_NoCallLLM())
+    refused = await agent.handle_task(_tool_task(sub="operator", filename="t.py"))
+    assert refused.state is TaskState.FAILED
+    admitted = await agent.handle_task(_tool_task(sub="ops", filename="u.py"))
+    assert admitted.state is not TaskState.FAILED
 
 
 def test_bundle_operator_subs_refuse_entries_that_reopen_the_gate(tmp_path):
