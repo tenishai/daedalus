@@ -93,6 +93,19 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Fixed
 
+- **The a2a task store and the Slack thread map are bounded** (tenishai/daedalus issue
+  #202). Both grew for the life of the pod, Slack threads with their images, until a busy
+  agent was OOM-killed. The a2a store keeps at most 1000 tasks and drops the least recently
+  stored finished ones (a running task is never dropped; a dropped id answers like an
+  unknown one). Slack keeps the 500 most recently used threads, and a dropped thread starts
+  a fresh conversation. Images still stay in a kept thread's history.
+- **The files builtin and the checkpoint store no longer block the event loop**
+  (tenishai/daedalus issue #205). A `files.search` over a large root, a large read or a
+  sqlite checkpoint write ran on the loop and stalled every other coroutine, `/healthz`
+  included. They run on a worker thread now, and `files.search` stops after 10 seconds,
+  walk included, with a note saying how many files it searched and that a missing match is
+  not an absent one. A regex with catastrophic backtracking on one line is still not
+  bounded.
 - **Under auth, a reused `contextId` no longer replaces another caller's journal row**
   (tenishai/daedalus issue #212). The journal kept one row per `context_id`, and a fresh
   `message/send` takes the caller's `contextId`, so sub B could send A's id and replace A's

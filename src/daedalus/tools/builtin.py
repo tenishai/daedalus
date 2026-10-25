@@ -6,9 +6,11 @@ Write access never lives here; that's gateway (liminal) territory.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 import re
+import time
 from pathlib import Path
 
 _LIST_CAP = 500
@@ -19,6 +21,7 @@ _SEARCH_FILE_BYTES = 2_000_000  # larger files are skipped, and the skip is coun
 _SEARCH_LINE_CHARS = 300
 _BINARY_SNIFF = 8192
 _SEARCH_SKIP_DIRS = {"node_modules", "__pycache__"}
+_SEARCH_SECONDS = 10.0  # wall clock for one files.search, stated when it bites
 # A root at or under one of these serves the host, not a workspace (#199):
 # /proc/self/environ alone hands the model every secret in the agent's env.
 _SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/etc")
@@ -154,6 +157,12 @@ class FilesToolProvider:
         return resolved
 
     async def call(self, name: str, payload: dict) -> str:
+        # Off the event loop (#205): a search over a large root, a big read or a
+        # slow line count used to block every other coroutine, /healthz included,
+        # long enough for the kubelet to restart the pod mid-task.
+        return await asyncio.to_thread(self._call_sync, name, payload)
+
+    def _call_sync(self, name: str, payload: dict) -> str:
         if name == "files.search":
             return self._search(payload)
         raw = payload.get("path")
@@ -219,7 +228,13 @@ class FilesToolProvider:
         hits: list[str] = []
         skipped_big = 0
         stopped = False
-        for path in self._walk(starts, glob):
+        # The walk checks the clock per directory and per file; a thread can't be
+        # interrupted mid-regex, so catastrophic backtracking on one line is not
+        # bounded.
+        clock = {"deadline": time.monotonic() + _SEARCH_SECONDS, "timed_out": False}
+        searched = 0
+        for path in self._walk(starts, glob, clock):
+            searched += 1
             try:
                 if path.stat().st_size > _SEARCH_FILE_BYTES:
                     skipped_big += 1
@@ -253,32 +268,54 @@ class FilesToolProvider:
             notes.append(
                 f"({skipped_big} file(s) over {_SEARCH_FILE_BYTES} bytes were not searched)"
             )
+        if clock["timed_out"]:
+            notes.append(
+                f"(stopped after {_SEARCH_SECONDS:g} seconds, having searched "
+                f"{_count(searched, 'file', 'files')}; the rest were not searched, so a "
+                "missing match is not an absent one. Narrow the path or glob)"
+            )
         if not hits:
             return "\n".join([f"no matches for {pattern!r} in {where}", *notes])
         return "\n".join([*hits, *notes])
 
-    def _walk(self, starts: list[Path], glob: str | None):
-        for start in starts:
+    def _walk(self, starts: list[Path], glob: str | None, clock: dict | None = None):
+        """Files under `starts`, lazily, one directory at a time.
+
+        With `clock` ({"deadline": monotonic}), the walk stops once the deadline
+        passes and sets clock["timed_out"] (#205, PR 219 review): it used to
+        os.walk the whole root into a list before yielding anything, so the
+        search's wall clock never bounded the walk itself."""
+
+        def expired() -> bool:
+            if clock is not None and time.monotonic() > clock["deadline"]:
+                clock["timed_out"] = True
+                return True
+            return False
+
+        def candidates(start: Path):
             if start.is_file():
-                candidates = [start]
-            else:
-                # Hidden names are skipped, unless the search starts inside a hidden
-                # directory (e.g. .github): then everything below it is covered.
-                # Dependency directories are skipped either way.
-                skip_hidden = not self._inside_hidden(start)
-                candidates = []
-                for folder, dirs, files in os.walk(start):  # followlinks=False
-                    dirs[:] = sorted(
-                        d
-                        for d in dirs
-                        if d not in _SEARCH_SKIP_DIRS and not (skip_hidden and d.startswith("."))
-                    )
-                    candidates.extend(
-                        Path(folder) / name
-                        for name in sorted(files)
-                        if not (skip_hidden and name.startswith("."))
-                    )
-            for path in candidates:
+                yield start
+                return
+            # Hidden names are skipped, unless the search starts inside a hidden
+            # directory (e.g. .github): then everything below it is covered.
+            # Dependency directories are skipped either way.
+            skip_hidden = not self._inside_hidden(start)
+            for folder, dirs, files in os.walk(start):  # followlinks=False
+                if expired():
+                    return
+                dirs[:] = sorted(
+                    d
+                    for d in dirs
+                    if d not in _SEARCH_SKIP_DIRS and not (skip_hidden and d.startswith("."))
+                )
+                for name in sorted(files):
+                    if not (skip_hidden and name.startswith(".")):
+                        yield Path(folder) / name
+
+        for start in starts:
+            for path in candidates(start):
+                if expired():
+                    return
                 if glob and not fnmatch.fnmatch(path.name, glob):
                     continue
                 resolved = path.resolve()
@@ -288,6 +325,8 @@ class FilesToolProvider:
                     continue
                 if resolved.is_file():
                     yield path
+            if clock is not None and clock.get("timed_out"):
+                return
 
     def _inside_hidden(self, start: Path) -> bool:
         """True when start is, or is under, a hidden directory below any root that
