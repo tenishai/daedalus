@@ -111,3 +111,20 @@ async def test_journal_keeps_the_sender_and_omits_it_when_unknown(tmp_path):
     history = recent(tmp_path / "journal.db")[0]["history"]
     assert history[0] == {"role": "user", "text": "hi", "sender": "U0ALICE"}
     assert history[1].keys() == {"role", "text"}
+
+
+async def test_two_subs_sharing_a_context_id_each_keep_their_row(tmp_path):
+    """#212: under auth the task's verified sub owns its journal row, so another
+    sub reusing the contextId adds a row instead of replacing it."""
+    from daedalus.task import VERIFIED_SUB_KEY
+
+    agent = make_agent(
+        llm=ScriptedLLM("one", "two"), memory=FakeMemory(tmp_path / "techne.db")
+    )
+    for sub, text in (("alice", "alice asks"), ("bob", "bob overwrites")):
+        task = Task.from_text(text, context_id="ctx-shared")
+        task.metadata[VERIFIED_SUB_KEY] = sub
+        await agent.handle_task(task)
+
+    firsts = sorted(r["history"][0]["text"] for r in recent(tmp_path / "journal.db"))
+    assert firsts == ["alice asks", "bob overwrites"]
