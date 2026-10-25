@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-10-24
 anchor: pyproject.toml sha=fafaad90863050c4ab8cf5f4c033cbc8d0a633b7
-anchor: src/daedalus/agent.py sha=c5b44ac537061480e8e08a80722b0700b9d739af
+anchor: src/daedalus/agent.py sha=bae6b94be57bcd29a8e25e2d584862f99e0c8c11
 ---
 # daedalus — repo card
 
@@ -34,6 +34,7 @@ GOTCHAS:
 - `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py. AGENTS.md's directory map says otherwise; the code wins.
 - `bundle/tools/` = enforcement hooks; `tools:` in agent.yaml = LLM tool providers. Same word, unrelated.
 - Engine choice is the OPERATOR's (--engine / DAEDALUS_ENGINE), never the bundle's; the bundle only carries engine.claude_code settings.
+- Every engine run has a deadline (#201): Agent._loop wraps it in asyncio.timeout(spec.task_timeout, default 600 s) and a run past it fails 704; the litellm engine also passes model.request_timeout (default 120 s) to litellm, whose own default is 6000 s. The cancellation reaches a running tool call only because nothing on the call path catches BaseException: keep Agent._call_tool's `except Exception`, and don't add `except BaseException` to a tool provider. A tool that runs in a thread (asyncio.to_thread, e.g. cloudtrail) is abandoned, not stopped.
 - `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; don't describe them as controls. Only `ceiling.exec` is read, at load, where it gates the exec builtin (docs/design.md §3 says the same).
 - No code sets TaskState.INPUT_REQUIRED; design.md's "task parks in input-required" is not implemented.
 - AGENTS.md cites `_OPERATOR_GATE_EVENTS` at cli.py:85; it is at cli.py:92.

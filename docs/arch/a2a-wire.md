@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-a2a-wire
 updated: 2026-10-24
-anchor: src/daedalus/transports/a2a.py sha=5a76fee99c6b51331465e2e905abc1556cd33c7a
+anchor: src/daedalus/transports/a2a.py sha=75507d32c7aec71ef9688e464bdb5f96f0dd67ae
 anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
 anchor: src/daedalus/memory/teach.py sha=dcc9b07197940bffe93d8b06be73b5d9744d0398
 ---
@@ -24,5 +24,6 @@ INVARIANTS:
 - Images are NOT carried on the wire (task_to_a2a is text only).
 - The switchboard's own /a2a/tasks takes a routing envelope {target, task}; this one takes a bare Task. Same path, different dialect.
 - Task store is an in-process dict: tasks/get and taskId continuation do not survive restart.
+- A handler that raises or is cancelled leaves its stored task FAILED with reason 704 (a2a.run_handler / mark_failed, #201), never WORKING; the response is unchanged (500 `agent error: ...` on /a2a/tasks, -32000 on JSON-RPC). A run past the bundle's task_timeout comes back as an ordinary FAILED 704 task (Agent._loop), so it answers 200.
 CONSUMERS: cabal (dispatch + JWT mint + reason codes), kobo (operator lanes via cabal's re-mint; mirrors teach's filename regex), kaminos (/events; its proxy, kaminos_api/agents.py event_stream, sends no token, so the trace pane only works against bundles without `auth`, the same limit its test chat already has; it reads `arguments`/`content`/`text`, which are now absent unless DAEDALUS_TRACE_CONTENT=1), tools/colleagues.py (daedalus agents asking each other through the switchboard). Tests: tests/test_transport_a2a.py, test_transport_a2a_auth.py, test_agent_teach.py (techne-gated).
 API: build_a2a_app, A2aTransport(card, host, port, events, verifier), task_to_a2a, task_from_a2a, stamp_verified_sub; task.{Task, Message, TaskState, ReasonCode, REASON_KEY, CABAL_REASON_KEY, VERIFIED_SUB_KEY, RECALL_KEY}.

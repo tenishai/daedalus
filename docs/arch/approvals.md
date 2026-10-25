@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-approvals
 updated: 2026-10-24
-anchor: src/daedalus/agent.py sha=c5b44ac537061480e8e08a80722b0700b9d739af
+anchor: src/daedalus/agent.py sha=bae6b94be57bcd29a8e25e2d584862f99e0c8c11
 anchor: src/daedalus/enforcement.py sha=95b336ce124c57932f89cdd533fdeebaeda48590
 ---
 # approvals — what a model may call, and what a reply may say
@@ -11,6 +11,7 @@ WHAT / SEAM: two independent layers, both fail-closed.
 2. Law hooks (enforcement.py `Enforcement`): bundle/tools/*.py modules exposing `pre_task(message)` and/or `post_draft(draft)`, loaded at boot, run by Agent.handle_task around the model loop. kobo stages these files ("Tooling door"); the operator tool lane writes more into `<memory.home>/tools-overlay/`.
 OPS / FLOW: handle_task → system-task markers dispatched first (see a2a-wire) → if Enforcement.locked: FAILED 703 → run_pre_task (block → 703; notices → system prompt) → memory recall → Agent._messages (system = persona + a `## Clock` section holding `Current time (UTC): <Weekday> <ISO>` plus `Yesterday:` and `Past week:` lines, all from one pod-clock reading per task, then a state-today's-date-first instruction, #171/#175/#181/#184, ahead of the skills index so it never reads as a skill, #173 + skills index + recalled context + notices) → _loop: allowlist (a provider raising → FAILED "tool provider unavailable"; a ToolProviderRefused inside MultiToolProvider drops that provider's tools instead, + prompt note, event tool_provider_refused; #156) → withhold gated tools when approver is DenyAll (+ prompt note, event tools_withheld) → withhold colleagues.ask_colleague when inbound cabal_delegation_depth ≥ 1 (+ prompt note, event colleague_ask_withheld_inbound; #149) → engine → call_tool: not in allowed set → "error: unknown or disallowed tool"; gate denies → "blocked: … requires approval"; provider exception → "tool error: …" → run_post_draft (block → discard draft from history, 703; else text replaced by hook output; the learnings operator lane runs its JSON reply through post_draft too, #142) → append "_(consulted: …)_" if colleagues were asked but unnamed.
 INVARIANTS:
+- Agent._call_tool turns a provider's Exception into a `tool error:` result but lets CancelledError through, so the task deadline (#201, Agent._loop) cancels a running tool call. Never widen it to BaseException.
 - Empty `tools.allow` = no tools at all. The model never sees a tool it can't call; a hallucinated name misses the map.
 - DenyAll is the default approver. Only `chat` (CliApprover) and SlackTransport._wire_approver replace it; headless `run`/a2a stay denied. Approver is process-wide: a Slack-wired approver also gates calls arriving over a2a or cli (design.md §3, by design).
 - Unapprovable gated tools are WITHHELD, not offered-then-refused (#105): a model refused every time retries a refusal it can't understand.

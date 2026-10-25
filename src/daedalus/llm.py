@@ -73,9 +73,12 @@ class LiteLLMClient:
         max_tokens: int = 8192,
         api_base: str | None = None,
         api_key: str | None = None,
+        timeout: float | None = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
+        # Seconds per call (#201). None leaves litellm's own default, 6000 s.
+        self.timeout = timeout
         self.api_base = api_base
         # Local OpenAI-compatible servers ignore the key but litellm demands
         # one (finding #21: spawned agents lack the operator's shell env) —
@@ -103,6 +106,8 @@ class LiteLLMClient:
             kwargs["api_key"] = self.api_key
         if tools:
             kwargs["tools"] = tools
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
         try:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:
