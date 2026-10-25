@@ -35,6 +35,15 @@ Issue and pull request numbers all refer to this repository, written in full.
   bundle whose tasks legitimately run longer must raise `task_timeout`. Both fields are
   new in `docs/bundle.schema.json`, so a copy vendored elsewhere (kobo) needs
   re-vendoring to accept them.
+- **`POST /a2a/tasks` with an id the agent already holds now returns 409.** It used to
+  replace the stored task. cabal and kobo mint a fresh id for every dispatch, so they are
+  unaffected; a caller that reuses ids must send a new one. This applies with or without
+  `auth`.
+- **With `auth`, a task answers only to the sub that created it.** `tasks/get` and a
+  `message/send` continuation from any other sub, or from a token with no sub, get the
+  same error as an unknown id. cabal's re-mint copies the caller's sub, so a person or
+  kobo continuing its own task through cabal is unaffected. Without `auth`, every task
+  stays visible to every caller, as before.
 
 ### Changed
 
@@ -53,6 +62,12 @@ Issue and pull request numbers all refer to this repository, written in full.
   service token minted for something else could deliver a tool file, which the agent runs
   as itself at its next boot. The code and docs no longer call the tool file's
   import-statement check validation: it is a lint, and `__import__("os")` passes it.
+- **a2a tasks belong to the caller that created them** (issue #197). Any token cabal
+  minted for the agent's audience could read another caller's task with `tasks/get`,
+  append a turn to it with `message/send`, or replace it through `POST /a2a/tasks` with
+  the same id, so an agent-to-agent token could read a human operator's conversation.
+  The transport now records the verified sub on each stored task and answers other subs
+  as if the task did not exist, and refuses a repeated id with 409.
 
 ### Fixed
 
