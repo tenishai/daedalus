@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
 updated: 2026-10-24
-anchor: src/daedalus/bundle.py sha=602aebdcd9a2936173aa14433d8f6916d408508b
-anchor: docs/bundle.schema.json sha=cd168a06c24b9516f3003baf9c7cdba6066a705e
+anchor: src/daedalus/bundle.py sha=062b21741f2edc2b12a3786d940990c6c5598228
+anchor: docs/bundle.schema.json sha=2ac6b45cdbc72d1676cbfdc4f79db007499ff137
 ---
 # bundle — agent.yaml schema and the bundle directory
 
@@ -19,6 +19,7 @@ INVARIANTS:
 - Slack transport: `channel` key present but empty → BundleError (a typo must not open the widest reach); key omitted → every invited channel. All slack blocks fold into ONE SlackTransport (Socket Mode delivers each event to one connection).
 - model.id as a tier (#127, #129) resolves at Agent construction from the deployment's tiers file ($DAEDALUS_TIERS, tiers.py): the entry fills model.id, the endpoint fields, max_tokens/request_timeout, context_tokens/max_repeats and the claude-code model, never overriding a value the bundle set; no tiers file → BundleError. The old model.tier/min_tier keys are refused with a pointer to model.id.
 - tools.builtin groups are `files` and `exec`; exec loads only with approvals.ceiling.exec: true (agent.py), anything else is a BundleError.
+- tools.salvage_text_calls (#200): None = on only when model.api_base is set; salvage reads only JSON inside <tool_call>/<tools> tags (engines/litellm.py).
 - Fields validated at load so a typo fails the bundle: slack `approvers` (list of U…/W… user ids), slack `wake` (mention|thread|channel; every slack block must agree), github.branch_prefix (a valid git ref component, default "daedalus"), memory.team (only "none"; "outbox" is refused because it was never built).
 - The schema lets `${VAR}` / `${VAR:-default}` placeholders stand in for enum, integer, number and boolean leaves (#132), so an editor accepts what interpolate() will expand.
 - Golden bundles tests/golden/<name>/ are fixtures AND worked examples; new format features want one.

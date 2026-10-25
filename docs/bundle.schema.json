@@ -754,6 +754,22 @@
           ],
           "default": null,
           "title": "Max Repeats"
+        },
+        "salvage_text_calls": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Salvage Text Calls"
         }
       },
       "title": "ToolsSpec",

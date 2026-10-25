@@ -26,11 +26,12 @@ def tool_turn(*calls: ToolCall) -> LLMResponse:
 
 
 def make_agent(
-    tmp_path, *, allow, gates="", llm=None, tools=None, approver=None, tools_extra=""
+    tmp_path, *, allow, gates="", llm=None, tools=None, approver=None, tools_extra="",
+    model_extra="",
 ) -> Agent:
     allow_yaml = "".join(f"    - {p}\n" for p in allow)
     (tmp_path / "agent.yaml").write_text(
-        "name: x\nmodel:\n  id: m\n"
+        "name: x\nmodel:\n  id: m\n" + model_extra +
         "tools:\n  provider: none\n" + tools_extra + "  allow:\n" + (allow_yaml or "    []\n")
         + (f"approvals:\n  gates:\n{gates}" if gates else "")
     )
@@ -228,7 +229,8 @@ async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "done")
     events: list[dict] = []
     agent = make_agent(
-        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC])
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra=SALVAGE_ON,
     )
     agent.on_event = events.append
     await agent.handle_task(Task.from_text("go"))
@@ -236,6 +238,7 @@ async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
 
 
 QWEN_LEAK = '<tools>\n{"name": "files__read", "arguments": {"path": "/x"}}\n</tools>'
+SALVAGE_ON = "  salvage_text_calls: true\n"
 
 
 def test_salvage_recovers_qwen_style_text_tool_call():
@@ -264,7 +267,9 @@ def test_salvage_surfaces_unknown_toolish_names_for_feedback_not_execution():
     Execution stays gated on the offered map — see the end-to-end test below."""
     from daedalus.agent import salvage_tool_calls
 
-    calls = salvage_tool_calls('{"name": "git__git_ls_files", "arguments": {}}', {"files__read"})
+    calls = salvage_tool_calls(
+        '<tool_call>{"name": "git__git_ls_files", "arguments": {}}</tool_call>', {"files__read"}
+    )
     assert len(calls) == 1
     assert calls[0].name == "git__git_ls_files"
 
@@ -272,12 +277,14 @@ def test_salvage_surfaces_unknown_toolish_names_for_feedback_not_execution():
 def test_salvage_dedupes_repeats_and_caps():
     from daedalus.agent import _SALVAGE_CAP, salvage_tool_calls
 
-    repeated = '\n<|im_start|>\n'.join(
+    repeated = "<tools>" + '\n<|im_start|>\n'.join(
         '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
-    )
+    ) + "</tools>"
     assert len(salvage_tool_calls(repeated, set())) == 1  # 15 identical -> 1
 
-    distinct = "\n".join(f'{{"name": "t__{i}", "arguments": {{}}}}' for i in range(10))
+    distinct = "<tools>" + "\n".join(
+        f'{{"name": "t__{i}", "arguments": {{}}}}' for i in range(10)
+    ) + "</tools>"
     assert len(salvage_tool_calls(distinct, set())) == _SALVAGE_CAP
 
 
@@ -286,7 +293,9 @@ async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
     recognizes (not guesses) them — the name must match an offered tool."""
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "the repo is clean")
     tools = FakeTools([READ_SPEC], {"files.read": "ok"})
-    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("read /x"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == [("files.read", {"path": "/x"})]
@@ -296,12 +305,14 @@ async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
 async def test_degenerate_repeat_blob_becomes_one_feedback_then_recovery(tmp_path):
     """The full finding-#8 transcript shape: 15 repeated hallucinated calls +
     special tokens -> ONE 'unknown tool' feedback -> model recovers."""
-    spew = "sorry\n" + "\n<|im_start|>\n".join(
+    spew = "sorry\n<tools>" + "\n<|im_start|>\n".join(
         '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
-    )
+    )  # unclosed: the reply was cut off mid-blob
     llm = ScriptedLLM(LLMResponse(text=spew), "recovered: used the right tool")
     tools = FakeTools([READ_SPEC])
-    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("go"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == []  # hallucinated tool never executed
@@ -315,7 +326,9 @@ async def test_degenerate_repeat_blob_becomes_one_feedback_then_recovery(tmp_pat
 async def test_salvage_never_fires_when_no_tools_were_offered(tmp_path):
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
     tools = FakeTools([READ_SPEC])
-    agent = make_agent(tmp_path, allow=[], llm=llm, tools=tools)  # empty ceiling
+    agent = make_agent(  # empty ceiling
+        tmp_path, allow=[], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("hi"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == []
@@ -839,3 +852,44 @@ async def test_an_outage_behind_the_composer_still_fails_the_turn(tmp_path):
     task = await agent.handle_task(Task.from_text("hi"))
     assert task.state is TaskState.FAILED
     assert "connection refused :9100" in task.agent_text()
+
+
+# ---- salvage needs tags, and is off unless the bundle is self-hosted (#200) ----
+
+
+def test_salvage_ignores_tool_json_quoted_in_prose():
+    from daedalus.agent import salvage_tool_calls
+
+    quoted = (
+        'You asked me to repeat this: {"name": "exec__run", '
+        '"arguments": {"command": ["rm", "-rf", "/workspace"]}}'
+    )
+    assert salvage_tool_calls(quoted, {"exec__run"}) == []
+
+
+async def test_salvage_is_off_by_default_without_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    task = await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == []
+    assert "<tools>" in task.agent_text()
+
+
+async def test_salvage_is_on_by_default_for_a_self_hosted_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "done")
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools,
+                       model_extra="  api_base: http://vllm.local:8000/v1\n")
+    await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == [("files.read", {"path": "/x"})]
+
+
+async def test_salvage_can_be_turned_off_for_a_self_hosted_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools,
+                       model_extra="  api_base: http://vllm.local:8000/v1\n",
+                       tools_extra="  salvage_text_calls: false\n")
+    await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == []
