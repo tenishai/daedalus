@@ -102,8 +102,9 @@ Issue and pull request numbers all refer to this repository, written in full.
 - **The files builtin and the checkpoint store no longer block the event loop**
   (tenishai/daedalus issue #205). A `files.search` over a large root, a large read or a
   sqlite checkpoint write ran on the loop and stalled every other coroutine, `/healthz`
-  included. They run on a worker thread now, and `files.search` stops after 10 seconds
-  with a note saying so. A regex with catastrophic backtracking on one line is still not
+  included. They run on a worker thread now, and `files.search` stops after 10 seconds,
+  walk included, with a note saying how many files it searched and that a missing match is
+  not an absent one. A regex with catastrophic backtracking on one line is still not
   bounded.
 - **Under auth, a reused `contextId` no longer replaces another caller's journal row**
   (tenishai/daedalus issue #212). The journal kept one row per `context_id`, and a fresh

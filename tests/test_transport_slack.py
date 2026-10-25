@@ -2031,3 +2031,16 @@ def test_a_model_chosen_tool_name_cannot_carry_angle_brackets():
 
     line = _progress_line({"type": "tool_call", "name": "<!channel>.x", "arguments": {}})
     assert "<" not in line and ">" not in line
+
+
+async def test_the_message_path_keeps_threads_bounded(monkeypatch):
+    """#202, PR 219 review: drive the real event path, not the helper alone."""
+    from daedalus.transports import slack
+
+    monkeypatch.setattr(slack, "_THREAD_CAP", 3)
+    transport, api, handler = make()
+    for i in range(5):
+        await transport.handle_event(event(f"m{i}", ts=f"{100 + i}.0"), handler)
+    assert len(transport._threads) == 3
+    assert (CH, "100.0") not in transport._threads
+    assert (CH, "104.0") in transport._threads

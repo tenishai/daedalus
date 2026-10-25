@@ -471,3 +471,30 @@ async def test_search_stops_at_its_wall_clock_and_says_so(root, monkeypatch):
     provider = FilesToolProvider(roots=[str(root)])
     out = await provider.call("files.search", {"pattern": "needle"})
     assert "stopped after" in out
+
+
+async def test_the_wall_clock_bounds_the_directory_walk(root, monkeypatch):
+    """PR 219 review: _walk walked the whole root before yielding anything, so the
+    deadline never bounded it, and a glob that matched nothing got no note."""
+    import os
+    import time
+
+    from daedalus.tools import builtin
+
+    for d in ("a", "b", "c", "d"):
+        (root / d).mkdir()
+        (root / d / "f.txt").write_text("needle\n")
+    real_walk = os.walk
+
+    def slow_walk(top, *a, **k):
+        for entry in real_walk(top, *a, **k):
+            time.sleep(0.2)
+            yield entry
+
+    monkeypatch.setattr(builtin.os, "walk", slow_walk)
+    monkeypatch.setattr(builtin, "_SEARCH_SECONDS", 0.3)
+    provider = FilesToolProvider(roots=[str(root)])
+    started = time.monotonic()
+    out = await provider.call("files.search", {"pattern": "needle", "glob": "*.md"})
+    assert time.monotonic() - started < 0.8
+    assert "stopped after" in out and "not an absent one" in out
