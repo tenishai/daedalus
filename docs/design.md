@@ -133,11 +133,11 @@ approvals:
     exec: true                          # required when tools.builtin.exec is set, or the
                                         # bundle won't load; commands run as the agent in
                                         # its container (not a security boundary)
-  gates:                                # tier 2 — plan/diff/apply
+  gates:                                # tier 2 — approval before the call
     - match: "github.pr_merge"
       require: plan_approval
   escalation:                           # tier 3 — human in the loop
-    route: slack:#pr-reviews            # or: cli, webhook:<url>
+    route: slack:#pr-reviews            # only slack: routes are acted on
 ```
 
 Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
@@ -435,13 +435,16 @@ FastAPI stays at the edge: nothing below a transport imports it.
    `approvals.ceiling.exec` is checked once, at load: without `true`, a bundle
    that configures `tools.builtin.exec` fails to load. `approvals.ceiling.write`
    and `approvals.ceiling.hosts` are parsed but not yet enforced anywhere.
-2. **Gates** (plan/diff/apply, tier 2): a matched operation is first turned
-   into a plan, `{tool, arguments, require}` with the call's full arguments
-   (agent.py), and nothing is masked: the Slack approver posts the arguments
-   verbatim, so a gate on a tool that takes a secret shows it to the approval
-   channel. The `Approver` presents it (CLI prompt, Slack message, or PR when the effect targets a
-   repo — "the PR is the approval") and only then executes. Dry-run is the
-   default posture for anything matched.
+2. **Gates** (tier 2): a matched operation is first turned into a plan,
+   `{tool, arguments, require}` with the call's full arguments (agent.py),
+   and nothing is masked: the Slack approver posts the arguments verbatim,
+   so a gate on a tool that takes a secret shows it to the approval channel.
+   The `Approver` decides: `CliApprover` asks at the terminal,
+   `SlackReactionApprover` waits for a reaction from a listed approver, and
+   the default `DenyAll` refuses, so with it a matched tool is withheld from
+   the model altogether (`_unapprovable`, #105). On a yes the tool runs for
+   real. Nothing runs in dry-run, no diff is rendered, and no approver defers
+   to a pull request; `require` travels in the plan but nothing reads it.
 3. **Escalation** (tier 3): a task the runtime can't finish (a deadline, a
    down tool provider, an engine error) ends `failed` with reason 704 in its
    metadata, and the transport carries it to a human: Slack replies with the
