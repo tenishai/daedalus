@@ -721,6 +721,7 @@ class Agent:
                 journal.journal_path(Path(db_path)),
                 task.context_id or task.id,
                 entries,
+                owner=task.metadata.get(VERIFIED_SUB_KEY),
             )
         except Exception as exc:
             return str(exc)

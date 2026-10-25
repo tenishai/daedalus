@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-10-24
 anchor: pyproject.toml sha=fafaad90863050c4ab8cf5f4c033cbc8d0a633b7
-anchor: src/daedalus/agent.py sha=bae6b94be57bcd29a8e25e2d584862f99e0c8c11
+anchor: src/daedalus/agent.py sha=679dccfa7d5aac1e84b93fa23c54cd06c4ae33b5
 ---
 # daedalus — repo card
 
@@ -23,7 +23,7 @@ SEAMS → card:
 - (uncarded) transports/slack.py (Socket Mode; reaction approver; one transport for all slack blocks); transports/cli.py
 - (uncarded) tiers.py (the deployment's tiers file: tier word → model, endpoint, engine, limits)
 - (uncarded) tools/*: builtin files.* and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
-- (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes; teach_authorized is an allowlist, `auth.operator_subs`, #195), journal.py (7-day journal.db), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file lint; not a sandbox: a delivered file runs as the agent at next boot, #195)
+- (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes; teach_authorized is an allowlist, `auth.operator_subs`, #195), journal.py (7-day journal.db, one row per (context_id, verified sub), #212), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file lint; not a sandbox: a delivered file runs as the agent at next boot, #195)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 
 DEPS: no hard runtime dep on any sibling. Optional: techne (memory.personal: techne; docker/seeder.py), liminal (tools.provider liminal or tools.liminal.url). Called by cabal (POST /a2a/tasks, JWT from cabal JWKS, reason codes in metadata.cabal_reason_code), kobo (composes bundles, drives teach/knowledge/tool/learnings lanes through cabal), kaminos (GET /events SSE; bearer token required when the a2a transport has `auth`, content fields redacted unless DAEDALUS_TRACE_CONTENT=1, #196). tenishai/agents#51 is the engine-seam design issue.

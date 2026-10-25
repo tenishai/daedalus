@@ -93,6 +93,13 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Fixed
 
+- **Under auth, a reused `contextId` no longer replaces another caller's journal row**
+  (tenishai/daedalus issue #212). The journal kept one row per `context_id`, and a fresh
+  `message/send` takes the caller's `contextId`, so sub B could send A's id and replace A's
+  row, which is the learnings summarizer's source. Rows now carry the task's verified sub,
+  and the upsert replaces only a row with the same `context_id` and owner. Without auth
+  every owner is empty and nothing changes; an existing `journal.db` gains the column in
+  place.
 - **`docs/design.md` §3 no longer claims three security properties the code doesn't have**
   (tenishai/daedalus issue #203). Gate plans carry the call's full arguments and the Slack
   approver posts them verbatim; nothing parks a task in `input-required`; and core has no
