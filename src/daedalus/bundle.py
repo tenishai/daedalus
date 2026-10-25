@@ -306,6 +306,12 @@ class ToolsSpec(_WarnExtra):
     # a note on its result. The stop is handled like running out of steps, so
     # on_exhausted applies. None = no limit.
     max_repeats: int | None = Field(default=None, ge=2)
+    # Run tool calls the model wrote as text inside <tool_call> or <tools> tags,
+    # for models served without native tool calling (Qwen on vLLM). None = on only
+    # when model.api_base is set (a self-hosted endpoint). Text salvage skips the
+    # model's own decision to call, so a reply quoting a caller's tagged JSON runs
+    # it (#200); turn it off for a self-hosted model that calls tools natively.
+    salvage_text_calls: bool | None = None
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only

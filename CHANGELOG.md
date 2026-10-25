@@ -8,6 +8,16 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Upgrading
 
+- **Text tool calls are salvaged only inside tags, and only for self-hosted models by
+  default** (tenishai/daedalus issue #200). The litellm engine used to run any tool-shaped
+  JSON it found in a reply, including JSON the model only quoted, so a caller could ask
+  the model to repeat `{"name": "exec__run", ...}` and have it run, skipping the model's
+  own decision to call. Salvage now reads only JSON inside `<tool_call>` or `<tools>` tags,
+  and it runs only when the new `tools.salvage_text_calls` is true. Unset, it is on when
+  `model.api_base` is set (a self-hosted endpoint such as vLLM) and off otherwise. A
+  self-hosted model that leaks bare JSON outside tags is no longer salvaged; its reply comes
+  back as text. `docs/bundle.schema.json` gains the field, so a vendored copy (kobo)
+  needs re-vendoring to accept it.
 - **`GET /events` needs a token when the a2a transport has `auth`.** Send the same
   `Authorization: Bearer <cabal-minted JWT>` the POST routes take (same issuer and
   audience); without it the route returns 401. Bundles with no `auth` block are unchanged.

@@ -10,6 +10,7 @@ gates and provider.
 from __future__ import annotations
 
 import json
+import re
 
 from daedalus.engines.base import EngineTurn
 from daedalus.protocols import LLM, ToolCall
@@ -57,11 +58,25 @@ def _json_objects(text: str):
         index = start + max(consumed, 1)
 
 
+# Only JSON inside these tags is salvaged (#200): a reply that quotes tool-shaped
+# JSON in prose ("you asked me to repeat this: {...}") is the model talking, not
+# calling. An unclosed tag runs to the end of the reply (a cut-off answer).
+_TAGGED = re.compile(r"<(tool_call|tools)>(.*?)(?:</\1>|\Z)", re.S)
+
+
+def salvage_enabled(spec) -> bool:
+    """tools.salvage_text_calls, or on by default only for a self-hosted endpoint."""
+    if spec.tools.salvage_text_calls is not None:
+        return spec.tools.salvage_text_calls
+    return bool(spec.model.api_base)
+
+
 def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
     """Recover tool calls that local models emit as text instead of structure.
 
     (Qwen-Coder on vLLM writes {"name": ..., "arguments": ...} inside <tools>
     tags — mimicking the definition format — so the server parser misses it.)
+    Only JSON inside <tool_call> or <tools> tags counts (#200).
 
     Known names get executed. Unknown-but-tool-shaped names (containing '__'
     or '.') are salvaged too so the loop answers with 'unknown tool' feedback
@@ -73,7 +88,8 @@ def salvage_tool_calls(text: str, known: set[str]) -> list[ToolCall]:
     """
     calls: list[ToolCall] = []
     seen: set[tuple] = set()
-    for obj in _json_objects(text):
+    tagged = (m.group(2) for m in _TAGGED.finditer(text))
+    for obj in (o for span in tagged for o in _json_objects(span)):
         name, args = obj.get("name"), obj.get("arguments")
         if not isinstance(name, str) or not isinstance(args, dict):
             continue
@@ -184,7 +200,7 @@ class LiteLLMEngine:
             if response.reasoning:
                 emit("reasoning", text=response.reasoning)
             tool_calls = response.tool_calls
-            if not tool_calls and llm_tools:
+            if not tool_calls and llm_tools and salvage_enabled(spec):
                 tool_calls = salvage_tool_calls(response.text, set(by_munged))
                 if tool_calls:
                     emit("salvage", count=len(tool_calls))
