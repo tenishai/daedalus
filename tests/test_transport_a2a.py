@@ -347,3 +347,37 @@ def test_taskid_continuation_never_refeeds_a_blocked_draft_to_the_model(tmp_path
         "the secret is 42" in (message.get("content") or "")
         for message in second_turn_messages
     )
+
+
+# ---- the boot line states the auth regime; an open listener warns (#204) ----
+
+
+def test_listening_line_names_the_auth_regime():
+    from daedalus.transports.a2a import A2aTransport
+
+    assert A2aTransport(host="0.0.0.0", port=8080).listening_line() == (
+        "(a2a listening on 0.0.0.0:8080, NO AUTH)"
+    )
+    with_auth = A2aTransport(host="0.0.0.0", port=8080, verifier=object())
+    assert with_auth.listening_line() == "(a2a listening on 0.0.0.0:8080, JWT auth)"
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "10.0.0.5", "::", "agent.svc"])
+def test_no_auth_on_a_reachable_address_warns(host):
+    from daedalus.transports.a2a import A2aTransport
+
+    warning = A2aTransport(host=host).open_warning()
+    assert warning and "no auth" in warning
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
+def test_no_auth_on_loopback_does_not_warn(host):
+    from daedalus.transports.a2a import A2aTransport
+
+    assert A2aTransport(host=host).open_warning() is None
+
+
+def test_auth_on_any_address_does_not_warn():
+    from daedalus.transports.a2a import A2aTransport
+
+    assert A2aTransport(host="0.0.0.0", verifier=object()).open_warning() is None

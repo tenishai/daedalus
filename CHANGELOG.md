@@ -8,6 +8,13 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Upgrading
 
+- **`tools.builtin.files` refuses roots that serve the host** (tenishai/daedalus issue
+  #199). `roots: ["/"]` used to load, and `files.read` then served `/proc/self/environ`,
+  the agent's whole environment, to anyone who could message it. A root is now refused at
+  load, with a `BundleError` naming it, when it is `/`, at or under `/proc`, `/sys`, `/dev`,
+  `/run` or `/etc`, `$HOME` or any directory above it, or at or under `$TECHNE_HOME`.
+  Symlinks are resolved first. A bundle with such a root fails to boot until the root names
+  a workspace directory.
 - **Text tool calls are salvaged only inside tags, and only for self-hosted models by
   default** (tenishai/daedalus issue #200). The litellm engine used to run any tool-shaped
   JSON it found in a reply, including JSON the model only quoted, so a caller could ask
@@ -57,6 +64,11 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Changed
 
+- **The a2a boot line names its auth regime, and an open listener warns** (tenishai/daedalus
+  issue #204). The line now reads `(a2a listening on 0.0.0.0:8080, NO AUTH)` or `..., JWT
+  auth)`, and with no `auth` block on an address other than loopback the runtime also prints
+  a WARNING to stderr: anyone who can reach the port can send it tasks. It does not refuse
+  to start, because kobo writes no `auth` block when cabal isn't configured.
 - **CI runs `scripts/check_arch_cards.py`** in the `test` and `fork-pr` jobs (issue
   #206), so a change to an anchored file without its architecture card fails the build
   instead of merging.

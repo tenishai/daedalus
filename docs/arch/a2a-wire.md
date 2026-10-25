@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-a2a-wire
 updated: 2026-10-24
-anchor: src/daedalus/transports/a2a.py sha=47fd40507cfea22c56dda8205fbc8004f41e3d8c
+anchor: src/daedalus/transports/a2a.py sha=f5815a023db2cb425ca0d0531d42424b5ed2c48c
 anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
 anchor: src/daedalus/memory/teach.py sha=dcc9b07197940bffe93d8b06be73b5d9744d0398
 ---
@@ -26,5 +26,6 @@ INVARIANTS:
 - Task store is an in-process dict: tasks/get and taskId continuation do not survive restart.
 - A handler that raises or is cancelled leaves its stored task FAILED with reason 704 (a2a.run_handler / mark_failed, #201), never WORKING; the response is unchanged (500 `agent error: ...` on /a2a/tasks, -32000 on JSON-RPC). A run past the bundle's task_timeout comes back as an ordinary FAILED 704 task (Agent._loop), so it answers 200.
 - Task ownership (#197): each stored task records the sub that created it, in a dict beside the task (`owners`), not in its metadata, so a handler cannot change it. With a verifier, `tasks/get` and taskId continuation succeed only for that same sub; another sub, or a token with no sub, gets the unknown-id error, so on those two paths another caller's id is indistinguishable from a missing one. POST /a2a/tasks is not: its 409 tells any caller that an id exists. cabal's re-mint copies the caller's sub verbatim (cabal routes/_dispatch_auth.py), so the same person or kobo continuing through cabal keeps working. No verifier → no owner check, every task visible (unchanged). POST /a2a/tasks refuses an id already stored with 409, with or without auth: the id is the caller's choice, and cabal (uuid4 per hop) and kobo (`chat-<uuid>`) never reuse one.
+- Boot line (#204): `A2aTransport.listening_line()` names the regime (`JWT auth` / `NO AUTH`); `open_warning()` prints a stderr WARNING when there is no verifier and the host is not loopback (the image binds 0.0.0.0). It warns, it does not refuse: kobo writes no auth block when cabal_url is unset.
 CONSUMERS: cabal (dispatch + JWT mint + reason codes), kobo (operator lanes via cabal's re-mint; mirrors teach's filename regex), kaminos (/events; its proxy, kaminos_api/agents.py event_stream, sends no token, so the trace pane only works against bundles without `auth`, the same limit its test chat already has; it reads `arguments`/`content`/`text`, which are now absent unless DAEDALUS_TRACE_CONTENT=1), tools/colleagues.py (daedalus agents asking each other through the switchboard). Tests: tests/test_transport_a2a.py, test_transport_a2a_auth.py, test_transport_a2a_ownership.py, test_agent_teach.py (techne-gated).
 API: build_a2a_app, A2aTransport(card, host, port, events, verifier), task_to_a2a, task_from_a2a, stamp_verified_sub; task.{Task, Message, TaskState, ReasonCode, REASON_KEY, CABAL_REASON_KEY, VERIFIED_SUB_KEY, RECALL_KEY}.

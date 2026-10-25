@@ -380,3 +380,55 @@ async def test_hidden_coverage_does_not_depend_on_root_order(tmp_path):
         files = FilesToolProvider(roots)
         out = await files.call("files.search", {"pattern": "needle", "path": str(inner / "x")})
         assert out == f"{inner / 'x' / '.h.txt'}:1: needle", roots
+
+
+# ---- roots that serve the host, not a workspace, are refused (#199) ----------
+
+
+@pytest.mark.parametrize("bad", ["/", "/proc", "/proc/self", "/sys", "/dev", "/run", "/etc"])
+def test_system_roots_are_refused_at_load(bad):
+    with pytest.raises(ValueError, match="refused"):
+        FilesToolProvider(roots=[bad])
+
+
+def test_home_and_its_ancestors_are_refused(tmp_path, monkeypatch):
+    home = tmp_path / "home" / "agent"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    for bad in (home, home.parent, tmp_path):
+        with pytest.raises(ValueError, match=r"\$HOME"):
+            FilesToolProvider(roots=[str(bad)])
+    (home / "work").mkdir()
+    FilesToolProvider(roots=[str(home / "work")])  # a directory inside $HOME is fine
+
+
+def test_techne_home_and_inside_it_are_refused(tmp_path, monkeypatch):
+    store = tmp_path / "techne"
+    (store / "sub").mkdir(parents=True)
+    monkeypatch.setenv("TECHNE_HOME", str(store))
+    for bad in (store, store / "sub"):
+        with pytest.raises(ValueError, match="TECHNE_HOME"):
+            FilesToolProvider(roots=[str(bad)])
+    FilesToolProvider(roots=[str(tmp_path / "elsewhere")])  # a sibling is fine
+
+
+def test_a_symlink_to_a_system_dir_is_refused(tmp_path):
+    link = tmp_path / "innocent"
+    link.symlink_to("/etc")
+    with pytest.raises(ValueError, match="system directory"):
+        FilesToolProvider(roots=[str(link)])
+
+
+async def test_a_refused_root_is_a_bundle_error_naming_the_group(tmp_path):
+    from daedalus.agent import Agent
+    from daedalus.bundle import Bundle, BundleError
+    from tests.fakes import ScriptedLLM
+
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntools:\n  provider: none\n"
+        "  builtin:\n    files:\n      roots: ['/']\n  allow: [files.read]\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("You are x.")
+    with pytest.raises(BundleError, match=r"tools\.builtin\.files: root '/' is refused"):
+        Agent(Bundle.load(tmp_path), llm=ScriptedLLM("hi"))

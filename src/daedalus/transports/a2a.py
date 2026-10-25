@@ -19,8 +19,10 @@ not verify cards on dispatch). Requires the a2a extra: pip install
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
+import sys
 
 from fastapi import FastAPI, Request  # module imported only when the extra is present
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -399,5 +401,33 @@ class A2aTransport:
             handler, card=self.card, events=self.events, verifier=self.verifier
         )
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
-        print(f"(a2a listening on {self.host}:{self.port})")
+        print(self.listening_line())
+        warning = self.open_warning()
+        if warning:
+            print(warning, file=sys.stderr)
         await uvicorn.Server(config).serve()
+
+    def listening_line(self) -> str:
+        """The boot line, with the auth regime in force (#204)."""
+        regime = "JWT auth" if self.verifier is not None else "NO AUTH"
+        return f"(a2a listening on {self.host}:{self.port}, {regime})"
+
+    def open_warning(self) -> str | None:
+        """A warning when anyone who can reach the port can drive the agent (#204):
+        no auth on an address other than loopback, e.g. the image's 0.0.0.0."""
+        if self.verifier is not None or _is_loopback(self.host):
+            return None
+        return (
+            f"WARNING: a2a serves {self.host}:{self.port} with no auth. Anyone who can "
+            "reach this port can send tasks, with every tool the allowlist admits. "
+            "Add an auth block to the a2a transport in agent.yaml."
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False

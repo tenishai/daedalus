@@ -19,6 +19,35 @@ _SEARCH_FILE_BYTES = 2_000_000  # larger files are skipped, and the skip is coun
 _SEARCH_LINE_CHARS = 300
 _BINARY_SNIFF = 8192
 _SEARCH_SKIP_DIRS = {"node_modules", "__pycache__"}
+# A root at or under one of these serves the host, not a workspace (#199):
+# /proc/self/environ alone hands the model every secret in the agent's env.
+_SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/etc")
+
+
+def _refused_root(root: Path) -> str | None:
+    """Why `root` (already resolved) may not be a files root, or None if it may.
+
+    Refused: /, anything at or under a system directory, $HOME or any directory
+    above it (it holds ~/.ssh and the like), and anything at or under
+    $TECHNE_HOME (the agent's memory store). Symlinks are resolved first, so
+    /var/run and macOS's /etc (-> /private/etc) are caught too."""
+    if root == Path(root.anchor):
+        return "the filesystem root"
+    for name in _SYSTEM_DIRS:
+        system = Path(name).resolve()
+        if root == system or system in root.parents:
+            return f"{system} is a system directory"
+    home = os.environ.get("HOME")
+    if home:
+        home_path = Path(home).resolve()
+        if root == home_path or root in home_path.parents:
+            return f"it contains $HOME ({home_path})"
+    techne_home = os.environ.get("TECHNE_HOME")
+    if techne_home:
+        store = Path(techne_home).resolve()
+        if root == store or store in root.parents:
+            return f"it is inside $TECHNE_HOME ({store})"
+    return None
 
 
 class FilesToolProvider:
@@ -32,6 +61,10 @@ class FilesToolProvider:
         if not roots:
             raise ValueError("files builtin requires at least one root")
         self.roots = [Path(root).resolve() for root in roots]
+        for raw, root in zip(roots, self.roots, strict=True):
+            why = _refused_root(root)
+            if why:
+                raise ValueError(f"root {raw!r} is refused: {why}")
         # ${VAR:-default} in agent.yaml always yields a string, and this config isn't
         # schema-typed, so take "40000" as 40000 (or refuse it at load).
         try:
