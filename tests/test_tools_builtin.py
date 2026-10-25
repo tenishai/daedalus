@@ -432,3 +432,42 @@ async def test_a_refused_root_is_a_bundle_error_naming_the_group(tmp_path):
     (tmp_path / "persona.md").write_text("You are x.")
     with pytest.raises(BundleError, match=r"tools\.builtin\.files: root '/' is refused"):
         Agent(Bundle.load(tmp_path), llm=ScriptedLLM("hi"))
+
+
+# ---- off the event loop, and a wall clock on search (#205) -------------------
+
+
+async def test_a_slow_files_call_does_not_block_the_event_loop(root, monkeypatch):
+    import asyncio
+    import time
+
+    provider = FilesToolProvider(roots=[str(root)])
+
+    def slow_search(payload):
+        time.sleep(0.3)
+        return "done"
+
+    monkeypatch.setattr(provider, "_search", slow_search)
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    task = asyncio.create_task(ticker())
+    assert await provider.call("files.search", {"pattern": "x"}) == "done"
+    task.cancel()
+    assert ticks >= 5, "the loop was blocked during the search"
+
+
+async def test_search_stops_at_its_wall_clock_and_says_so(root, monkeypatch):
+    from daedalus.tools import builtin
+
+    for i in range(3):
+        (root / f"f{i}.txt").write_text("needle\n")
+    monkeypatch.setattr(builtin, "_SEARCH_SECONDS", -1.0)
+    provider = FilesToolProvider(roots=[str(root)])
+    out = await provider.call("files.search", {"pattern": "needle"})
+    assert "stopped after" in out

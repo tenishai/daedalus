@@ -42,6 +42,8 @@ from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
 _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
 _MENTION_ID = re.compile(r"<@([A-Z0-9]+)>")
 _SEEN_CAP = 500
+#: Slack threads kept in memory, least recently used dropped first (#202).
+_THREAD_CAP = 500
 
 logger = logging.getLogger(__name__)
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
@@ -783,7 +785,10 @@ class SlackTransport:
         self.escalation_route = escalation_route
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
-        self._threads: dict[tuple, Task] = {}  # (channel, thread_ts) -> Task
+        # (channel, thread_ts) -> Task, least recently used first. Bounded like
+        # `_seen` (#202): a busy agent kept every thread, images included, until
+        # the pod was OOM-killed. A thread dropped here starts a fresh Task.
+        self._threads: OrderedDict[tuple, Task] = OrderedDict()
         # Threads this agent was asked in AT THE TOP (the root message mentioned
         # it, or was a DM): in `thread` mode every reply in one of these reaches
         # the agent without a mention. A mention buried in a busy thread answers
@@ -1033,7 +1038,7 @@ class SlackTransport:
         task = self._threads.get((channel, thread))
         if task is None:
             task = Task(context_id=f"slack:{channel}:{thread}")
-            self._threads[(channel, thread)] = task
+        self._remember_thread((channel, thread), task)
         task.metadata[SLACK_WAKE_KEY] = self.wake
         # Snapshotted so a handler exception below can roll the appended
         # turn back out -- otherwise a rejected/failing message (its image
@@ -1106,7 +1111,7 @@ class SlackTransport:
         )
         try:
             task = await handler.handle_task(task)
-            self._threads[(channel, thread)] = task
+            self._remember_thread((channel, thread), task)
             ok = task.state is TaskState.COMPLETED
             reply = task.agent_text() or "(no reply)"
         except Exception as exc:
@@ -1147,6 +1152,12 @@ class SlackTransport:
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, channel)
+
+    def _remember_thread(self, key: tuple, task: Task) -> None:
+        self._threads[key] = task
+        self._threads.move_to_end(key)
+        while len(self._threads) > _THREAD_CAP:
+            self._threads.popitem(last=False)
 
     def _addressed_to_us(self, event: dict) -> bool:
         """An app_mention, a DM, or a message whose text mentions this bot."""

@@ -23,6 +23,7 @@ import ipaddress
 import json
 import os
 import sys
+from collections import OrderedDict
 
 from fastapi import FastAPI, Request  # module imported only when the extra is present
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -191,14 +192,24 @@ async def sse_stream(events: EventBus, content: bool = False):
         events.unsubscribe(queue)
 
 
+#: Tasks one a2a app keeps in memory (#202); only finished ones are evicted.
+MAX_STORED_TASKS = 1000
+_FINISHED = frozenset({TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELED})
+
+
 def build_a2a_app(
     handler: Handler,
     card: dict | None = None,
     events: EventBus | None = None,
     verifier=None,
     trace_content: bool | None = None,
+    max_tasks: int = MAX_STORED_TASKS,
 ) -> FastAPI:
     """Separable from serving so tests drive it with a TestClient.
+
+    `max_tasks` bounds the in-memory task store (#202): past it, the least
+    recently stored FINISHED tasks are dropped, with their owner records. A task
+    still running is never dropped.
 
     `verifier` (a JwtVerifier, duck-typed) gates both POST surfaces and
     GET /events when present (#196); the card and healthz GETs stay open.
@@ -208,11 +219,25 @@ def build_a2a_app(
     if trace_content is None:
         trace_content = trace_content_enabled()
     app = FastAPI()
-    tasks: dict[str, Task] = {}
+    tasks: OrderedDict[str, Task] = OrderedDict()
     # task id -> the verified sub that created it (#197). Kept beside the task,
     # not in its metadata, so nothing a handler returns can change the owner.
     owners: dict[str, str | None] = {}
     lock = asyncio.Lock()
+
+    def store(task: Task) -> None:
+        """tasks[task.id] = task, most recent last, then evict (#202). Call under
+        lock. A busy agent used to keep every task it ever ran until the pod
+        was OOM-killed; finished tasks are dropped oldest first past max_tasks,
+        and a dropped id answers like an unknown one."""
+        tasks[task.id] = task
+        tasks.move_to_end(task.id)
+        excess = len(tasks) - max_tasks
+        if excess <= 0:
+            return
+        for old_id in [i for i, t in tasks.items() if t.state in _FINISHED][:excess]:
+            del tasks[old_id]
+            owners.pop(old_id, None)
 
     def caller_sub(claims: dict | None) -> str | None:
         sub = (claims or {}).get("sub")
@@ -304,7 +329,7 @@ def build_a2a_app(
                 owners[task.id] = caller_sub(claims)
         task = await run_handler(handler, task)
         async with lock:
-            tasks[task.id] = task
+            store(task)
         return task_to_a2a(task)
 
     async def tasks_get(params: dict, claims: dict | None) -> dict:
@@ -352,7 +377,7 @@ def build_a2a_app(
         except Exception as exc:  # handler bug: readable body, not a bare 500
             return JSONResponse({"error": f"agent error: {exc}"}, status_code=500)
         async with lock:
-            tasks[task.id] = task
+            store(task)
         return task_to_a2a(task)
 
     @app.post("/")

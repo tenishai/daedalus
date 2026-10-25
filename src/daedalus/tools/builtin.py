@@ -6,9 +6,11 @@ Write access never lives here; that's gateway (liminal) territory.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 import re
+import time
 from pathlib import Path
 
 _LIST_CAP = 500
@@ -19,6 +21,7 @@ _SEARCH_FILE_BYTES = 2_000_000  # larger files are skipped, and the skip is coun
 _SEARCH_LINE_CHARS = 300
 _BINARY_SNIFF = 8192
 _SEARCH_SKIP_DIRS = {"node_modules", "__pycache__"}
+_SEARCH_SECONDS = 10.0  # wall clock for one files.search, stated when it bites
 # A root at or under one of these serves the host, not a workspace (#199):
 # /proc/self/environ alone hands the model every secret in the agent's env.
 _SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/etc")
@@ -154,6 +157,12 @@ class FilesToolProvider:
         return resolved
 
     async def call(self, name: str, payload: dict) -> str:
+        # Off the event loop (#205): a search over a large root, a big read or a
+        # slow line count used to block every other coroutine, /healthz included,
+        # long enough for the kubelet to restart the pod mid-task.
+        return await asyncio.to_thread(self._call_sync, name, payload)
+
+    def _call_sync(self, name: str, payload: dict) -> str:
         if name == "files.search":
             return self._search(payload)
         raw = payload.get("path")
@@ -219,7 +228,14 @@ class FilesToolProvider:
         hits: list[str] = []
         skipped_big = 0
         stopped = False
+        timed_out = False
+        deadline = time.monotonic() + _SEARCH_SECONDS
         for path in self._walk(starts, glob):
+            # Checked between files: a thread can't be interrupted mid-regex, so a
+            # pattern with catastrophic backtracking on one line is not bounded.
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
             try:
                 if path.stat().st_size > _SEARCH_FILE_BYTES:
                     skipped_big += 1
@@ -252,6 +268,11 @@ class FilesToolProvider:
         if skipped_big:
             notes.append(
                 f"({skipped_big} file(s) over {_SEARCH_FILE_BYTES} bytes were not searched)"
+            )
+        if timed_out:
+            notes.append(
+                f"(stopped after {_SEARCH_SECONDS:g} seconds; files after that were not "
+                "searched, so narrow the path or glob)"
             )
         if not hits:
             return "\n".join([f"no matches for {pattern!r} in {where}", *notes])
