@@ -6,6 +6,8 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-26
+
 ### Upgrading
 
 - **`tools.builtin.files` refuses roots that serve the host** (tenishai/daedalus issue
