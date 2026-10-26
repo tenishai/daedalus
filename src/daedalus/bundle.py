@@ -89,7 +89,11 @@ class ModelSpec(_WarnExtra):
     # from a hosted model and stays under kobo's 180 s relay timeout. A tier entry
     # fills it when the bundle doesn't set it. The litellm engine only: Claude Code
     # manages its own model calls.
-    request_timeout: float = Field(default=120.0, gt=0)
+    request_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description="Seconds one model call may take (litellm engine only).",
+    )
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
@@ -287,7 +291,20 @@ class ToolsSpec(_WarnExtra):
     cloudtrail: CloudTrailSpec = Field(default_factory=CloudTrailSpec)
     slack_read: SlackReadSpec = Field(default_factory=SlackReadSpec)
     jira: JiraSpec = Field(default_factory=JiraSpec)
-    builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
+    # Left an untyped dict on purpose: agent.py dispatches on the group name and passes
+    # the block to the provider as keyword args. The description is where a schema
+    # reader learns the files-root refusal (tools/builtin.py _refused_root, #199).
+    builtin: dict[str, dict] = Field(
+        default_factory=dict,
+        description=(
+            "Built-in tool groups. files: {roots: [...], max_bytes} for files.read, "
+            "files.list and files.search; exec: {roots: [...], commands, env, timeout, "
+            "max_output} for exec.run, which needs approvals.ceiling.exec: true. "
+            "A files root fails the bundle at load when it is /, at or under /proc, "
+            "/sys, /dev, /run or /etc, $HOME or a directory above it, or at or under "
+            "$TECHNE_HOME. Symlinks are resolved before the check."
+        ),
+    )
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
     max_steps: int = 10
     # When the loop runs out of steps or context (#98): "stop" replies with the
@@ -311,7 +328,13 @@ class ToolsSpec(_WarnExtra):
     # when model.api_base is set (a self-hosted endpoint). Text salvage skips the
     # model's own decision to call, so a reply quoting a caller's tagged JSON runs
     # it (#200); turn it off for a self-hosted model that calls tools natively.
-    salvage_text_calls: bool | None = None
+    salvage_text_calls: bool | None = Field(
+        default=None,
+        description=(
+            "Run tool calls written as <tool_call>/<tools> text. "
+            "null = on only when model.api_base is set."
+        ),
+    )
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only
@@ -437,7 +460,11 @@ class AgentSpec(_WarnExtra):
     # (#201). Past it the run is cancelled, tool calls included, and the task fails
     # with reason 704. Default 600 s: ten tool steps of ordinary model and tool
     # latency fit, and a stalled one still ends in minutes, not hours.
-    task_timeout: float = Field(default=600.0, gt=0)
+    task_timeout: float = Field(
+        default=600.0,
+        gt=0,
+        description="Seconds a task's engine run may take; past it the task fails 704.",
+    )
 
 
 #: The placeholder syntax `interpolate()` (above) expands, anchored to match a whole

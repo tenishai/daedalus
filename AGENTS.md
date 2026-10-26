@@ -3,6 +3,9 @@
 Instructions for AI coding agents working in this repo. Claude Code loads this via
 `CLAUDE.md` (`@AGENTS.md`); other AGENTS.md-aware tools read it directly.
 
+`daedalus guide welcome` prints the user-facing tour of daedalus and its options from the
+installed package; the guides live in `docs/` and ship via pyproject's force-include.
+
 ## Build, test, lint
 
 ```bash
@@ -60,7 +63,7 @@ right.
   `AgentSpec` field and you must run `daedalus schema --out docs/bundle.schema.json` in
   the same commit or CI fails.
 - **Operator-gate events are matched by exact name**, in the `_OPERATOR_GATE_EVENTS`
-  frozenset at `src/daedalus/cli.py:85` — deliberately not by suffix. The comment there
+  frozenset in `src/daedalus/cli.py` — deliberately not by suffix. The comment there
   records the incident (#49) where a suffix match swallowed two unrelated events. Adding a
   gate event means adding it to that set explicitly.
 - **Golden bundles are documentation.** `tests/golden/<name>/` bundles are loaded and

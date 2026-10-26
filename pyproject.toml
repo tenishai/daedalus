@@ -58,6 +58,14 @@ path = "src/daedalus/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/daedalus"]
 
+# The guides `daedalus guide` prints, copied into the package at build time so an
+# installed daedalus has them (src/daedalus/docs/__init__.py). Keep this table and
+# that module's MANIFEST in step; tests/test_guides.py checks both directions.
+# Not docs/arch/ or docs/proposals/: those are for people changing the code.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/welcome.md" = "daedalus/docs/welcome.md"
+"docs/design.md" = "daedalus/docs/design.md"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "docker"]

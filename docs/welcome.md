@@ -1,0 +1,215 @@
+# Welcome to daedalus
+
+daedalus turns a directory into a running agent: a persona, an A2A agent card and an
+`agent.yaml` wiring file. It loads that bundle, runs each turn on a model, and serves the
+agent over a terminal chat, an A2A HTTP endpoint or Slack, with tool allowlists and
+approval gates around every tool call.
+
+This guide is written for an agent explaining daedalus to its human. It ships inside the
+package, so `daedalus guide welcome` prints the copy that matches the installed version.
+
+## Where it fits
+
+daedalus runs on its own. Its base dependencies are pydantic, pyyaml, click and litellm;
+every tenish project below is optional.
+
+- **techne** (optional): personal memory. `memory.personal: techne` recalls from and
+  commits to a techne store. Needs the `techne` extra.
+- **liminal** (optional): tool gateway. `tools.provider: liminal`, or `tools.liminal.url`
+  beside another provider, reaches liminal's tools over MCP. Needs the `tenish-liminal`
+  package installed on its own; there is no daedalus extra for it.
+- **cabal** (optional): orchestration. cabal sends tasks to the a2a transport with JWTs it
+  mints, and its switchboard is what `tools.provider: colleagues` talks to.
+- **kobo** (optional): composes bundles and drives the operator lanes (teach, knowledge,
+  tool, learnings) through cabal.
+- **kaminos** (optional): reads the `/events` trace stream for its trace pane.
+
+Nothing in daedalus imports cabal, kobo or kaminos; they call it.
+
+## What it can do for you
+
+- **Make an agent in one command.** `daedalus create prudence` writes `agent.yaml`,
+  `persona.md` and `agent-card.json`. Edit the persona, then `daedalus chat ./prudence`.
+- **Talk to it locally.** `daedalus chat <bundle>` is a REPL. A human is present, so
+  tier-2 gates ask at the terminal.
+- **Get one answer from a script or CI.** `daedalus run <bundle> -m "text"` prints the
+  reply and exits 1 if the task failed. A `[usage]` line with token counts goes to stderr
+  after each run.
+- **Serve it.** `daedalus run <bundle>` serves every transport in `transports:` (a2a,
+  slack). `-v` traces tool calls, results, reasoning and model resolution.
+- **Give it tools without code.** Built-in read-only file tools, a command runner, MCP
+  servers, a liminal gateway, colleague agents, and room brokers for GitHub and Jira, all
+  set in `agent.yaml` and filtered by `tools.allow`.
+- **Validate a bundle in an editor or another language.** `daedalus schema` prints the
+  agent.yaml JSON Schema; the repo commits it as `docs/bundle.schema.json`.
+- **Teach it skills.** `skills/<id>/SKILL.md` files are listed in the system prompt and
+  loaded on demand with the `skills.load` tool (allow it in `tools.allow`).
+
+## Options
+
+### Engine: litellm or claude-code
+
+The operator picks the engine with `--engine` or `DAEDALUS_ENGINE`, never the bundle; the
+same bundle must run either way. A model tier can also name the engine (below).
+
+- **`litellm`** (default): daedalus's own loop, over any model litellm routes (Anthropic,
+  OpenAI-compatible endpoints such as vLLM or ollama). Reach for it when: you want
+  checkpoints, token budgets, `on_exhausted`, `context_tokens` and `max_repeats`, or a
+  self-hosted model.
+- **`claude-code`**: Claude Code is the agent, on Anthropic's Agent SDK. The bundle's
+  tools reach it through a loopback MCP server inside the daedalus process, so the
+  allowlist and gates still apply. Reach for it when: you want Claude Code's own loop and,
+  if you list them in `engine.claude_code.builtin_tools`, its built-ins (Read, Grep,
+  Bash). Cost: checkpoints, `on_exhausted`, `context_tokens` and `max_repeats` are not
+  honoured, `model.budget.per_task_tokens` is refused at load, and Claude Code approves
+  some built-in calls itself (read-only ones, its permission mode, the agent's own allow
+  rules) without reaching daedalus's gates. Leaving a built-in out of `builtin_tools` is
+  the only way to be sure it can't run. Needs the `claude-code` extra.
+
+### Model: a model id or a tier
+
+`model.id` is a litellm route string (`anthropic/claude-sonnet-4-5`, `openai/<name>`) or
+one of the tier words `fast`, `balanced`, `best`. A tier is looked up in the YAML file
+named by `DAEDALUS_TIERS`, which maps each tier to an engine, a model and its limits once
+per deployment. Reach for a tier when: the same bundle runs in several deployments with
+different models. Cost: with no tiers file, or a tier the file doesn't offer, the bundle
+refuses to load; an `--engine` that disagrees with the tier's engine is refused too.
+`model.api_base` and `model.api_key_env` point at an OpenAI-compatible endpoint.
+
+### Tools
+
+`tools.provider` picks one primary provider:
+
+- **`none`** (default): no remote tools. Reach for it when: the agent only talks, or uses
+  built-ins and sidecars.
+- **`mcp`**: stdio MCP servers listed in `tools.servers`, named `server.tool`. Reach for it
+  when: an MCP server already does the job. Needs the `mcp` extra.
+- **`liminal`**: the liminal gateway at `tools.liminal.url`. Reach for it when: tools and
+  their credentials should live in a gateway, not in the agent. Needs `tenish-liminal`.
+- **`colleagues`**: `list_colleagues` and `ask_colleague` against a cabal switchboard at
+  `tools.colleagues.url`. Reach for it when: this agent should ask other agents.
+
+Built-in groups, under `tools.builtin`, stack beside the provider:
+
+- **`files`** (`roots: [...]`): `files.read`, `files.list`, `files.search`, read-only and
+  confined to the roots. A root that is `/`, at or under `/proc`, `/sys`, `/dev`, `/run` or
+  `/etc`, `$HOME` or above it, or inside `$TECHNE_HOME` fails the bundle at load.
+- **`exec`**: `exec.run`, an argv command in the agent's workspace with an optional
+  `commands` allowlist, a timeout and capped output. Loads only with
+  `approvals.ceiling.exec: true`. Cost: the command runs as the agent's user and network
+  egress is not controlled, so it is not a sandbox for untrusted code.
+
+Sidecar blocks also stack beside the provider when configured: `github` and `jira` (room
+brokers), `cloudtrail` (needs the `aws` extra), `slack_read`, and `liminal.url` when
+liminal is not the primary.
+
+`tools.allow` is the ceiling: fnmatch patterns, and an empty list means no tools at all.
+
+### Approvals: three tiers
+
+1. **Ceiling.** `tools.allow` is checked when tools are listed and again at call time, so
+   the model never sees a tool it can't call.
+2. **Gates.** `approvals.gates: [{match: "github.open_pr"}]` sends a matched call, with
+   its full arguments, to an approver. `chat` asks at the terminal; Slack asks by reaction
+   from a listed `approvers` user; headless `run` and a2a deny, and a tool that would always
+   be denied is withheld from the model. Reach for it when: a tool should run only after a
+   person says yes. Cost: arguments are shown verbatim, secrets included.
+3. **Escalation.** A task the runtime can't finish (deadline, provider down, engine error)
+   ends failed with reason 704, and the transport carries that to a human:
+   `approvals.escalation.route` (`slack:<channel>` for Slack), or cabal reads the code.
+
+`approvals.ceiling.write` and `.hosts` are parsed but enforced nowhere.
+
+### Transports: cli, a2a, slack
+
+- **`cli`**: always available through `daedalus chat`.
+- **`a2a`**: an HTTP endpoint (default `127.0.0.1:9200`) serving the agent card and taking
+  tasks; this is what cabal calls. Needs the `a2a` extra. Auth: add
+  `auth: {jwks_url, issuer, audience}` to verify cabal-minted JWTs on the POST routes and
+  `/events`; `auth.operator_subs` (default `["operator:*", "service:kobo"]`) says who may
+  use the operator lanes. Without `auth` the boot line says NO AUTH, and off loopback a
+  warning goes to stderr. Reach for it when: other services or agents send it work.
+- **`slack`**: Socket Mode, with `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`. `channel`
+  limits where it answers (none listed = every invited channel), `wake` is `mention`,
+  `thread` or `channel`, and `approvers` lists who may approve gates. Reaction approvals
+  are wired only with both a `channel` allowlist and `approvers`. Needs the `slack` extra.
+  Reach for it when: the agent's users are in Slack.
+
+### Memory
+
+- **`memory.personal: none`** (default): no recall. The agent still runs.
+- **`memory.personal: techne`**: recalls five entries from techne into each prompt.
+  `memory.home` sets the store directory. Without it, teach tasks fail and no
+  conversation journal is kept, so the learnings lane returns no candidates. Reach for it when: the
+  agent should remember across conversations, or kobo will teach it. Needs the `techne`
+  extra.
+- **`memory.revision: operator`** (opt-in): a background pass where the agent's model
+  judges techne's contradiction candidates; only operator-taught facts are promoted.
+- **`checkpoints: sqlite`**: saves loop state under `~/.cache/daedalus/<name>/` so a task
+  can resume (litellm engine only).
+
+### Text tool-call salvage (vLLM and similar)
+
+Some self-hosted models write tool calls as `<tool_call>` text instead of native calls
+(Qwen on vLLM does). `tools.salvage_text_calls: true` runs JSON found inside `<tool_call>`
+or `<tools>` tags. Unset, it is on only when `model.api_base` is set in `agent.yaml`; the
+`OPENAI_API_BASE` env var does not count. Cost: salvage skips the model's own decision to
+call, so a reply that quotes tagged JSON runs it. For native tool calls instead, vLLM must
+be started with its tool-call parser enabled; see vLLM's tool-calling docs for the flags.
+
+### Timeouts and limits
+
+- **`task_timeout`** (default 600 s): one task's whole engine run, model and tool calls
+  together. Past it the run is cancelled and the task fails with 704.
+- **`model.request_timeout`** (default 120 s): one model call, litellm engine only.
+  litellm's own default is 6000 s.
+- **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
+  when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
+  limit message, `wrap_up` makes one last tool-free call for a partial answer.
+- **`model.budget.per_task_tokens`**: a token budget per task (litellm engine only).
+
+Both timeouts must be positive; a bundle can raise them, not turn them off.
+
+### Extras
+
+| Extra | Enables | Reach for it when |
+|---|---|---|
+| (none) | create, chat, run, cli transport, litellm engine, files and exec built-ins | Always: the base. |
+| `mcp` | `tools.provider: mcp` | You use stdio MCP servers. |
+| `claude-code` | `--engine claude-code` (mcp>=2.2, uvicorn, claude-agent-sdk) | Claude Code should run the agent. |
+| `a2a` | the a2a transport and JWT auth | cabal or another service sends tasks. |
+| `slack` | the slack transport | The agent lives in Slack. |
+| `aws` | the `cloudtrail` sidecar (boto3) | The agent queries CloudTrail Lake. |
+| `techne` | `memory.personal: techne` | The agent should remember. |
+
+`claude-code` needs mcp>=2.2, and kobo pins `mcp>=1.15,<2`, so the two can't share one
+Python environment. Install daedalus with `claude-code` in its own venv or image.
+
+## How to install
+
+The distribution is `tenish-daedalus`; the import package and the CLI are `daedalus`.
+
+<!-- access: pending decision -->
+
+From a pinned git tag:
+
+```bash
+pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.5.5"
+```
+
+or from your team's package index as `tenish-daedalus`. The `techne` extra needs a
+concrete source for techne: the repo's `requirements-sources.txt` pins it, so a checkout
+installs with `pip install -r requirements-sources.txt ".[techne]"`. The runtime image,
+`docker/Dockerfile`, carries techne, liminal and the a2a, slack, aws and claude-code
+extras.
+
+Then: `daedalus create <name>`, set a model (`ANTHROPIC_API_KEY`, or `OPENAI_API_BASE`,
+`OPENAI_API_KEY` and `DAEDALUS_MODEL=openai/<name>`), and `daedalus chat ./<name>`.
+
+## Where to go next
+
+- `daedalus guide`: lists the bundled guides. `daedalus guide design` is the design
+  rationale; where it and the code disagree, the code is right.
+- `daedalus schema`: every agent.yaml field, with types and defaults.
+- In the repo: `README.md` (quickstart), `docs/design.md` §1.2 (an annotated agent.yaml),
+  `ARCHITECTURE.md` and `docs/arch/` (seam cards), `CHANGELOG.md`.

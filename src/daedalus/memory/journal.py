@@ -2,7 +2,7 @@
 reads. Checkpoints cannot serve this purpose -- a task's checkpoint row is
 dropped the moment the task completes (engines/litellm.py, LiteLLMEngine.run),
 and checkpoints carry neither timestamps in their payload nor a list API. This journal is
-the opposite trade: one row per context_id, upserted AT completion, kept
+the opposite trade: one row per (context_id, owner), upserted AT completion, kept
 for RETENTION_DAYS, pruned on every write.
 
 It lives in journal.db beside the techne db on the agent's persistent
@@ -74,7 +74,7 @@ def record(
     the upsert an N-turn thread would leave N rows, each holding a bigger
     copy of the same conversation (quadratic growth); the prior row for
     this context_id is deleted before the new one is inserted, in the same
-    transaction, so exactly one row per context_id ever survives. Rows
+    transaction, so exactly one row per (context_id, owner) ever survives. Rows
     older than RETENTION_DAYS are pruned in the same write, so the journal
     is self-limiting without any separate sweeper.
 
