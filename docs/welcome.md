@@ -139,12 +139,14 @@ liminal is not the primary.
 
 - **`memory.personal: none`** (default): no recall. The agent still runs.
 - **`memory.personal: techne`**: recalls five entries from techne into each prompt.
-  `memory.home` sets the store directory. Without it, teach tasks fail and no
-  conversation journal is kept, so the learnings lane returns no candidates. Reach for it when: the
+  `memory.home` sets the store directory; without it the store is techne's own default
+  (`~/.techne`), so set it whenever more than one agent shares a host. Reach for it when: the
   agent should remember across conversations, or kobo will teach it. Needs the `techne`
   extra.
 - **`memory.revision: operator`** (opt-in): a background pass where the agent's model
-  judges techne's contradiction candidates; only operator-taught facts are promoted.
+  judges techne's contradiction candidates. A correction the operator taught is promoted;
+  one a colleague asserted is promoted only at two agrees (the asserter counts as one, and
+  up to three same-team colleagues are asked), and any disagreement holds it. Everything else stays pending for a human.
 - **`checkpoints: sqlite`**: saves loop state under `~/.cache/daedalus/<name>/` so a task
   can resume (litellm engine only).
 
@@ -189,7 +191,10 @@ Python environment. Install daedalus with `claude-code` in its own venv or image
 
 The distribution is `tenish-daedalus`; the import package and the CLI are `daedalus`.
 
-<!-- access: pending decision -->
+The tenishai repos are private for now. Installing from the git URLs below needs a GitHub
+account with read access to the tenishai organization, with git set up to use it (an SSH
+key, or a token through a credential helper); without that, the install fails at the git
+clone step. The tenish package index (pypi.tenish.ai) needs credentials too.
 
 From a pinned git tag:
 
