@@ -75,6 +75,9 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Security
 
+- **litellm is pinned exactly, to 1.104.2** (PR #193). The pin replaces a range, so a fresh
+  install can no longer pick up a newer litellm; it went in after litellm 1.107.0 on PyPI (2026-10-21, since
+  quarantined) shipped a credential stealer. Raise it only to a release someone has checked.
 - **The `/events` trace stream is behind the transport's verifier.** It used to answer
   without a token even when `auth` was configured, and its replay of the last 100 events
   included full tool results: files the agent read, Slack threads, colleague answers.
