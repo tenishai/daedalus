@@ -540,6 +540,7 @@
             }
           ],
           "title": "Request Timeout",
+          "description": "Seconds one model call may take (litellm engine only).",
           "default": 120.0
         },
         "api_base": {
@@ -681,6 +682,7 @@
             "additionalProperties": true,
             "type": "object"
           },
+          "description": "Built-in tool groups. files: {roots: [...], max_bytes} for files.read, files.list and files.search; exec: {roots: [...], commands, env, timeout, max_output} for exec.run, which needs approvals.ceiling.exec: true. A files root fails the bundle at load when it is /, at or under /proc, /sys, /dev, /run or /etc, $HOME or a directory above it, or at or under $TECHNE_HOME. Symlinks are resolved before the check.",
           "title": "Builtin",
           "type": "object"
         },
@@ -769,6 +771,7 @@
             }
           ],
           "default": null,
+          "description": "Run tool calls written as <tool_call>/<tools> text. null = on only when model.api_base is set.",
           "title": "Salvage Text Calls"
         }
       },
@@ -859,6 +862,7 @@
         }
       ],
       "title": "Task Timeout",
+      "description": "Seconds a task's engine run may take; past it the task fails 704.",
       "default": 600.0
     }
   },

@@ -1,8 +1,9 @@
 """Protocol seams and their no-op defaults.
 
 Every cross-cutting concern is a Protocol with a no-op default injected at
-wiring time — never None-checked in the hot path. Real backends arrive via
-extras and entry points (techne, liminal, slack).
+wiring time — never None-checked in the hot path. Real backends are chosen by
+agent.yaml and imported lazily; their packages come from extras (techne, slack)
+or a separate install (liminal). There are no entry points.
 """
 
 from __future__ import annotations

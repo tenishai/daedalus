@@ -85,8 +85,11 @@ transports:
                                         # every tier-2 action is denied
   - kind: a2a
     port: 9200                          # no `auth` block = NO AUTH; boot warns off loopback
-    # auth: {...}                       # cabal-minted JWTs; see docs/arch/a2a-wire.md
-    #   operator_subs: ["operator:*"]  # who may use the operator lanes
+    # auth:                             # cabal-minted JWTs; see docs/arch/a2a-wire.md
+    #   jwks_url: http://127.0.0.1:7400/.well-known/jwks.json
+    #   issuer: cabal-core
+    #   audience: scout-svc
+    #   operator_subs: ["operator:*", "service:kobo"]  # the default; who may use operator lanes
   - kind: cli                           # always available for `daedalus chat`
 
 tools:
@@ -266,10 +269,14 @@ class Approver(Protocol):            # tier 2/3 decisions (see §3)
 class Transport(Protocol):           # start/stop; delivers Tasks to the handler
 ```
 
-Default implementations ship in-tree (in-memory/no-op/SQLite). Real backends
-arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
-`daedalus.transports`): `tenish-daedalus[techne]`, `tenish-daedalus[liminal]`,
-`tenish-daedalus[slack]`. Third parties add backends without touching core.
+Default implementations ship in-tree (in-memory/no-op/SQLite). The real backends
+ship in-tree too, and agent.yaml picks them; an extra only installs what a backend
+imports: `tenish-daedalus[techne]` for `memory.personal: techne`,
+`tenish-daedalus[slack]` for the slack transport. There is no liminal extra:
+`tools.provider: liminal` (or `tools.liminal.url`, which adds the gateway beside
+another provider) needs the `tenish-liminal` package installed on its own, and the
+bundle fails to load without it. There are no entry points, so a new backend is a
+change to daedalus itself.
 
 ### 2.3 LLM invocation
 

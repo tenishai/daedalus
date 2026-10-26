@@ -43,6 +43,26 @@ def schema(out: str | None) -> None:
 
 
 @main.command()
+@click.argument("name", required=False)
+def guide(name: str | None) -> None:
+    """List the bundled guides, or print one as markdown (start with: guide welcome)."""
+    from daedalus.docs import MANIFEST, read_guide
+
+    if not name:
+        click.echo("Bundled guides (daedalus guide <name>):\n")
+        width = max(len(n) for n in MANIFEST)
+        for n, line in MANIFEST.items():
+            click.echo(f"  {n:<{width}}  {line}")
+        return
+    try:
+        click.echo(read_guide(name), nl=False)
+    except KeyError:
+        raise click.ClickException(
+            f"no bundled guide named {name!r}; choose one of: {', '.join(MANIFEST)}"
+        ) from None
+
+
+@main.command()
 @click.argument("name")
 @click.option("--dir", "parent", default=".", help="Parent directory for the new bundle.")
 def create(name: str, parent: str) -> None:

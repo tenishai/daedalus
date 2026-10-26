@@ -30,7 +30,9 @@
 # deployed on this image MUST declare in their config:
 #   transports: [{ kind: a2a, host: 0.0.0.0, port: 8080 }]
 # host 0.0.0.0 so probes/Service can reach it; port 8080 to match this
-# platform's APP_PORT (see EXPOSE below).
+# platform's APP_PORT (see EXPOSE below). Add an `auth` block (jwks_url,
+# issuer, audience) to that transport; without one the boot line says NO AUTH
+# and a warning goes to stderr.
 # Empty stages that `--build-context techne=` / `--build-context liminal=`
 # override by name; left alone they copy nothing (see the header).
 FROM scratch AS techne
