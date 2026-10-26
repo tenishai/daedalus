@@ -66,7 +66,7 @@ def test_guide_prints_the_welcome_guide():
 
 def test_an_unknown_guide_fails_and_names_the_valid_ones():
     result = CliRunner().invoke(main, ["guide", "nope"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1
     for name in MANIFEST:
         assert name in result.output
 
@@ -78,3 +78,27 @@ def test_the_schema_tells_an_author_which_files_roots_are_refused():
     text = schema["$defs"]["ToolsSpec"]["properties"]["builtin"]["description"]
     for needle in ("/proc", "/etc", "$HOME", "$TECHNE_HOME"):
         assert needle in text
+
+
+def test_the_image_build_context_keeps_every_shipped_guide():
+    """docker/Dockerfile builds the wheel from `.`; a guide that .dockerignore drops
+    fails the force-include and breaks the image build (PR 223 review)."""
+    import fnmatch
+
+    root = Path(__file__).resolve().parent.parent
+    sources = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["hatch"]["build"][
+        "targets"
+    ]["wheel"]["force-include"]
+    rules = [
+        line.strip()
+        for line in (root / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    for src in sources:
+        kept = True
+        for rule in rules:  # last match wins, as in Docker
+            neg = rule.startswith("!")
+            pat = rule.lstrip("!").rstrip("/")
+            if fnmatch.fnmatch(src, pat) or src.startswith(pat + "/"):
+                kept = neg
+        assert kept, f"{src} is force-included but .dockerignore drops it"
