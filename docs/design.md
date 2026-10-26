@@ -63,12 +63,15 @@ prudence/
 name: prudence
 card: agent-card.json
 persona: persona.md
+task_timeout: 600                      # seconds per task, tool calls included;
+                                        # past it the task fails with reason 704
 
 model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string, or a tier word
                                         # (fast | balanced | best, §1.2a)
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192
+  request_timeout: 120                 # seconds per model call (default 120)
   budget:
     per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
 
@@ -81,7 +84,9 @@ transports:
                                         # `approvers: [U012ABC]`; without them
                                         # every tier-2 action is denied
   - kind: a2a
-    port: 9200
+    port: 9200                          # no `auth` block = NO AUTH; boot warns off loopback
+    # auth: {...}                       # cabal-minted JWTs; see docs/arch/a2a-wire.md
+    #   operator_subs: ["operator:*"]  # who may use the operator lanes
   - kind: cli                           # always available for `daedalus chat`
 
 tools:
@@ -92,7 +97,9 @@ tools:
     url: http://cabal:8300              # list_colleagues + ask_colleague over A2A
     token_env: CABAL_AGENT_TOKEN        # unset/empty = degraded, never a boot failure
   builtin:                              # in-process tool groups
-    files: {roots: ["."]}               # files.read/list/search, read-only, rooted
+    files: {roots: ["."]}               # files.read/list/search, read-only, rooted;
+                                        # refused at load: /, /proc /sys /dev /run /etc,
+                                        # $HOME or above it, $TECHNE_HOME
     exec:                               # exec.run: a command in the agent's own workspace;
       roots: ["."]                      # needs approvals.ceiling.exec: true (below).
       commands: [python, pytest, git]   # optional allowlist of bare program names
@@ -101,6 +108,9 @@ tools:
   github:
     branch_prefix: daedalus             # open_pr branches: <prefix>/<agent>/<slug>
   max_steps: 10
+  # salvage_text_calls: true            # run tool calls a model writes as text inside
+                                        # <tool_call>/<tools> tags; unset = on only
+                                        # when model.api_base is set
   on_exhausted: stop                    # stop | wrap_up: one last tool-free call for
                                         # a partial answer when steps or context run out
   context_tokens: 45000                 # optional: exhausted once a prompt reaches this
