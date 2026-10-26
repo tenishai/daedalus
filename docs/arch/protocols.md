@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
 updated: 2026-09-28
-anchor: src/daedalus/protocols.py sha=163b54174617e9facf5411dc1211ea8eabe58dad
+anchor: src/daedalus/protocols.py sha=75aa13430039c250f60a48d0f5f9d3f4fa6ee791
 ---
 # protocols — the collaborator seams optional extras implement
 
