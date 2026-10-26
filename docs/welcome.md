@@ -86,7 +86,7 @@ refuses to load; an `--engine` that disagrees with the tier's engine is refused 
   when: an MCP server already does the job. Needs the `mcp` extra.
 - **`liminal`**: the liminal gateway at `tools.liminal.url`. Reach for it when: tools and
   their credentials should live in a gateway, not in the agent. Needs `tenish-liminal`.
-- **`colleagues`**: `list_colleagues` and `ask_colleague` against a cabal switchboard at
+- **`colleagues`**: `colleagues.list_colleagues` and `colleagues.ask_colleague` against a cabal switchboard at
   `tools.colleagues.url`. Reach for it when: this agent should ask other agents.
 
 Built-in groups, under `tools.builtin`, stack beside the provider:
