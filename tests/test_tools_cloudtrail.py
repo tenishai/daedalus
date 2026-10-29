@@ -653,7 +653,7 @@ def test_the_lease_path_never_assumes_and_uses_the_leased_credential():
     asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "c@d.co"}))
     assert fake.sts.calls == []  # the pod assumed nothing itself
     assert calls == [("http://bab.bab.svc:8080", "acme-audit", "/var/run/secrets/bab/token",
-                      "cloudtrail.query_provisioning")]  # one lease, cached across calls within the minute
+                      "cloudtrail.query_provisioning")]  # one lease, cached within the minute
     (_, kwargs), *_ = [c for c in fake.client_calls if c[0] == "cloudtrail"]
     assert kwargs["aws_access_key_id"] == "ASIALEASED"
     assert kwargs["aws_session_token"] == "leased-sesh"
@@ -734,4 +734,4 @@ def test_a_leased_credential_is_re_asked_for_within_a_minute_so_a_revoke_bites()
     assert provider._creds_expiry - time.monotonic() <= ct._LEASE_RECHECK_S + 0.5
     provider._creds_expiry = time.monotonic() - 1  # the window passed
     asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
-    assert len(calls) == 2  # asked bab again; a revoked grant would have come back as a refusal here
+    assert len(calls) == 2  # asked again; a revoked grant would come back as a refusal here
