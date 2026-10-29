@@ -16,7 +16,9 @@ Issue and pull request numbers all refer to this repository, written in full.
   the agent in it; the pod assumes nothing and `role_arn` may be omitted. A refusal comes
   back to the model as a sentence ("I do not hold X on Y; ask my owner to request it"), a
   pending approval as "waiting for approval", and an unreachable service means no new
-  credential while a cached one keeps working until it expires.
+  credential while a cached one keeps working until it expires. The credential is re-asked
+  for at least once a minute, so a grant the owner revokes stops the next call within a
+  minute rather than when the hour runs out.
 
 ## [0.6.0] — 2026-10-26
 

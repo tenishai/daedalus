@@ -653,7 +653,7 @@ def test_the_lease_path_never_assumes_and_uses_the_leased_credential():
     asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "c@d.co"}))
     assert fake.sts.calls == []  # the pod assumed nothing itself
     assert calls == [("http://bab.bab.svc:8080", "acme-audit", "/var/run/secrets/bab/token",
-                      "cloudtrail.query_provisioning")]  # one lease, cached across calls
+                      "cloudtrail.query_provisioning")]  # one lease, cached across calls within the minute
     (_, kwargs), *_ = [c for c in fake.client_calls if c[0] == "cloudtrail"]
     assert kwargs["aws_access_key_id"] == "ASIALEASED"
     assert kwargs["aws_session_token"] == "leased-sesh"
@@ -720,3 +720,18 @@ def test_bundle_spec_turns_on_for_a_lease_without_a_role(tmp_path):
     found = [p for p in getattr(provider, "providers", [provider])
              if isinstance(p, CloudTrailToolProvider)]
     assert found and found[0].bab_integration == "acme-audit" and found[0].role_arn is None
+
+
+def test_a_leased_credential_is_re_asked_for_within_a_minute_so_a_revoke_bites():
+    import time
+
+    from daedalus.tools import cloudtrail as ct
+
+    provider, _, calls = _leased_provider(FakeLake())
+    asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
+    assert len(calls) == 1
+    # The lease runs an hour, but the provider holds it for at most the recheck window.
+    assert provider._creds_expiry - time.monotonic() <= ct._LEASE_RECHECK_S + 0.5
+    provider._creds_expiry = time.monotonic() - 1  # the window passed
+    asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
+    assert len(calls) == 2  # asked bab again; a revoked grant would have come back as a refusal here
