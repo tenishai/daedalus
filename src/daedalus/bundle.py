@@ -239,12 +239,28 @@ class CloudTrailSpec(_WarnExtra):
     pod's own workload identity federates into an AWS role scoped to one
     CloudTrail Lake event data store -- no stored credential anywhere, and
     the scoping lives in AWS IAM, not here. Stacks alongside the primary
-    provider exactly like `github`. Absent role_arn = the block is off."""
+    provider exactly like `github`.
+
+    Two ways to a credential. `role_arn`: the pod assumes the role itself
+    with its own cloud identity. `bab_url` + `bab_integration`: the pod asks
+    the room's permission service for a one-hour lease, proving itself with
+    the service account token projected at `bab_token_file` (audience
+    `bab`); the service holds the role, checks what this agent was granted
+    and names the agent in the session. With both set the lease wins. With
+    neither, the block is off."""
 
     role_arn: str | None = None  # AWS role trusting this workload's identity
     event_data_store: str | None = None  # Lake event data store id
     region: str = "us-east-2"  # where the lake lives
     group_prefix: str = "engineering_"  # directory-group filter for the query
+    bab_url: str | None = None  # the room's permission service; leases replace role_arn
+    bab_integration: str | None = None  # which connected account to lease, as bab names it
+    bab_token_file: str = "/var/run/secrets/bab/token"  # projected SA token, audience bab
+
+    @property
+    def on(self) -> bool:
+        leased = bool(self.bab_url and self.bab_integration)
+        return bool(self.event_data_store) and bool(self.role_arn or leased)
 
 
 class SlackReadSpec(_WarnExtra):
