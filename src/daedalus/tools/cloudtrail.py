@@ -59,6 +59,10 @@ _QUERY_DEADLINE_S = 60.0
 _POLL_INTERVAL_S = 1.5
 _ROW_LIMIT = 200
 _CRED_EXPIRY_BUFFER_S = 120.0
+# On the lease path the credential is re-asked for at least this often, so a grant the
+# owner revokes stops the next call within a minute, not when the hour runs out. The
+# service hands back the same credential while it is valid and the grant stands.
+_LEASE_RECHECK_S = 60.0
 
 # Account-lifecycle event types. Deactivation (and suspension) strips every
 # group membership WITHOUT per-group group.user_membership.remove events --
@@ -522,7 +526,7 @@ class CloudTrailToolProvider:
                 "so I cannot reach the lake."
             ) from None
         left = _seconds_until(lease.get("expires_at")) - _CRED_EXPIRY_BUFFER_S
-        self._creds_expiry = time.monotonic() + max(0.0, left)
+        self._creds_expiry = time.monotonic() + max(0.0, min(left, _LEASE_RECHECK_S))
         return self._creds
 
     def _build_query(self, email: str, lookback_days: int) -> str:
