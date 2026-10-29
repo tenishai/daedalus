@@ -639,7 +639,7 @@ def _leased_provider(lake, lease=None, fail=None):
         boto3_module=fake,
         agent_name="x",
         bab_url="http://bab.bab.svc:8080",
-        bab_integration="fubo-it",
+        bab_integration="acme-audit",
         bab_token_file="/var/run/secrets/bab/token",
         lease_fetch=lease_fetch,
     )
@@ -652,7 +652,7 @@ def test_the_lease_path_never_assumes_and_uses_the_leased_credential():
     asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
     asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "c@d.co"}))
     assert fake.sts.calls == []  # the pod assumed nothing itself
-    assert calls == [("http://bab.bab.svc:8080", "fubo-it", "/var/run/secrets/bab/token",
+    assert calls == [("http://bab.bab.svc:8080", "acme-audit", "/var/run/secrets/bab/token",
                       "cloudtrail.query_provisioning")]  # one lease, cached across calls
     (_, kwargs), *_ = [c for c in fake.client_calls if c[0] == "cloudtrail"]
     assert kwargs["aws_access_key_id"] == "ASIALEASED"
@@ -661,7 +661,7 @@ def test_the_lease_path_never_assumes_and_uses_the_leased_credential():
 
 def test_a_lease_refusal_is_a_sentence_for_the_model():
     provider, fake, _ = _leased_provider(
-        FakeLake(), fail="I do not hold aws_cloudtrail_lake_query on fubo-it; ask my owner."
+        FakeLake(), fail="I do not hold aws_cloudtrail_lake_query on acme-audit; ask my owner."
     )
     reply = asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
     assert reply.startswith("I do not hold aws_cloudtrail_lake_query")
@@ -678,11 +678,11 @@ def test_lease_refusals_read_well():
     from daedalus.tools.cloudtrail import _lease_refusal, _seconds_until
 
     assert "waiting for approval (request 7)" in _lease_refusal(
-        202, {"waiting_for_approval": ["aws_cloudtrail_lake_query"], "request_id": 7}, "fubo-it")
-    assert _lease_refusal(403, {"refused": ["aws_cost_read"]}, "fubo-it").startswith(
-        "I do not hold aws_cost_read on fubo-it")
-    assert "does not know this pod" in _lease_refusal(401, "x", "fubo-it")
-    assert "No account named 'fubo-it'" in _lease_refusal(404, None, "fubo-it")
+        202, {"waiting_for_approval": ["aws_cloudtrail_lake_query"], "request_id": 7}, "acme-audit")
+    assert _lease_refusal(403, {"refused": ["aws_cost_read"]}, "acme-audit").startswith(
+        "I do not hold aws_cost_read on acme-audit")
+    assert "does not know this pod" in _lease_refusal(401, "x", "acme-audit")
+    assert "No account named 'acme-audit'" in _lease_refusal(404, None, "acme-audit")
     assert _seconds_until("2999-01-01T00:00:00Z") > 3600
     assert _seconds_until("not a time") == 3600.0
     assert _seconds_until(None) == 3600.0
@@ -704,14 +704,14 @@ def test_bundle_spec_turns_on_for_a_lease_without_a_role(tmp_path):
     off = AgentSpec.model_validate({**base, "tools": {"cloudtrail": {"event_data_store": EDS}}})
     assert off.tools.cloudtrail.on is False
     on = AgentSpec.model_validate({**base, "tools": {"cloudtrail": {
-        "event_data_store": EDS, "bab_url": "http://bab", "bab_integration": "fubo-it"}}})
+        "event_data_store": EDS, "bab_url": "http://bab", "bab_integration": "acme-audit"}}})
     assert on.tools.cloudtrail.on is True
     assert on.tools.cloudtrail.bab_token_file == "/var/run/secrets/bab/token"
 
     (tmp_path / "agent.yaml").write_text(
         "name: ledger\nmodel:\n  id: m\ntools:\n  provider: none\n  allow: []\n"
         f"  cloudtrail:\n    event_data_store: {EDS}\n    bab_url: http://bab.bab.svc:8080\n"
-        "    bab_integration: fubo-it\n"
+        "    bab_integration: acme-audit\n"
     )
     (tmp_path / "agent-card.json").write_text("{}")
     (tmp_path / "persona.md").write_text("You are x.")
@@ -719,4 +719,4 @@ def test_bundle_spec_turns_on_for_a_lease_without_a_role(tmp_path):
     provider = agent.tools
     found = [p for p in getattr(provider, "providers", [provider])
              if isinstance(p, CloudTrailToolProvider)]
-    assert found and found[0].bab_integration == "fubo-it" and found[0].role_arn is None
+    assert found and found[0].bab_integration == "acme-audit" and found[0].role_arn is None
