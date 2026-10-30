@@ -156,6 +156,19 @@ class LiteLLMEngine:
         spec, emit = turn.spec, turn.emit
         llm_tools = [_to_openai(tool) for tool in allowed] or None
         by_munged = {_munge(tool["name"]): tool["name"] for tool in allowed}
+        by_bare: dict[str, list[str]] = {}
+        for tool in allowed:
+            by_bare.setdefault(tool["name"].rsplit(".", 1)[-1], []).append(tool["name"])
+
+        def resolve(name: str) -> str | None:
+            """Canonical name for a model-returned one. Gemini sometimes drops the
+            server prefix (`remember` for `colleagues__remember`, #167); accept that
+            only when exactly one offered tool ends in it."""
+            if name in by_munged:
+                return by_munged[name]
+            matches = by_bare.get(name, [])
+            return matches[0] if len(matches) == 1 else None
+
         budget = turn.budget
 
         last_attempt = ""
@@ -223,7 +236,7 @@ class LiteLLMEngine:
             # has. Count consecutive identical calls, across steps and within one.
             streaks = []
             for call in tool_calls:
-                key = (by_munged.get(call.name, call.name), _arguments_key(call.arguments))
+                key = (resolve(call.name) or call.name, _arguments_key(call.arguments))
                 streak = streak + 1 if key == last_key else 1
                 last_key = key
                 streaks.append(streak)
@@ -236,10 +249,12 @@ class LiteLLMEngine:
 
             messages.append(_assistant_message(response.text, tool_calls))
             for call, n in zip(tool_calls, streaks, strict=True):
-                canonical = by_munged.get(call.name, call.name)  # trace speaks canonical
-                emit("tool_call", name=canonical, arguments=call.arguments)
                 # Tier-1 re-check: a hallucinated name misses the map.
-                name = by_munged.get(call.name)
+                name = resolve(call.name)
+                canonical = name or call.name  # trace speaks canonical
+                if name is not None and call.name not in by_munged:
+                    emit("bare_tool_name", given=call.name, resolved=name)
+                emit("tool_call", name=canonical, arguments=call.arguments)
                 result = (
                     await turn.call_tool(name, call.arguments)
                     if name is not None
