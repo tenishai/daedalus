@@ -138,9 +138,9 @@ liminal is not the primary.
 ### Memory
 
 - **`memory.personal: none`** (default): no recall. The agent still runs.
-- **`memory.personal: techne`**: recalls five entries from techne into each prompt: the
-  agent's own knowledge, plus the team pool when a recall source such as
-  techne-archivist-sync is installed. At the end of each task it publishes knowledge
+- **`memory.personal: techne`**: recalls up to five entries from the agent's own techne
+  knowledge into each prompt, plus up to five from the team pool when a recall source
+  such as techne-archivist-sync is installed. At the end of each task it publishes knowledge
   carrying one of techne's `archivist_publish_tags`; with that list empty, the default,
   nothing leaves the agent. `memory.home` sets the store directory and its config.yaml;
   without it the store is techne's own default (`$TECHNE_HOME`, else `~/.techne`), so set
