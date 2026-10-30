@@ -17,7 +17,8 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 - **The open-listener warning names the bundle and goes to the log** (tenishai/daedalus
   issue #204). An a2a transport on an address other than loopback with no `auth` block
-  already printed a stderr warning; it now also logs at WARNING, and the text names the
+  already printed a stderr warning; it now goes through logging at WARNING when the
+  process has configured logging (else stderr, once), and the text names the
   bundle and `host:port`, says anyone who can reach it can use every tool the allowlist
   admits, and says to add `auth`. It still serves; loopback and `auth` stay quiet.
 

@@ -434,8 +434,13 @@ class A2aTransport:
         print(self.listening_line())
         warning = self.open_warning()
         if warning:
-            log.warning(warning)
-            print(warning, file=sys.stderr)
+            # Once: through logging when the process configured it, else on stderr.
+            # With no handler, log.warning would reach stderr through logging's
+            # lastResort and the line would print twice.
+            if log.hasHandlers():
+                log.warning(warning)
+            else:
+                print(warning, file=sys.stderr)
         await uvicorn.Server(config).serve()
 
     def listening_line(self) -> str:
