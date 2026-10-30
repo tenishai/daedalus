@@ -116,6 +116,9 @@ def test_the_gate_renderer_ignores_events_that_merely_LOOK_like_it():
     assert "teach" in rendered({"type": "teach_allowed", "sub": "service:room"})
     assert "persona:scout" in rendered({"type": "tool_refused", "sub": "persona:scout"})
 
+    bare = {"type": "bare_tool_name", "given": "remember", "resolved": "colleagues.remember"}
+    assert "matched to colleagues.remember" in rendered(bare)  # #167
+
     assert rendered({"type": "system_task_refused", "marker": "bogus"}) == ""
     assert rendered({"type": "tool_refused", "error": "boom"}) == ""
 

@@ -6,6 +6,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The litellm engine accepts a tool name the model returned without its server prefix**
+  (tenishai/daedalus issue #167). Gemini sometimes sends `remember` for
+  `colleagues__remember`, and the call was refused as unknown. A bare name now resolves
+  when exactly one offered tool ends in it; an ambiguous or unknown name is refused as
+  before, and the allowlist check still runs on the resolved name. The trace records a
+  `bare_tool_name` event when this happens.
+
 ### Added
 
 - **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
