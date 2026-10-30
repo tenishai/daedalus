@@ -118,18 +118,42 @@ async def test_ambiguous_bare_tool_name_is_refused(tmp_path):
     llm = ScriptedLLM(tool_turn(ToolCall(id="1", name="read", arguments={})), "ok")
     tools = FakeTools([READ_SPEC, NOTES_READ_SPEC])
     agent = make_agent(tmp_path, allow=["files.read", "notes.read"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
     await agent.handle_task(Task.from_text("go"))
     assert tools.calls == []
     assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+    assert not any(e["type"] == "bare_tool_name" for e in events)
 
 
 async def test_unknown_bare_tool_name_is_refused(tmp_path):
     llm = ScriptedLLM(tool_turn(ToolCall(id="1", name="delete", arguments={})), "ok")
     tools = FakeTools([READ_SPEC, COLLEAGUE_SPEC])
     agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
     await agent.handle_task(Task.from_text("go"))
     assert tools.calls == []
     assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+    assert not any(e["type"] == "bare_tool_name" for e in events)
+
+
+async def test_the_repeat_guard_counts_a_bare_name_as_its_tool(tmp_path):
+    """A model alternating `remember` and `colleagues__remember` repeats one call."""
+    calls = [
+        tool_turn(ToolCall(id=str(i), name=n, arguments={"fact": "x"}))
+        for i, n in enumerate(["remember", "colleagues__remember"] * 3)
+    ]
+    llm = ScriptedLLM(*calls)
+    tools = FakeTools([COLLEAGUE_SPEC])
+    events: list[dict] = []
+    agent = make_agent(
+        tmp_path, allow=["colleagues.*"], llm=llm, tools=tools, tools_extra="  max_repeats: 3\n"
+    )
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.state is TaskState.FAILED
+    assert {"type": "repeat_limit", "name": "colleagues.remember", "count": 3} in events
 
 
 async def test_bare_name_of_a_tool_outside_the_allowlist_is_refused(tmp_path):
