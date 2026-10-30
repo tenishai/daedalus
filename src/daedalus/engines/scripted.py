@@ -2,8 +2,9 @@
 
 Each message is one command, run through the same seams a model-driven turn uses:
 
-    remember: <fact>          MemoryStore.commit
-    recall: <query>           MemoryStore.recall; the reply is the hits as a JSON list
+    remember: <fact> [#tag]   MemoryStore.commit, with the #words as its tags
+    recall: <query>           the store's hits as a JSON list of {"content", "source"},
+                              from recall_hits when the store has it
     call: <tool> <json args>  turn.call_tool, so the allowlist, approval gates and
                               tool provider decide, exactly as for the litellm engine
 
@@ -52,9 +53,19 @@ class ScriptedEngine:
         if turn.memory is None:
             return _refuse(task, f"{verb}: this agent has no memory store")
         if verb == "remember":
-            await turn.memory.commit(rest)
-            return task.reply(f"remembered: {rest}")
-        return task.reply(json.dumps(await turn.memory.recall(rest)))
+            words = rest.split()
+            tags = ",".join(w[1:] for w in words if w.startswith("#") and len(w) > 1)
+            fact = " ".join(w for w in words if not (w.startswith("#") and len(w) > 1))
+            if not fact:
+                return _refuse(task, "remember: nothing to remember besides tags")
+            await turn.memory.commit(fact, tags=tags)
+            return task.reply(f"remembered: {fact}" + (f" [{tags}]" if tags else ""))
+        recall_hits = getattr(turn.memory, "recall_hits", None)
+        if recall_hits is not None:
+            hits = await recall_hits(rest)
+        else:
+            hits = [{"content": c, "source": "local"} for c in await turn.memory.recall(rest)]
+        return task.reply(json.dumps(hits))
 
 
 def _refuse(task: Task, why: str) -> Task:

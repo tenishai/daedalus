@@ -370,17 +370,29 @@ class Agent:
         spec = self.bundle.spec.memory
         if spec.personal == "techne":
             try:
-                import techne  # noqa: F401  — fail at load time, not mid-conversation
+                import techne.api  # noqa: F401  — fail at load time, not mid-conversation
             except ImportError as exc:
                 raise BundleError(
-                    "memory.personal is 'techne' but techne is not installed — "
-                    "pip install -e path/to/techne (github.com/tenishai/techne)"
+                    "memory.personal is 'techne' but techne 0.19.1 or later is not "
+                    "installed — pip install 'tenish-daedalus[techne]'"
                 ) from exc
             from daedalus.memory.techne import TechneMemoryStore
 
-            db_path = Path(spec.home).expanduser() / "techne.db" if spec.home else None
-            return TechneMemoryStore(db_path=db_path)
+            return TechneMemoryStore(home=spec.home)
         return NoMemory()
+
+    async def _publish_memory(self) -> None:
+        """Send this task's tagged facts to the team pool, once, at task end (#228).
+        A store without publish() (NoMemory, a test fake) has nothing to send."""
+        publish = getattr(self.memory, "publish", None)
+        if publish is None:
+            return
+        try:
+            result = await publish()
+        except Exception as exc:  # a store's publish never fails the task
+            result = {"error": str(exc)}
+        if result.get("enqueued") or result.get("synced") or result.get("error"):
+            self._emit("memory_published", **result)
 
     def _checkpoints_from_spec(self) -> CheckpointStore:
         if self.bundle.spec.checkpoints == "sqlite":
@@ -660,6 +672,7 @@ class Agent:
         # and asks unguarded, which its corroboration logic relies on.
         ask_ledger.set(AskLedger())
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        await self._publish_memory()
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text())
             if post.blocked:

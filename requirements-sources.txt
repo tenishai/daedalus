@@ -14,4 +14,4 @@
 # Bump the pinned tag when consumers should pick up a new techne release, and lift
 # the matching `tenish-techne>=X` floor in pyproject.toml's `techne` extra so the abstract
 # floor and the concrete pin stay in step.
-tenish-techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.18.2
+tenish-techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.19.1

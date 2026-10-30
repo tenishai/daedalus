@@ -143,11 +143,13 @@ def _techne_installed() -> bool:
     return importlib.util.find_spec("techne") is not None
 
 
-def test_memory_techne_without_install_fails_at_load(tmp_path):
-    if _techne_installed():
-        pytest.skip("techne is installed; load cannot fail")
+def test_memory_techne_without_techne_api_fails_at_load(tmp_path, monkeypatch):
+    # techne missing, or older than 0.19.1 (no techne.api): fail at load (#228).
+    import sys
+
+    monkeypatch.setitem(sys.modules, "techne.api", None)
     bundle = write_bundle(tmp_path, "memory:\n  personal: techne\n")
-    with pytest.raises(BundleError, match="techne is not installed"):
+    with pytest.raises(BundleError, match="techne 0.19.1 or later is not installed"):
         Agent(Bundle.load(bundle), llm=ScriptedLLM())
 
 
@@ -160,7 +162,7 @@ async def test_techne_store_round_trip(tmp_path, monkeypatch):
 
     db_path = tmp_path / "techne.db"
     init_db(db_path)
-    store = TechneMemoryStore(db_path=db_path, use_vectors=False)
+    store = TechneMemoryStore(db_path=db_path)
     await store.commit("spark5 exports PYTHONPATH globally; always env -u PYTHONPATH")
     recalled = await store.recall("PYTHONPATH venv problem")
     assert any("PYTHONPATH" in item for item in recalled)
@@ -178,23 +180,12 @@ async def test_techne_recall_returns_full_content_past_search_clip(tmp_path):
 
     db_path = tmp_path / "techne.db"
     init_db(db_path)
-    store = TechneMemoryStore(db_path=db_path, use_vectors=False)
+    store = TechneMemoryStore(db_path=db_path)
     procedure = "## Skill: long-procedure\n\nzephyr calibration steps.\n" + ("step\n" * 300)
     assert len(procedure) > 500
     await store.commit(procedure, kind="procedure")
     recalled = await store.recall("zephyr calibration")
     assert any(item == procedure for item in recalled), [len(i) for i in recalled]
-
-
-@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
-async def test_techne_store_defaults_to_vectors_on(tmp_path):
-    # The 0.16.1 wave flips the default: the runtime image bakes the
-    # backend in, and techne degrades to FTS cleanly when it is absent --
-    # so an agent constructed without an explicit knob wants vectors.
-    from daedalus.memory.techne import TechneMemoryStore
-
-    store = TechneMemoryStore(db_path=tmp_path / "techne.db")
-    assert store.use_vectors is True
 
 
 async def test_checkpoint_store_closes_its_sqlite_connections(tmp_path):

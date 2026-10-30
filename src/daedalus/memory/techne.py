@@ -1,67 +1,115 @@
 """techne-backed personal memory behind the MemoryStore seam.
 
-techne (github.com/tenishai/techne) is not on PyPI; install it alongside:
-pip install -e path/to/techne. Recall failures degrade to no memories —
-a broken memory backend must never take the agent down.
+techne (github.com/tenishai/techne) installs from the tenish index as
+tenish-techne. Recall and publish failures degrade to no memories and no
+publish — a broken memory backend must never take the agent down.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import warnings
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 class TechneMemoryStore:
-    """recall() = FTS/hybrid search over techne's knowledge table;
-    commit() = techne.knowledge.store. The agent never knows techne exists.
+    """recall() = techne.api.recall, the tiered recall techne_recall runs: this
+    agent's knowledge plus every installed recall source, so a fact another agent
+    published comes back through the team pool (#228). commit() =
+    techne.knowledge.store; publish() = techne.api.publish, called once at task end,
+    which sends knowledge carrying one of techne's `archivist_publish_tags` and does
+    nothing when that list is empty. The agent never knows techne exists.
 
-    use_vectors defaults True (techne 0.16.1 wave): the runtime image bakes
-    the embedding backend and model in, and techne's search degrades to
-    FTS-only cleanly when a backend is genuinely absent (the cold-cache
-    hang was fixed in techne 0.15.0, techne#708). Vectors-on requires
-    techne >= 0.16.1 specifically — before techne#827 the vec-first fusion
-    could drop every lexical hit, which is worse than no vectors at all.
+    techne's config comes from `home` when given (the bundle's memory.home), else
+    from TECHNE_HOME, as for any techne process. `use_vectors` is no longer read:
+    recall follows techne's own search settings, which fall back to FTS when no
+    embedding backend is installed.
     """
 
-    def __init__(self, db_path: str | Path | None = None, use_vectors: bool = True):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        use_vectors: bool | None = None,
+        *,
+        home: str | Path | None = None,
+    ):
+        if use_vectors is not None:
+            warnings.warn(
+                "TechneMemoryStore(use_vectors=...) is ignored since #228: recall "
+                "follows techne's own search settings",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.home = Path(home).expanduser() if home else None
         if db_path is None:
             from techne.config import techne_home
 
-            db_path = techne_home() / "techne.db"
+            db_path = (self.home or techne_home()) / "techne.db"
         self.db_path = Path(db_path)
-        self.use_vectors = use_vectors
 
-    async def recall(self, query: str, k: int = 5) -> list[str]:
-        from techne.core import knowledge, search
+    def _config(self):
+        from techne.config import Config
 
+        cfg = Config.load(self.home / "config.yaml" if self.home else None)
+        cfg.db_path = self.db_path
+        return cfg
+
+    async def recall_hits(self, query: str, k: int = 5) -> list[dict]:
+        """Hits as {"content", "source"}: "local" for this agent's own knowledge, else
+        the recall source's name (e.g. "liminal_archivist" for the team pool)."""
         if not query.strip():
             return []
         try:
-            rows = search.search(
-                self.db_path, query, table="knowledge", limit=k, use_vectors=self.use_vectors
-            )
+            return await asyncio.to_thread(self._recall_hits, query, k)
         except Exception:
+            log.warning("techne recall failed; continuing without memories", exc_info=True)
             return []
-        results: list[str] = []
-        for row in rows:
+
+    def _recall_hits(self, query: str, k: int) -> list[dict]:
+        from techne import api
+        from techne.core import knowledge
+
+        hits: list[dict] = []
+        for row in api.recall(query, limit=10, config=self._config()):
+            source = row.get("recall_source")
+            if source is None and row.get("source_table") != "knowledge":
+                continue  # observations, threads, library documents: not memories
             content = row.get("content")
             if not content:
                 continue
-            # search() clips every row's content to 500 characters, unmarked
-            # (techne search.py, both 0.14 and 0.16.1) -- a whole-file skill
-            # procedure read through that clip is a summary posing as the
-            # procedure. Re-fetch the full row by id; any failure keeps the
-            # clipped copy rather than dropping the memory.
-            if row.get("source_table") == "knowledge" and row.get("id") is not None:
+            if source is None and row.get("id") is not None:
+                # Recall clips a local row to 500 characters, unmarked; a whole-file
+                # skill procedure read through that clip is a summary posing as the
+                # procedure. Re-fetch the full row; any failure keeps the clip.
                 try:
                     full = knowledge.get(self.db_path, row["id"])
                 except Exception:
                     full = None
                 if full and full.get("content"):
                     content = full["content"]
-            results.append(content)
-        return results
+            hits.append({"content": content, "source": source or "local"})
+            if len(hits) >= k:
+                break
+        return hits
 
-    async def commit(self, content: str, kind: str = "fact") -> None:
+    async def recall(self, query: str, k: int = 5) -> list[str]:
+        return [h["content"] for h in await self.recall_hits(query, k)]
+
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
         from techne.core import knowledge
 
-        knowledge.store(self.db_path, content, type=kind)
+        knowledge.store(self.db_path, content, type=kind, tags=tags)
+
+    async def publish(self) -> dict:
+        """Send tagged knowledge to the team pool. Never raises; techne.api.publish
+        reports a failed step in the result's "error"."""
+        try:
+            from techne import api
+
+            return await asyncio.to_thread(api.publish, config=self._config())
+        except Exception as exc:
+            log.warning("techne publish failed", exc_info=True)
+            return {"enqueued": 0, "synced": 0, "failed": 0, "error": str(exc)}

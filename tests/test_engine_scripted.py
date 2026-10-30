@@ -58,8 +58,8 @@ async def test_remember_commits_through_the_memory_store(tmp_path, on):
     agent, llm = _agent(tmp_path, memory=memory)
     task = await agent.handle_task(Task.from_text("remember: the lab fact is 42 #team"))
     assert task.state is TaskState.COMPLETED
-    assert task.agent_text() == "remembered: the lab fact is 42 #team"
-    assert memory.committed == [("the lab fact is 42 #team", "fact")]
+    assert task.agent_text() == "remembered: the lab fact is 42 [team]"
+    assert memory.committed == [("the lab fact is 42", "fact", "team")]
     assert llm.calls == []
 
 
@@ -67,7 +67,11 @@ async def test_recall_returns_the_hits_as_json(tmp_path, on):
     agent, llm = _agent(tmp_path, memory=CannedMemory("seed for A", "another"))
     task = await agent.handle_task(Task.from_text("recall: seed"))
     assert task.state is TaskState.COMPLETED
-    assert json.loads(task.agent_text()) == ["seed for A", "another"]
+    # A store without recall_hits (this fake) reports every hit as local.
+    assert json.loads(task.agent_text()) == [
+        {"content": "seed for A", "source": "local"},
+        {"content": "another", "source": "local"},
+    ]
     assert llm.calls == []
 
 
@@ -104,7 +108,14 @@ async def test_call_meets_the_approval_gates(tmp_path, on):
 
 @pytest.mark.parametrize(
     "text",
-    ["hello", "remember:", "forget: x", "call: files.read {not json", "call: files.read [1]"],
+    [
+        "hello",
+        "remember:",
+        "remember: #team",
+        "forget: x",
+        "call: files.read {not json",
+        "call: files.read [1]",
+    ],
 )
 async def test_anything_else_fails_the_task(tmp_path, on, text):
     agent, llm = _agent(tmp_path)
