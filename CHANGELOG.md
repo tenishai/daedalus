@@ -6,6 +6,17 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
+  `DAEDALUS_SCRIPTED_ENGINE=1`, `--engine scripted` runs one command per message instead of
+  calling a model: `remember: <fact>` commits through the agent's memory store,
+  `recall: <query>` replies with the store's hits as a JSON list, and
+  `call: <tool> <json args>` calls a tool through the same allowlist, approval gates and
+  tool provider the litellm engine uses. Anything else fails the task with reason 704.
+  Without the variable the engine is refused at load. `EngineTurn` gains an optional
+  `memory` field for it.
+
 ## [0.6.0] — 2026-10-26
 
 ### Upgrading

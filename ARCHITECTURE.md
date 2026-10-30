@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-10-26
 anchor: pyproject.toml sha=08533b1cf601d01f89403a832c85cf842537624d
-anchor: src/daedalus/agent.py sha=679dccfa7d5aac1e84b93fa23c54cd06c4ae33b5
+anchor: src/daedalus/agent.py sha=c02fcff94387fe27aa28042659a06bc7b8424e22
 ---
 # daedalus — repo card
 
@@ -15,7 +15,7 @@ ENTRY:
 - container → docker/entrypoint.sh: docker/seeder.py seeds bundle knowledge+skills into techne, then `daedalus run /bundle -v`
 
 SEAMS → card:
-- engines     src/daedalus/engines/          (Engine/EngineTurn; litellm loop, claude-code, MCP bridge) → docs/arch/engines.md
+- engines     src/daedalus/engines/          (Engine/EngineTurn; litellm loop, claude-code, MCP bridge, the test-only scripted engine) → docs/arch/engines.md
 - protocols   src/daedalus/protocols.py      (LLM/MemoryStore/ToolProvider/... + no-op defaults)     → docs/arch/protocols.md
 - approvals   agent.py _call_tool + enforcement.py (tier-1 allowlist, tier-2 gates, law hooks)    → docs/arch/approvals.md
 - a2a-wire    src/daedalus/transports/a2a.py + task.py (cabal/kobo/kaminos wire, operator lanes)   → docs/arch/a2a-wire.md
