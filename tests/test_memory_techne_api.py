@@ -87,8 +87,17 @@ async def test_recall_hits_honours_k_up_to_techne_cap(home):
     for n in range(14):
         await store.commit(f"zephyr fact number {n}")
     assert len(await store.recall_hits("zephyr fact", k=3)) == 3
-    # techne 0.19.1's recall returns at most 10 rows, whatever limit it is given.
+    # techne 0.19.1 searches at most 10 local rows.
     assert len(await store.recall_hits("zephyr fact", k=12)) == 10
+
+
+async def test_pool_hits_survive_a_full_local_page(home, monkeypatch):
+    monkeypatch.setattr(rs, "entry_points", lambda group: [PoolEntryPoint()])
+    store = TechneMemoryStore(home=home)
+    for n in range(12):
+        await store.commit(f"zephyr fact number {n}")
+    hits = await store.recall_hits("zephyr fact", k=20)
+    assert {"content": "pool fact about zephyr fact", "source": "liminal_archivist"} in hits
 
 
 async def test_publish_reads_config_off_the_event_loop(home, monkeypatch):

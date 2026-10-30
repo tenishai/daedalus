@@ -14,6 +14,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# techne.api.recall only slices its result to `limit`; this keeps all of it.
+_ALL_ROWS = 1000
+
 
 class TechneMemoryStore:
     """recall() = techne.api.recall, the tiered recall techne_recall runs: this
@@ -58,9 +61,10 @@ class TechneMemoryStore:
         return cfg
 
     async def recall_hits(self, query: str, k: int = 5) -> list[dict]:
-        """Up to k hits (at most 10, techne's recall cap) as {"content", "source"}:
-        "local" for this agent's own knowledge, else the recall source's name (e.g.
-        "liminal_archivist" for the team pool)."""
+        """Up to k hits as {"content", "source"}: "local" for this agent's own
+        knowledge, else the recall source's name (e.g. "liminal_archivist" for the
+        team pool). techne 0.19.1 searches at most 10 local rows, so k above 10 can
+        add only recall-source rows."""
         if not query.strip():
             return []
         try:
@@ -74,10 +78,11 @@ class TechneMemoryStore:
         from techne.core import knowledge
 
         hits: list[dict] = []
-        # Fetch all of techne's rows, then filter: observations and threads are
-        # dropped below, so asking for exactly k could leave fewer than k memories.
-        # techne 0.19.1 returns at most 10 rows, so k above 10 gets 10 at most.
-        for row in api.recall(query, limit=10, config=self._config()):
+        # Take every row techne returns (10 local, plus each recall source's own
+        # page), in techne's order, then filter: observations and threads are
+        # dropped below, so asking techne for exactly k could leave fewer than k
+        # memories, and a fixed 10 could cut off the team pool's rows.
+        for row in api.recall(query, limit=_ALL_ROWS, config=self._config()):
             source = row.get("recall_source")
             if source is None and row.get("source_table") != "knowledge":
                 continue  # observations, threads, library documents: not memories
