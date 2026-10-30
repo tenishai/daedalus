@@ -82,13 +82,49 @@ async def test_recall_keeps_full_local_content_past_the_clip(home):
     assert procedure in await store.recall("zephyr calibration")
 
 
-async def test_recall_hits_honours_k_up_to_techne_cap(home):
+async def test_recall_hits_honours_k(home):
     store = TechneMemoryStore(home=home)
     for n in range(14):
         await store.commit(f"zephyr fact number {n}")
     assert len(await store.recall_hits("zephyr fact", k=3)) == 3
-    # techne 0.19.1 searches at most 10 local rows.
-    assert len(await store.recall_hits("zephyr fact", k=12)) == 10
+    assert len(await store.recall_hits("zephyr fact", k=12)) == 12
+
+
+async def test_observations_do_not_crowd_out_memories(home):
+    from techne.core.state import record_observation
+
+    store = TechneMemoryStore(home=home)
+    cfg = store._config()
+    for n in range(15):
+        record_observation(cfg, "s1", f"zephyr calibration observation {n}")
+    for n in range(3):
+        await store.commit(f"zephyr calibration fact {n}")
+    hits = await store.recall_hits("zephyr calibration", k=5)
+    assert sorted(h["content"] for h in hits) == [f"zephyr calibration fact {n}" for n in range(3)]
+
+
+async def test_only_rows_from_other_stores_come_from_techne_recall(home, monkeypatch):
+    import techne.api
+
+    store = TechneMemoryStore(home=home)
+    await store.commit("an unrelated local note about quokkas")
+    rows = [
+        {"id": 1, "content": "the zephyr peer fact", "source_table": "knowledge", "store": "peer"},
+        {"id": 7, "content": "zephyr observation", "source_table": "observation", "store": "local"},
+        {"id": 8, "content": "zephyr thread", "source_table": "thread", "store": "local"},
+        {"content": "zephyr library document"},
+        {"content": "pool row", "recall_source": "liminal_archivist", "store": "local"},
+    ]
+    monkeypatch.setattr(techne.api, "recall", lambda *a, **k: rows)
+
+    hits = await store.recall_hits("zephyr", k=5)
+
+    # The federated row keeps its own content and names its store; local id 1 (the
+    # quokka note) is never fetched in its place. Local rows from recall are dropped.
+    assert hits == [
+        {"content": "the zephyr peer fact", "source": "peer"},
+        {"content": "pool row", "source": "liminal_archivist"},
+    ]
 
 
 async def test_pool_hits_survive_a_full_local_page(home, monkeypatch):
@@ -186,8 +222,3 @@ async def test_a_failing_publish_never_fails_the_task(home, monkeypatch):
     task = await agent.handle_task(Task.from_text("remember: still fine"))
     assert task.state is TaskState.COMPLETED
     assert [e["error"] for e in events if e["type"] == "memory_published"] == ["sink exploded"]
-
-
-def test_use_vectors_is_deprecated(home):
-    with pytest.warns(DeprecationWarning, match="use_vectors"):
-        TechneMemoryStore(home=home, use_vectors=False)
