@@ -6,6 +6,13 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`memory.personal: techne` needs techne 0.19.1 or later** (tenishai/daedalus issue
+  #228). The `techne` extra now requires `tenish-techne[vectors]>=0.19.1`, and an older
+  techne fails the bundle at load with a `BundleError`. Reinstall with
+  `pip install -U 'tenish-daedalus[techne]'` from the tenish index.
+
 ### Fixed
 
 - **The litellm engine accepts a tool name the model returned without its server prefix**
@@ -27,11 +34,25 @@ Issue and pull request numbers all refer to this repository, written in full.
 - **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
   `DAEDALUS_SCRIPTED_ENGINE=1`, `--engine scripted` runs one command per message instead of
   calling a model: `remember: <fact>` commits through the agent's memory store,
-  `recall: <query>` replies with the store's hits as a JSON list, and
+  `recall: <query>` replies with the store's hits as a JSON list of `content` and `source`, and
   `call: <tool> <json args>` calls a tool through the same allowlist, approval gates and
   tool provider the litellm engine uses. Anything else fails the task with reason 704.
   Without the variable the engine is refused at load. `EngineTurn` gains an optional
   `memory` field for it.
+
+### Changed
+
+- **techne memory reaches the team pool** (tenishai/daedalus issue #228). `TechneMemoryStore`
+  still recalls up to k of the agent's own memories from its knowledge, and now adds up to
+  k rows from other stores through `techne.api.recall`, the same recall `techne_recall`
+  runs: a fact another agent published comes back from an installed recall source such as
+  techne-archivist-sync, or from a federated store. `recall_hits()` says where each hit
+  came from (`local`, or the source's or store's name, e.g. `liminal_archivist`). At the
+  end of each task, including one finished by `resume()`, the agent calls
+  `techne.api.publish()` once, which sends knowledge carrying one of techne's
+  `archivist_publish_tags`; with that list empty, techne's default, nothing is sent.
+  `MemoryStore.commit` takes `tags`, and the scripted engine's `remember:` turns `#words`
+  into tags. `memory.home` now also supplies techne's config.yaml.
 
 ## [0.6.0] — 2026-10-26
 

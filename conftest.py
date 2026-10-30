@@ -28,7 +28,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     if os.environ.get("DAEDALUS_REQUIRE_TECHNE") != "1":
         return
     try:
-        import techne  # noqa: F401
+        import techne.api  # noqa: F401  (0.19.1+, #228)
     except ImportError as exc:
         raise pytest.UsageError(
             "DAEDALUS_REQUIRE_TECHNE=1 but techne failed to import "

@@ -107,8 +107,22 @@ async def test_resume_continues_from_checkpointed_messages(tmp_path):
     assert failed.reason_code is ReasonCode.BUDGET_EXHAUSTED
 
     # re-fund: fresh agent (fresh budget), same store, finish the task
+    class PublishCounter:
+        published = 0
+
+        async def recall(self, query, k=5):
+            return []
+
+        async def commit(self, content, kind="fact"):
+            pass
+
+        async def publish(self):
+            self.published += 1
+            return {"enqueued": 0, "synced": 0, "failed": 0}
+
     llm2 = ScriptedLLM("picked up where we left off")
-    agent2 = Agent(Bundle.load(bundle), llm=llm2, checkpoints=store)
+    memory = PublishCounter()
+    agent2 = Agent(Bundle.load(bundle), llm=llm2, checkpoints=store, memory=memory)
     resumed = await agent2.resume(failed.id)
     assert resumed is not None
     assert resumed.state is TaskState.COMPLETED
@@ -116,6 +130,7 @@ async def test_resume_continues_from_checkpointed_messages(tmp_path):
     # the resumed LLM call saw the checkpointed conversation, not a fresh one
     assert llm2.calls[0][0]["role"] == "system"
     assert await store.load(failed.id) is None  # dropped after completion
+    assert memory.published == 1  # a resumed task publishes at its end too (#228)
 
 
 async def test_resume_unknown_task_returns_none(tmp_path):
@@ -143,11 +158,13 @@ def _techne_installed() -> bool:
     return importlib.util.find_spec("techne") is not None
 
 
-def test_memory_techne_without_install_fails_at_load(tmp_path):
-    if _techne_installed():
-        pytest.skip("techne is installed; load cannot fail")
+def test_memory_techne_without_techne_api_fails_at_load(tmp_path, monkeypatch):
+    # techne missing, or older than 0.19.1 (no techne.api): fail at load (#228).
+    import sys
+
+    monkeypatch.setitem(sys.modules, "techne.api", None)
     bundle = write_bundle(tmp_path, "memory:\n  personal: techne\n")
-    with pytest.raises(BundleError, match="techne is not installed"):
+    with pytest.raises(BundleError, match="techne 0.19.1 or later is not installed"):
         Agent(Bundle.load(bundle), llm=ScriptedLLM())
 
 
@@ -160,7 +177,7 @@ async def test_techne_store_round_trip(tmp_path, monkeypatch):
 
     db_path = tmp_path / "techne.db"
     init_db(db_path)
-    store = TechneMemoryStore(db_path=db_path, use_vectors=False)
+    store = TechneMemoryStore(db_path=db_path)
     await store.commit("spark5 exports PYTHONPATH globally; always env -u PYTHONPATH")
     recalled = await store.recall("PYTHONPATH venv problem")
     assert any("PYTHONPATH" in item for item in recalled)
@@ -178,23 +195,12 @@ async def test_techne_recall_returns_full_content_past_search_clip(tmp_path):
 
     db_path = tmp_path / "techne.db"
     init_db(db_path)
-    store = TechneMemoryStore(db_path=db_path, use_vectors=False)
+    store = TechneMemoryStore(db_path=db_path)
     procedure = "## Skill: long-procedure\n\nzephyr calibration steps.\n" + ("step\n" * 300)
     assert len(procedure) > 500
     await store.commit(procedure, kind="procedure")
     recalled = await store.recall("zephyr calibration")
     assert any(item == procedure for item in recalled), [len(i) for i in recalled]
-
-
-@pytest.mark.skipif(not _techne_installed(), reason="techne not installed")
-async def test_techne_store_defaults_to_vectors_on(tmp_path):
-    # The 0.16.1 wave flips the default: the runtime image bakes the
-    # backend in, and techne degrades to FTS cleanly when it is absent --
-    # so an agent constructed without an explicit knob wants vectors.
-    from daedalus.memory.techne import TechneMemoryStore
-
-    store = TechneMemoryStore(db_path=tmp_path / "techne.db")
-    assert store.use_vectors is True
 
 
 async def test_checkpoint_store_closes_its_sqlite_connections(tmp_path):
