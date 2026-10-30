@@ -9,7 +9,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `LLM.complete(messages, tools=None) -> LLMResponse` (tools OpenAI function-shaped; model/max_tokens are construction config, not call args)
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
-- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact", tags="")`; optional, unannotated: `.recall_hits(query, k) -> list[{content, source}]` and `.publish() -> dict`, called once at task end by Agent._publish_memory (#228)
+- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact", tags="")`; optional, unannotated: `.recall_hits(query, k) -> list[{content, source}]` and `.publish() -> dict`, called once at task end, from handle_task or resume, by Agent._publish_memory (#228)
 - `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`

@@ -46,8 +46,9 @@ Issue and pull request numbers all refer to this repository, written in full.
   recalls through `techne.api.recall`, the same recall `techne_recall` runs, so a fact
   another agent published comes back from an installed recall source such as
   techne-archivist-sync, and `recall_hits()` says where each hit came from (`local`, or the
-  source's name, e.g. `liminal_archivist`). At the end of each task the agent calls
-  `techne.api.publish()` once, which sends knowledge carrying one of techne's
+  source's name, e.g. `liminal_archivist`). At the end of each task, including one
+  finished by `resume()`, the agent calls `techne.api.publish()` once, which sends
+  knowledge carrying one of techne's
   `archivist_publish_tags`; with that list empty, techne's default, nothing is sent.
   `MemoryStore.commit` takes `tags`, and the scripted engine's `remember:` turns `#words`
   into tags. `memory.home` now also supplies techne's config.yaml. The store's

@@ -3,6 +3,7 @@ sources and keeps where each hit came from; a task's tagged facts are published 
 at task end."""
 
 import json
+import threading
 
 import pytest
 
@@ -79,6 +80,30 @@ async def test_recall_keeps_full_local_content_past_the_clip(home):
     procedure = "## Skill: long-procedure\n\nzephyr calibration steps.\n" + ("step\n" * 300)
     await store.commit(procedure, kind="procedure")
     assert procedure in await store.recall("zephyr calibration")
+
+
+async def test_recall_hits_honours_k_up_to_techne_cap(home):
+    store = TechneMemoryStore(home=home)
+    for n in range(14):
+        await store.commit(f"zephyr fact number {n}")
+    assert len(await store.recall_hits("zephyr fact", k=3)) == 3
+    # techne 0.19.1's recall returns at most 10 rows, whatever limit it is given.
+    assert len(await store.recall_hits("zephyr fact", k=12)) == 10
+
+
+async def test_publish_reads_config_off_the_event_loop(home, monkeypatch):
+    store = TechneMemoryStore(home=home)
+    threads = []
+    real = store._config
+
+    def spy():
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real()
+
+    monkeypatch.setattr(store, "_config", spy)
+    with use_registry({ARCHIVIST_PUBLISH_TARGET: _sink([])}):
+        await store.publish()
+    assert threads == [False]
 
 
 async def test_recall_degrades_to_nothing_when_techne_fails(home, monkeypatch):

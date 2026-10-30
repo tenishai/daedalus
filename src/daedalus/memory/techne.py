@@ -58,8 +58,9 @@ class TechneMemoryStore:
         return cfg
 
     async def recall_hits(self, query: str, k: int = 5) -> list[dict]:
-        """Hits as {"content", "source"}: "local" for this agent's own knowledge, else
-        the recall source's name (e.g. "liminal_archivist" for the team pool)."""
+        """Up to k hits (at most 10, techne's recall cap) as {"content", "source"}:
+        "local" for this agent's own knowledge, else the recall source's name (e.g.
+        "liminal_archivist" for the team pool)."""
         if not query.strip():
             return []
         try:
@@ -73,6 +74,9 @@ class TechneMemoryStore:
         from techne.core import knowledge
 
         hits: list[dict] = []
+        # Fetch all of techne's rows, then filter: observations and threads are
+        # dropped below, so asking for exactly k could leave fewer than k memories.
+        # techne 0.19.1 returns at most 10 rows, so k above 10 gets 10 at most.
         for row in api.recall(query, limit=10, config=self._config()):
             source = row.get("recall_source")
             if source is None and row.get("source_table") != "knowledge":
@@ -109,7 +113,8 @@ class TechneMemoryStore:
         try:
             from techne import api
 
-            return await asyncio.to_thread(api.publish, config=self._config())
+            # _config() reads config.yaml, so it runs in the thread too.
+            return await asyncio.to_thread(lambda: api.publish(config=self._config()))
         except Exception as exc:
             log.warning("techne publish failed", exc_info=True)
             return {"enqueued": 0, "synced": 0, "failed": 0, "error": str(exc)}

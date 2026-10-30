@@ -107,8 +107,22 @@ async def test_resume_continues_from_checkpointed_messages(tmp_path):
     assert failed.reason_code is ReasonCode.BUDGET_EXHAUSTED
 
     # re-fund: fresh agent (fresh budget), same store, finish the task
+    class PublishCounter:
+        published = 0
+
+        async def recall(self, query, k=5):
+            return []
+
+        async def commit(self, content, kind="fact"):
+            pass
+
+        async def publish(self):
+            self.published += 1
+            return {"enqueued": 0, "synced": 0, "failed": 0}
+
     llm2 = ScriptedLLM("picked up where we left off")
-    agent2 = Agent(Bundle.load(bundle), llm=llm2, checkpoints=store)
+    memory = PublishCounter()
+    agent2 = Agent(Bundle.load(bundle), llm=llm2, checkpoints=store, memory=memory)
     resumed = await agent2.resume(failed.id)
     assert resumed is not None
     assert resumed.state is TaskState.COMPLETED
@@ -116,6 +130,7 @@ async def test_resume_continues_from_checkpointed_messages(tmp_path):
     # the resumed LLM call saw the checkpointed conversation, not a fresh one
     assert llm2.calls[0][0]["role"] == "system"
     assert await store.load(failed.id) is None  # dropped after completion
+    assert memory.published == 1  # a resumed task publishes at its end too (#228)
 
 
 async def test_resume_unknown_task_returns_none(tmp_path):

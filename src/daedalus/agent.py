@@ -1015,7 +1015,9 @@ class Agent:
 
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
         ask_ledger.set(AskLedger())
-        return await self._loop(task, state["messages"])
+        result = await self._loop(task, state["messages"])
+        await self._publish_memory()
+        return result
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
         """The engine run, under the bundle's task deadline (#201).
