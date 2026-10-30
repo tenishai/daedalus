@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
-updated: 2026-09-28
-anchor: src/daedalus/protocols.py sha=75aa13430039c250f60a48d0f5f9d3f4fa6ee791
+updated: 2026-10-29
+anchor: src/daedalus/protocols.py sha=177bf6218394ae9e78fc696ed7fb15af774eacf4
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -10,7 +10,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
 - `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact")`
-- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage
+- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage. Optional class attribute `knowledge_only = True` (read with getattr, not a Protocol member): the provider answers from the agent's own material with no credential, so its tools stay offered while answering a colleague (kobo#310); default credentialed, so a new provider is withheld there until it opts in. Only SkillsToolProvider sets it.
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`
 Data: `ToolCall(id, name, arguments)` (name = exactly what the model said), `LLMResponse(text, reasoning, tool_calls, input_tokens, output_tokens, finish_reason)`.

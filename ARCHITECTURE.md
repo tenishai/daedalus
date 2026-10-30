@@ -1,8 +1,8 @@
 ---
 card: repo-card:daedalus
-updated: 2026-10-26
+updated: 2026-10-29
 anchor: pyproject.toml sha=08533b1cf601d01f89403a832c85cf842537624d
-anchor: src/daedalus/agent.py sha=679dccfa7d5aac1e84b93fa23c54cd06c4ae33b5
+anchor: src/daedalus/agent.py sha=8ee5c9df5d1ea4d2224b1f567cd2566d68f6f6b7
 ---
 # daedalus — repo card
 
@@ -22,7 +22,7 @@ SEAMS → card:
 - bundle      src/daedalus/bundle.py         (AgentSpec = agent.yaml schema, drift-pinned JSON Schema) → docs/arch/bundle.md
 - (uncarded) transports/slack.py (Socket Mode; reaction approver; one transport for all slack blocks); transports/cli.py
 - (uncarded) tiers.py (the deployment's tiers file: tier word → model, endpoint, engine, limits)
-- (uncarded) tools/*: builtin files.* (roots that serve the host are refused at load: /, system dirs, $HOME or above, $TECHNE_HOME, #199) and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
+- (uncarded) tools/*: builtin files.* (roots that serve the host are refused at load: /, system dirs, $HOME or above, $TECHNE_HOME, #199) and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149; a task with inbound depth ≥ 1 is offered only `knowledge_only` providers' tools, and the cloudtrail/github/liminal lanes refuse it with one sentence, kobo#310), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
 - (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes; teach_authorized is an allowlist, `auth.operator_subs`, #195), journal.py (7-day journal.db, one row per (context_id, verified sub), #212), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file lint; not a sandbox: a delivered file runs as the agent at next boot, #195)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient; budget.py; scaffold.py
 

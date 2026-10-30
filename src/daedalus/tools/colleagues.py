@@ -157,6 +157,44 @@ current_delegation_depth: contextvars.ContextVar[int] = contextvars.ContextVar(
 #: for it finds both ends: cabal reads this in DelegationDepthGuardrail.
 DEPTH_KEY = "cabal_delegation_depth"
 
+#: The asking agent's name, stamped on every outbound ask beside DEPTH_KEY and
+#: read by Agent.handle_task on the way in (tenishai/kobo#310). Also a
+#: CROSS-REPO STRING CONTRACT: cabal copies task metadata through verbatim and
+#: stamps no caller name of its own (the caller lives in its JWT sub), so the
+#: asker names itself here. Absent or unreadable, the asker is unnamed and the
+#: refusal below says "the asking agent".
+ASKED_BY_KEY = "daedalus_asked_by"
+
+# The agent whose task this agent is answering, set by Agent.handle_task from
+# ASKED_BY_KEY when current_delegation_depth is >= 1; None on a human task or
+# an unnamed asker. Read only to NAME the asker in prompts and refusals -- the
+# decision itself keys on depth, so a missing name never widens anything.
+current_consult_asker: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_consult_asker", default=None
+)
+
+
+def answering_colleague() -> bool:
+    """Is the task being handled another agent's (depth >= 1)? The one signal
+    behind the inbound prompt note, the knowledge-only tool set, and the
+    credential walls (kobo#310: a consulted agent answers from what it knows)."""
+    return current_delegation_depth.get() >= 1
+
+
+def consult_refusal(permission: str) -> str | None:
+    """The sentence a credentialed lane answers with while this agent is
+    answering a colleague, or None on a human task (kobo#310, the strict
+    model). Every lane that fetches or uses a credential on demand calls this
+    BEFORE it does, so the second wall holds even for a tool the first wall
+    (Agent._run_engine's knowledge-only filter) somehow let through."""
+    if not answering_colleague():
+        return None
+    asker = current_consult_asker.get() or "the asking agent"
+    return (
+        "I can't use my own access for a task another agent asked for; "
+        f"your owner can request {permission} for {asker} on its Access page."
+    )
+
 # Colleagues successfully consulted while handling the CURRENT task, in
 # consultation order -- Agent.handle_task resets this per task and reads it
 # after the final draft to enforce the attribution law (a consulted
@@ -732,6 +770,10 @@ class ColleaguesToolProvider:
             **envelope["task"].get("metadata", {}),
             DEPTH_KEY: current_delegation_depth.get() + 1,
         }
+        if self.self_name:
+            # Name the asker, so the colleague can say whose owner would have
+            # to request a permission its answer needed (kobo#310).
+            envelope["task"]["metadata"][ASKED_BY_KEY] = self.self_name
         try:
             response = await client.post(
                 f"{self.url}/a2a/tasks", json=envelope, headers=headers, timeout=180.0

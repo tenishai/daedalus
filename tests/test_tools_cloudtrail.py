@@ -456,6 +456,32 @@ def test_start_query_exception_degrades_politely():
     assert reply.startswith("The provisioning-history query failed partway")
 
 
+def test_a_colleague_task_never_assumes_the_role():
+    """kobo#310, the second wall: while answering another agent, the lane
+    refuses with the one sentence before anything leaves the pod -- and a
+    session cached from a human task is not reused either."""
+    from daedalus.tools.colleagues import current_consult_asker, current_delegation_depth
+
+    provider, fake = _provider(FakeLake())
+    asyncio.run(provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"}))
+    assert len(fake.sts.calls) == 1  # a human task: the role was assumed
+    token = current_delegation_depth.set(1)
+    asker = current_consult_asker.set("rin")
+    try:
+        reply = asyncio.run(
+            provider.call("cloudtrail.query_provisioning", {"email": "a@b.co"})
+        )
+    finally:
+        current_delegation_depth.reset(token)
+        current_consult_asker.reset(asker)
+    assert reply == (
+        "I can't use my own access for a task another agent asked for; your owner "
+        "can request cloudtrail.query_provisioning for rin on its Access page."
+    )
+    assert len(fake.sts.calls) == 1
+    assert fake.lake.queries == [] if hasattr(fake.lake, "queries") else True
+
+
 def test_credentials_cache_across_calls():
     lake = FakeLake()
     provider, fake = _provider(lake)
