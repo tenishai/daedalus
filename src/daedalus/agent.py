@@ -161,6 +161,13 @@ def _with_inbound_note(messages: list[dict]) -> list[dict]:
 ENGINES = ("litellm", "claude-code")
 
 
+def engines() -> tuple[str, ...]:
+    """ENGINES, plus the model-free `scripted` when DAEDALUS_SCRIPTED_ENGINE=1 (#227)."""
+    from daedalus.engines.scripted import ENV
+
+    return (*ENGINES, "scripted") if os.environ.get(ENV) == "1" else ENGINES
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -196,9 +203,13 @@ class Agent:
         # engine is the default, and an explicit engine that disagrees is refused.
         self.model_resolution = self._resolve_model(explicit_engine)
         self.engine_name = explicit_engine or self.model_resolution.engine
-        if self.engine_name not in ENGINES:
+        choices = engines()
+        if self.engine_name not in choices:
+            hint = (
+                " (it needs DAEDALUS_SCRIPTED_ENGINE=1)" if self.engine_name == "scripted" else ""
+            )
             raise BundleError(
-                f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
+                f"unknown engine {self.engine_name!r}{hint}; choose one of {', '.join(choices)}"
             )
         if self.engine_name == "claude-code" and bundle.spec.model.budget.per_task_tokens:
             # Declare the gap and refuse, never degrade silently (#51): Claude Code runs
@@ -303,6 +314,9 @@ class Agent:
         set itself."""
         model = self.bundle.spec.model
         cc = self.bundle.spec.engine.claude_code
+        if explicit_engine == "scripted":
+            # Never calls a model, so a tier needs no tiers file (#227).
+            return Resolution(tier=None, used=None, engine="scripted", id=model.id, source="id")
         if model.id not in TIER_NAMES:
             engine = explicit_engine or "litellm"
             shown = model.id
@@ -1070,6 +1084,7 @@ class Agent:
                 spec=self.bundle.spec,
                 approve=self._approve_native,
                 withheld=self._withheld_native,
+                memory=self.memory,
             )
         )
 
@@ -1079,6 +1094,10 @@ class Agent:
             from daedalus.engines.claude_code import ClaudeCodeEngine
 
             return ClaudeCodeEngine(self.bundle.spec.engine.claude_code)
+        if self.engine_name == "scripted":
+            from daedalus.engines.scripted import ScriptedEngine
+
+            return ScriptedEngine()
         return LiteLLMEngine(self.llm)
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
