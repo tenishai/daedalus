@@ -1332,6 +1332,7 @@ class Agent:
                         port=int(options.get("port", 9200)),
                         events=self.events,
                         verifier=self._a2a_verifier(options.get("auth")),
+                        name=self.bundle.spec.name,
                     )
                 )
             elif spec.kind == "slack":

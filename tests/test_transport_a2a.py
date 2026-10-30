@@ -366,8 +366,10 @@ def test_listening_line_names_the_auth_regime():
 def test_no_auth_on_a_reachable_address_warns(host):
     from daedalus.transports.a2a import A2aTransport
 
-    warning = A2aTransport(host=host).open_warning()
+    warning = A2aTransport(host=host, port=8080, name="scout").open_warning()
     assert warning and "no auth" in warning
+    assert "bundle scout" in warning and f"{host}:8080" in warning
+    assert "every tool the allowlist admits" in warning and "Add an auth block" in warning
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
@@ -381,3 +383,41 @@ def test_auth_on_any_address_does_not_warn():
     from daedalus.transports.a2a import A2aTransport
 
     assert A2aTransport(host="0.0.0.0", verifier=object()).open_warning() is None
+
+
+async def _serve_once(transport, monkeypatch):
+    """Run serve() with uvicorn stubbed out, so only the boot output happens."""
+    import uvicorn
+
+    class _Server:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    await transport.serve(handler=None)
+
+
+@pytest.mark.asyncio
+async def test_serve_logs_and_prints_the_warning_when_open(monkeypatch, caplog, capsys):
+    from daedalus.transports.a2a import A2aTransport
+
+    with caplog.at_level("WARNING", logger="daedalus.transports.a2a"):
+        await _serve_once(A2aTransport(host="0.0.0.0", port=8080, name="scout"), monkeypatch)
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "bundle scout" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs", [{"host": "127.0.0.1"}, {"host": "0.0.0.0", "verifier": object()}]
+)
+async def test_serve_is_quiet_on_loopback_or_with_auth(monkeypatch, caplog, capsys, kwargs):
+    from daedalus.transports.a2a import A2aTransport
+
+    with caplog.at_level("WARNING", logger="daedalus.transports.a2a"):
+        await _serve_once(A2aTransport(name="scout", **kwargs), monkeypatch)
+    assert not caplog.records
+    assert capsys.readouterr().err == ""

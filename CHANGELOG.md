@@ -15,6 +15,12 @@ Issue and pull request numbers all refer to this repository, written in full.
   before, and the allowlist check still runs on the resolved name. The trace records a
   `bare_tool_name` event when this happens.
 
+- **The open-listener warning names the bundle and goes to the log** (tenishai/daedalus
+  issue #204). An a2a transport on an address other than loopback with no `auth` block
+  already printed a stderr warning; it now also logs at WARNING, and the text names the
+  bundle and `host:port`, says anyone who can reach it can use every tool the allowlist
+  admits, and says to add `auth`. It still serves; loopback and `auth` stay quiet.
+
 ### Added
 
 - **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
