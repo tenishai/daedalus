@@ -353,10 +353,10 @@ def _retire_entries(db_path: Path, entry_ids: list[int], survivor_id: int) -> No
     egress's Tier-0 injection -- so this is what actually removes an entry
     from recall. The softer `status='archived'` lifecycle flag (used by
     techne's archive_scan for stale/uncertain facts) is NOT equivalent here:
-    explicit search defaults `include_archived=True`, and
-    daedalus.memory.techne.TechneMemoryStore.recall() calls search() with
-    that same default -- an archived-only row would still surface through
-    the agent's actual recall path. Only superseded_by is unconditional.
+    explicit search defaults `include_archived=True`, so an archived-only row
+    still surfaces through techne_search. TechneMemoryStore.recall() has
+    left archived rows out since #228 (#233), but only superseded_by is
+    unconditional.
 
     `_retire_in_conn` requires `survivor_id` to already be a LIVE row (it is
     designed for contradiction detection, where both sides already exist as
