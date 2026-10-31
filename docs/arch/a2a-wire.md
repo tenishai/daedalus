@@ -3,7 +3,7 @@ card: arch-card:daedalus-a2a-wire
 updated: 2026-10-24
 anchor: src/daedalus/transports/a2a.py sha=5ad291cb96200a3351a456db53d3afba364921f0
 anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
-anchor: src/daedalus/memory/teach.py sha=dcc9b07197940bffe93d8b06be73b5d9744d0398
+anchor: src/daedalus/memory/teach.py sha=2422c4be556eedd59f5f0f0aa9ec46f08dfe5d63
 ---
 # a2a-wire — the agent as a callable peer (cabal, kobo, kaminos)
 
