@@ -6,6 +6,8 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-31
+
 ### Upgrading
 
 - **`memory.personal: techne` needs techne 0.19.1 or later** (tenishai/daedalus issue
