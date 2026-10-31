@@ -59,7 +59,9 @@ jobs:
   # read-only ergon-ci index token (repo secret TENISH_INDEX_TOKEN), as ergon's
   # smoke job does. uv's default first-index strategy takes tenish-techne only from
   # the tenish index, so a same-named package on PyPI can't win. Same guard as the
-  # test job: fork PRs get no secrets and run fork-pr instead.
+  # test job: fork PRs get no secrets and run fork-pr instead. Dependabot PRs pass
+  # the guard but see only Dependabot secrets, so the same token is also stored as
+  # a Dependabot secret named TENISH_INDEX_TOKEN.
   #
   # DAEDALUS_REQUIRE_TECHNE=1 turns the techne-path files' module-level
   # `pytest.importorskip(...)` from a quiet skip into a hard failure (conftest.py):

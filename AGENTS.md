@@ -52,7 +52,9 @@ right.
   `techne` extra, read-only token in the `TENISH_INDEX_TOKEN` secret) and runs the full
   suite with `DAEDALUS_REQUIRE_TECHNE=1`, which turns a missing/broken techne import into
   a hard failure instead of a skip (`conftest.py`). It runs on every push to main and
-  every same-repo PR (#48); fork PRs get no secrets and skip it.
+  every same-repo PR (#48); fork PRs get no secrets and skip it. Dependabot PRs read
+  Dependabot secrets only, so the token is stored under the same name in both places;
+  rotate both together.
 - **The distribution is `tenish-daedalus`; the import package and the CLI are `daedalus`.**
   Anything that looks the package up by distribution name (`pip show`, `importlib.metadata`,
   an extras install string) needs the long name.
