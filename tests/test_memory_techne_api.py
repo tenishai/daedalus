@@ -82,6 +82,21 @@ async def test_recall_keeps_full_local_content_past_the_clip(home):
     assert procedure in await store.recall("zephyr calibration")
 
 
+async def test_recall_leaves_out_archived_knowledge(home):
+    import sqlite3
+
+    store = TechneMemoryStore(home=home)
+    await store.commit("the zephyr valve is torqued to 40 Nm")
+    await store.commit("the zephyr valve was torqued to 35 Nm")
+    with sqlite3.connect(home / "techne.db") as conn:
+        conn.execute("UPDATE knowledge SET status = 'archived' WHERE content LIKE '%35 Nm'")
+
+    hits = await store.recall_hits("zephyr valve torqued")
+
+    assert {"content": "the zephyr valve is torqued to 40 Nm", "source": "local"} in hits
+    assert not any("35 Nm" in h["content"] for h in hits)
+
+
 async def test_recall_hits_honours_k(home):
     store = TechneMemoryStore(home=home)
     for n in range(14):
