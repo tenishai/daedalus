@@ -15,6 +15,12 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Fixed
 
+- **CI runs the techne-backed tests on every push and same-repo PR** (tenishai/daedalus
+  issue #48). The `techne` job cloned the private techne repo, which this repository's
+  CI token can't read, so it only ran by hand and failed. It now installs
+  `tenish-techne` from the tenish index through the `techne` extra, with the read-only
+  index token in the `TENISH_INDEX_TOKEN` repository secret.
+
 - **The litellm engine accepts a tool name the model returned without its server prefix**
   (tenishai/daedalus issue #167). Gemini sometimes sends `remember` for
   `colleagues__remember`, and the call was refused as unknown. A bare name now resolves
