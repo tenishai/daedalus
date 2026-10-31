@@ -18,10 +18,10 @@ _ALL_ROWS = 1000
 
 
 class TechneMemoryStore:
-    """recall() = this agent's knowledge (techne search, as before), then the rows
-    techne.api.recall finds in other stores: installed recall sources and federated
-    stores, so a fact another agent published comes back through the team pool
-    (#228). commit() =
+    """recall() = this agent's live knowledge (techne search, soft-archived rows left
+    out, #233), then the rows techne.api.recall finds in other stores: installed recall
+    sources and federated stores, so a fact another agent published comes back through
+    the team pool (#228). commit() =
     techne.knowledge.store; publish() = techne.api.publish, called once at task end,
     which sends knowledge carrying one of techne's `archivist_publish_tags` and does
     nothing when that list is empty. The agent never knows techne exists.
@@ -69,9 +69,10 @@ class TechneMemoryStore:
         return self._local_hits(query, k) + self._remote_hits(query, k)
 
     def _local_hits(self, query: str, k: int) -> list[dict]:
-        """This agent's knowledge, searched as before #228. techne_recall's local page
-        mixes in observations and threads, which could fill it and push every
-        memory out (Prudence, PR 230)."""
+        """This agent's knowledge, through techne search as before #228, but without
+        soft-archived rows, as techne_recall leaves them out (#233). techne_recall's
+        local page mixes in observations and threads, which could fill it and push
+        every memory out (Prudence, PR 230)."""
         from techne.core import knowledge, search
 
         hits: list[dict] = []

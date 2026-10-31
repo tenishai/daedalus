@@ -59,6 +59,8 @@ Issue and pull request numbers all refer to this repository, written in full.
   `archivist_publish_tags`; with that list empty, techne's default, nothing is sent.
   `MemoryStore.commit` takes `tags`, and the scripted engine's `remember:` turns `#words`
   into tags. `memory.home` now also supplies techne's config.yaml.
+  The agent's own recall now leaves out soft-archived knowledge, as `techne_recall`
+  does; before, it returned it (tenishai/daedalus issue #233).
 
 ## [0.6.0] — 2026-10-26
 
