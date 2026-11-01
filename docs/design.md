@@ -313,8 +313,12 @@ prompt, which names the day it summarises instead of a clock line.
    the task came from Slack (#147).
 
 The loop may add one note each when it withholds or drops tools: gated tools nobody can
-approve (#105), a tool provider that refused by policy (#156), and `ask_colleague` when
-this task is itself an answer to a colleague (#149).
+approve (#105), a tool provider that refused by policy (#156), and every credentialed tool
+when this task is itself an answer to a colleague (#149, tenishai/kobo#310): a consulted
+agent answers from what it knows and what its skills say, keeps only tools whose provider
+declares `knowledge_only`, and is told to name the tool it lacked and that the asker's
+owner can request it. The lanes that fetch a credential on demand (cloudtrail, the github
+broker, a liminal gateway call) refuse such a task as a second wall.
 
 ### 2.3b Engines
 

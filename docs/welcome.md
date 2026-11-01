@@ -87,7 +87,10 @@ refuses to load; an `--engine` that disagrees with the tier's engine is refused 
 - **`liminal`**: the liminal gateway at `tools.liminal.url`. Reach for it when: tools and
   their credentials should live in a gateway, not in the agent. Needs `tenish-liminal`.
 - **`colleagues`**: `colleagues.list_colleagues` and `colleagues.ask_colleague` against a cabal switchboard at
-  `tools.colleagues.url`. Reach for it when: this agent should ask other agents.
+  `tools.colleagues.url`. Reach for it when: this agent should ask other agents. An agent
+  answering a colleague's question answers from what it knows and its skills: it is offered
+  no credentialed tools for that task, cannot ask onward, and says which tool the answer
+  would need so the asker's owner can request it.
 
 Built-in groups, under `tools.builtin`, stack beside the provider:
 

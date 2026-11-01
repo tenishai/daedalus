@@ -291,10 +291,12 @@ async def test_ask_colleague_envelope_shape_is_pinned(monkeypatch):
     # cross the A2A boundary or the cross-agent cycle is unbounded. This
     # assertion is the reason that change could not land quietly, which is
     # what an exact-shape pin is for — so it is UPDATED here, not loosened.
+    # `daedalus_asked_by` joined it with kobo#310: the colleague names whose
+    # owner can request a permission its answer needed.
     task_without_id = {k: v for k, v in task.items() if k != "id"}
     assert task_without_id == {
         "kind": "task",
-        "metadata": {"cabal_delegation_depth": 1},
+        "metadata": {"cabal_delegation_depth": 1, "daedalus_asked_by": "me"},
         "status": {
             "state": "submitted",
             "message": {
@@ -1212,6 +1214,23 @@ async def test_an_ask_carries_the_hop_count_outbound(monkeypatch):
     )
 
 
+
+
+@pytest.mark.asyncio
+async def test_the_ask_names_the_asker(monkeypatch):
+    """daedalus_asked_by rides beside the depth key, so the colleague can say
+    whose owner would have to request a permission its answer needed
+    (kobo#310). cabal stamps no caller name of its own."""
+    from daedalus.tools.colleagues import ASKED_BY_KEY
+
+    monkeypatch.setenv("COLLEAGUE_TOKEN", "t")
+    good = FakeResponse(payload={
+        "status": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}
+    })
+    client = FakeHTTPClient(post_responses=[good])
+    await make_provider(client, self_name="ledger")._ask_colleague("rin", "q")
+    _, body, _ = client.post_calls[0]
+    assert body["task"]["metadata"][ASKED_BY_KEY] == "ledger"
 
 
 @pytest.mark.asyncio

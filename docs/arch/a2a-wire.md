@@ -1,6 +1,6 @@
 ---
 card: arch-card:daedalus-a2a-wire
-updated: 2026-10-24
+updated: 2026-11-01
 anchor: src/daedalus/transports/a2a.py sha=5ad291cb96200a3351a456db53d3afba364921f0
 anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
 anchor: src/daedalus/memory/teach.py sha=2422c4be556eedd59f5f0f0aa9ec46f08dfe5d63
@@ -17,7 +17,7 @@ INVARIANTS:
 - The tool lane writes Python the next boot runs as the agent; memory/tooling.py is a lint, not a sandbox (#195).
 - Reason codes (ReasonCode: 700 human input, 701 policy, 702 budget, 703 tool blocked, 704 escalation) are written to BOTH metadata daedalus_reason_code and cabal_reason_code, so cabal reads them untranslated. Machines key on state + code, never on reply text.
 - Metadata rides through verbatim (cabal_trace_id etc. must come back).
-- Two inbound metadata keys change behaviour. `daedalus_recall` (task.RECALL_KEY) replaces the prompt as the memory-recall query when it is a non-blank string. `cabal_delegation_depth` (tools/colleagues.py DEPTH_KEY) ≥ 1 means another agent asked: Agent._loop then withholds colleagues.ask_colleague and adds a note to the prompt, so the agent cannot ask onward (#149). An unreadable depth reads as 0.
+- Three inbound metadata keys change behaviour. `daedalus_recall` (task.RECALL_KEY) replaces the prompt as the memory-recall query when it is a non-blank string. `cabal_delegation_depth` (tools/colleagues.py DEPTH_KEY) ≥ 1 means another agent asked: Agent._run_engine then offers only `knowledge_only` providers' tools (skills.load), withholds colleagues.ask_colleague and every credentialed tool, adds a note to the prompt, and the cloudtrail/github/liminal lanes refuse on-demand credentials for the task (#149, kobo#310). An unreadable depth reads as 0. `daedalus_asked_by` (ASKED_BY_KEY), stamped by the asking daedalus agent on its outbound ask (cabal copies metadata verbatim and stamps no caller name), names the asker in that note and refusal; it is bounded to 64 chars and used only for wording, never as an identity.
 - Error bodies are readable JSON (400/401/409/422/500): cabal wraps >=400 text into DispatchError, so it is what its operator sees. JSON-RPC errors use -32700/-32601/-32602/-32000, never HTTP 500.
 - With `auth` configured, GET /events needs the same bearer token as the POSTs (401 + `WWW-Authenticate: Bearer` without one, #196); the card and /healthz stay open. With no `auth` block every route is open, /events included. Default bind 127.0.0.1:9200.
 - /events redacts on the wire, not on the bus: tool_call `arguments`, tool_result `content` and reasoning `text` go out as `<field>_chars` sizes unless DAEDALUS_TRACE_CONTENT=1 (a2a.wire_event). The in-process bus keeps content, because the Slack transport's progress lines and `run -v` read it there.

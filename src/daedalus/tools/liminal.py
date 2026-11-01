@@ -151,6 +151,13 @@ class LiminalToolProvider:
         ]
 
     async def call(self, name: str, payload: dict) -> str:
+        # kobo#310, the second wall: a gateway tool runs under this agent's
+        # exchanged token, so it never runs for another agent's task.
+        from daedalus.tools.colleagues import consult_refusal
+
+        refusal = consult_refusal(name)
+        if refusal is not None:
+            return refusal
         await self._refresh_bearer()
         client = self._ensure()
         outcome = await client.call_tool(name, payload)

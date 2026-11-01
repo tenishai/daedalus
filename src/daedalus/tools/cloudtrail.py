@@ -465,6 +465,16 @@ class CloudTrailToolProvider:
         return _flatten_rows(rows)
 
     def _lake_client(self):
+        # THE SECOND WALL (kobo#310): on a colleague's task the role is never
+        # assumed and a cached session is never reused, whatever the tool
+        # filter let through. Checked here, where the credential is used, so
+        # the refusal leaves before anything leaves the pod. The contextvar is
+        # copied into the worker thread by asyncio.to_thread.
+        from daedalus.tools.colleagues import consult_refusal
+
+        refusal = consult_refusal("cloudtrail.query_provisioning")
+        if refusal is not None:
+            raise _LaneError(refusal)
         boto3 = self._boto3
         if boto3 is None:
             try:
