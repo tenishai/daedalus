@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
 updated: 2026-09-28
-anchor: src/daedalus/protocols.py sha=75aa13430039c250f60a48d0f5f9d3f4fa6ee791
+anchor: src/daedalus/protocols.py sha=0181cf1e3598fc8505e0993f7a1be024e4130ca2
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -9,7 +9,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `LLM.complete(messages, tools=None) -> LLMResponse` (tools OpenAI function-shaped; model/max_tokens are construction config, not call args)
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
-- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact")`
+- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact", tags="")`; optional, unannotated: `.recall_hits(query, k) -> list[{content, source}]` and `.publish() -> dict`, called once at task end, from handle_task or resume, by Agent._publish_memory (#228)
 - `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`

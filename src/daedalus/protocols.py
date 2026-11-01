@@ -64,9 +64,13 @@ class Transport(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
+    """Optional, so never annotated here (an annotated member is required by
+    isinstance): `recall_hits(query, k) -> list[dict]` with "content" and "source",
+    and `publish() -> dict`, which the Agent calls once at task end (#228)."""
+
     async def recall(self, query: str, k: int = 5) -> list[str]: ...
 
-    async def commit(self, content: str, kind: str = "fact") -> None: ...
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None: ...
 
 
 @runtime_checkable
@@ -110,7 +114,7 @@ class NoMemory:
     async def recall(self, query: str, k: int = 5) -> list[str]:
         return []
 
-    async def commit(self, content: str, kind: str = "fact") -> None:
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
         return None
 
 

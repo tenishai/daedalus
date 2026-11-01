@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import sys
 from collections import OrderedDict
@@ -31,6 +32,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from daedalus.events import EventBus
 from daedalus.protocols import Handler
 from daedalus.task import VERIFIED_SUB_KEY, Message, ReasonCode, Task, TaskState
+
+log = logging.getLogger(__name__)
 
 
 class ParamsError(ValueError):
@@ -412,7 +415,9 @@ class A2aTransport:
         port: int = 9200,
         events: EventBus | None = None,
         verifier=None,
+        name: str | None = None,
     ):
+        self.name = name  # the bundle, for the open-listener warning (#204)
         self.card = card
         self.host = host
         self.port = port
@@ -429,7 +434,13 @@ class A2aTransport:
         print(self.listening_line())
         warning = self.open_warning()
         if warning:
-            print(warning, file=sys.stderr)
+            # Once: through logging when the process configured it, else on stderr.
+            # With no handler, log.warning would reach stderr through logging's
+            # lastResort and the line would print twice.
+            if log.hasHandlers():
+                log.warning(warning)
+            else:
+                print(warning, file=sys.stderr)
         await uvicorn.Server(config).serve()
 
     def listening_line(self) -> str:
@@ -443,9 +454,10 @@ class A2aTransport:
         if self.verifier is not None or _is_loopback(self.host):
             return None
         return (
-            f"WARNING: a2a serves {self.host}:{self.port} with no auth. Anyone who can "
-            "reach this port can send tasks, with every tool the allowlist admits. "
-            "Add an auth block to the a2a transport in agent.yaml."
+            f"WARNING: bundle {self.name or '(unnamed)'} serves a2a on "
+            f"{self.host}:{self.port} with no auth. Anyone who can reach this port can "
+            "use every tool the allowlist admits. Add an auth block (jwks_url, issuer, "
+            "audience) to the a2a transport in agent.yaml."
         )
 
 

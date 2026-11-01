@@ -161,6 +161,13 @@ def _with_inbound_note(messages: list[dict]) -> list[dict]:
 ENGINES = ("litellm", "claude-code")
 
 
+def engines() -> tuple[str, ...]:
+    """ENGINES, plus the model-free `scripted` when DAEDALUS_SCRIPTED_ENGINE=1 (#227)."""
+    from daedalus.engines.scripted import ENV
+
+    return (*ENGINES, "scripted") if os.environ.get(ENV) == "1" else ENGINES
+
+
 class Agent:
     """Wires a bundle's persona, model, and collaborators into a Handler.
 
@@ -196,9 +203,13 @@ class Agent:
         # engine is the default, and an explicit engine that disagrees is refused.
         self.model_resolution = self._resolve_model(explicit_engine)
         self.engine_name = explicit_engine or self.model_resolution.engine
-        if self.engine_name not in ENGINES:
+        choices = engines()
+        if self.engine_name not in choices:
+            hint = (
+                " (it needs DAEDALUS_SCRIPTED_ENGINE=1)" if self.engine_name == "scripted" else ""
+            )
             raise BundleError(
-                f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
+                f"unknown engine {self.engine_name!r}{hint}; choose one of {', '.join(choices)}"
             )
         if self.engine_name == "claude-code" and bundle.spec.model.budget.per_task_tokens:
             # Declare the gap and refuse, never degrade silently (#51): Claude Code runs
@@ -303,6 +314,9 @@ class Agent:
         set itself."""
         model = self.bundle.spec.model
         cc = self.bundle.spec.engine.claude_code
+        if explicit_engine == "scripted":
+            # Never calls a model, so a tier needs no tiers file (#227).
+            return Resolution(tier=None, used=None, engine="scripted", id=model.id, source="id")
         if model.id not in TIER_NAMES:
             engine = explicit_engine or "litellm"
             shown = model.id
@@ -356,17 +370,29 @@ class Agent:
         spec = self.bundle.spec.memory
         if spec.personal == "techne":
             try:
-                import techne  # noqa: F401  — fail at load time, not mid-conversation
+                import techne.api  # noqa: F401  — fail at load time, not mid-conversation
             except ImportError as exc:
                 raise BundleError(
-                    "memory.personal is 'techne' but techne is not installed — "
-                    "pip install -e path/to/techne (github.com/tenishai/techne)"
+                    "memory.personal is 'techne' but techne 0.19.1 or later is not "
+                    "installed — pip install 'tenish-daedalus[techne]'"
                 ) from exc
             from daedalus.memory.techne import TechneMemoryStore
 
-            db_path = Path(spec.home).expanduser() / "techne.db" if spec.home else None
-            return TechneMemoryStore(db_path=db_path)
+            return TechneMemoryStore(home=spec.home)
         return NoMemory()
+
+    async def _publish_memory(self) -> None:
+        """Send this task's tagged facts to the team pool, once, at task end (#228).
+        A store without publish() (NoMemory, a test fake) has nothing to send."""
+        publish = getattr(self.memory, "publish", None)
+        if publish is None:
+            return
+        try:
+            result = await publish()
+        except Exception as exc:  # a store's publish never fails the task
+            result = {"error": str(exc)}
+        if result.get("enqueued") or result.get("synced") or result.get("error"):
+            self._emit("memory_published", **result)
 
     def _checkpoints_from_spec(self) -> CheckpointStore:
         if self.bundle.spec.checkpoints == "sqlite":
@@ -649,6 +675,7 @@ class Agent:
         # and asks unguarded, which its corroboration logic relies on.
         ask_ledger.set(AskLedger())
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        await self._publish_memory()
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text())
             if post.blocked:
@@ -991,7 +1018,9 @@ class Agent:
 
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
         ask_ledger.set(AskLedger())
-        return await self._loop(task, state["messages"])
+        result = await self._loop(task, state["messages"])
+        await self._publish_memory()
+        return result
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
         """The engine run, under the bundle's task deadline (#201).
@@ -1073,6 +1102,7 @@ class Agent:
                 spec=self.bundle.spec,
                 approve=self._approve_native,
                 withheld=self._withheld_native,
+                memory=self.memory,
             )
         )
 
@@ -1082,6 +1112,10 @@ class Agent:
             from daedalus.engines.claude_code import ClaudeCodeEngine
 
             return ClaudeCodeEngine(self.bundle.spec.engine.claude_code)
+        if self.engine_name == "scripted":
+            from daedalus.engines.scripted import ScriptedEngine
+
+            return ScriptedEngine()
         return LiteLLMEngine(self.llm)
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
@@ -1316,6 +1350,7 @@ class Agent:
                         port=int(options.get("port", 9200)),
                         events=self.events,
                         verifier=self._a2a_verifier(options.get("auth")),
+                        name=self.bundle.spec.name,
                     )
                 )
             elif spec.kind == "slack":
