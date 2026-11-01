@@ -143,16 +143,36 @@ def _inbound_depth(task: Task, key: str) -> int:
         return 0
 
 
-def _with_inbound_note(messages: list[dict]) -> list[dict]:
-    """Tell an agent answering a colleague that it can't forward the question
-    (#149), once -- a resumed task's checkpointed prompt already has it."""
+#: Longest asker name carried into a prompt or a refusal; the key rides in
+#: from the wire unvalidated, so it is bounded and flattened before use.
+_ASKER_MAX = 64
+
+
+def _inbound_asker(task: Task, key: str) -> str | None:
+    """The asking agent's name from task metadata (kobo#310), or None when
+    absent or not a non-blank string. Whitespace is collapsed and the value
+    bounded: it is quoted back to the model, never used as an identity."""
+    raw = task.metadata.get(key)
+    if not isinstance(raw, str):
+        return None
+    name = " ".join(raw.split())
+    return name[:_ASKER_MAX] or None
+
+
+def _with_inbound_note(messages: list[dict], asker: str | None) -> list[dict]:
+    """Tell an agent answering a colleague that it has no outside tools and
+    can't forward the question (#149, kobo#310), once -- a resumed task's
+    checkpointed prompt already has it."""
     system = messages[0]
     if system.get("role") != "system" or _INBOUND_HEADING in str(system.get("content")):
         return messages
+    who = asker or "the asking agent"
     note = (
         f"\n\n{_INBOUND_HEADING}\n"
-        "Another agent asked you this. Answer from your own tools, or say in one "
-        "line that you can't. You can't ask other colleagues while answering one."
+        "Another agent asked you this. Answer from what you know and what your "
+        "skills say. You have no outside tools while answering a colleague; if the "
+        f"answer needs one, say which and that {who}'s owner can request it. "
+        "You can't ask other colleagues while answering one."
     )
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
@@ -600,10 +620,12 @@ class Agent:
         # the tools_from_spec provider branches above), not a real cycle --
         # colleagues.py imports nothing from daedalus.agent.
         from daedalus.tools.colleagues import (
+            ASKED_BY_KEY,
             DEPTH_KEY,
             AskLedger,
             ask_ledger,
             consulted_colleagues,
+            current_consult_asker,
             current_context_id,
             current_delegation_depth,
         )
@@ -627,6 +649,7 @@ class Agent:
         # (`nan` lands on ValueError and always worked.) cabal's own parser had
         # the identical gap; both ends are fixed.
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
+        current_consult_asker.set(_inbound_asker(task, ASKED_BY_KEY))
         # A BACKGROUND TASK SPAWNED BELOW THIS LINE INHERITS THE DEPTH, because
         # asyncio.create_task copies the current context (#40 r1 Nit, filed as
         # daedalus#42). _start_revision_pass does exactly that, and its own ask
@@ -1007,13 +1030,16 @@ class Agent:
         # onward. The ask ledger is not checkpointed; a resumed run starts a
         # fresh one, so the per-answer cap restarts at a resume.
         from daedalus.tools.colleagues import (
+            ASKED_BY_KEY,
             DEPTH_KEY,
             AskLedger,
             ask_ledger,
+            current_consult_asker,
             current_delegation_depth,
         )
 
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
+        current_consult_asker.set(_inbound_asker(task, ASKED_BY_KEY))
         ask_ledger.set(AskLedger())
         result = await self._loop(task, state["messages"])
         await self._publish_memory()
@@ -1069,18 +1095,30 @@ class Agent:
             allowed = [spec for spec in allowed if spec["name"] not in withheld]
             self._emit("tools_withheld", names=sorted(withheld))
             messages = _with_withheld_note(messages, withheld)
-        from daedalus.tools.colleagues import current_delegation_depth
+        from daedalus.tools.colleagues import answering_colleague, current_consult_asker
 
-        if current_delegation_depth.get() >= 1 and any(s["name"] == _ASK_TOOL for s in allowed):
-            # ANSWERING A COLLEAGUE, SO NO ONWARD ASKS (#149). Without this, A asks
-            # B, B asks A, and only cabal's depth bound ends it; withholding the
-            # tool makes the bounce impossible. Keyed on depth, not transport: a
-            # caller that sends no depth (a person via the switchboard) arrives at
-            # 0 and can still be answered with help from colleagues. _call_tool
-            # refuses the name if the model calls it anyway.
-            allowed = [spec for spec in allowed if spec["name"] != _ASK_TOOL]
-            self._emit("colleague_ask_withheld_inbound")
-            messages = _with_inbound_note(messages)
+        if answering_colleague():
+            # ANSWERING A COLLEAGUE, SO KNOWLEDGE-ONLY TOOLS (kobo#310, the strict
+            # model): a consulted agent answers another agent's task from what it
+            # already knows, and never borrows a credential for it. Only providers
+            # that declare `knowledge_only = True` (skills.load) keep their tools;
+            # everything else -- gateway tools, sidecars, colleague asks -- is
+            # withheld for this task, and _call_tool refuses the name if the model
+            # calls it anyway. Keyed on depth, not transport: a caller that sends no
+            # depth (a person via the switchboard) arrives at 0 and keeps every tool.
+            # The ask tool is named separately (#149): without that, A asks B, B
+            # asks A, and only cabal's depth bound ends it.
+            if any(s["name"] == _ASK_TOOL for s in allowed):
+                self._emit("colleague_ask_withheld_inbound")
+            kept = [spec for spec in allowed if self._knowledge_only(spec["name"])]
+            kept_names = {spec["name"] for spec in kept}
+            withheld_for_colleague = sorted(
+                spec["name"] for spec in allowed if spec["name"] not in kept_names
+            )
+            if withheld_for_colleague:
+                self._emit("tools_withheld_for_colleague", names=withheld_for_colleague)
+            allowed = kept
+            messages = _with_inbound_note(messages, current_consult_asker.get())
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
 
@@ -1129,6 +1167,21 @@ class Agent:
             for spec in tools
             if any(fnmatch(spec["name"], g.match) for g in gates)
         }
+
+    def _knowledge_only(self, name: str) -> bool:
+        """Does the provider that listed `name` answer from what the agent
+        already has, with no credential (kobo#310)? A provider opts IN with a
+        `knowledge_only = True` attribute; the default is credentialed, so a
+        new provider is withheld from a colleague's task until it says
+        otherwise. Behind MultiToolProvider the owner of the name is asked;
+        the ask tool never counts, whatever its provider says (#149)."""
+        if name == _ASK_TOOL:
+            return False
+        provider = self.tools
+        owner_of = getattr(provider, "provider_of", None)
+        if owner_of is not None:
+            provider = owner_of(name)
+        return getattr(provider, "knowledge_only", False) is True
 
     async def _allowed_tools(self) -> list[dict]:
         """Tier-1 ceiling, enforced at listing: the model never sees a tool it

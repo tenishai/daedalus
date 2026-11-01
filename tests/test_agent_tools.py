@@ -808,7 +808,9 @@ async def test_answering_a_colleague_withholds_ask_colleague(tmp_path):
         tool_turn(ToolCall(id="1", name="colleagues__ask_colleague", arguments={})),
         "I can't reach that from here.",
     )
-    tools = FakeTools([READ_SPEC, ASK_SPEC])
+    # knowledge_only, so this test keeps pinning the ask withholding alone;
+    # the knowledge-only filter has its own tests below (kobo#310).
+    tools = FakeTools([READ_SPEC, ASK_SPEC], knowledge_only=True)
     agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
     events: list[dict] = []
     agent.on_event = events.append
@@ -863,7 +865,7 @@ async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path
     llm = LedgerWatchingLLM("I can't reach that from here.")
     agent = make_agent(
         tmp_path, allow=["files.read", "colleagues.*"], llm=llm,
-        tools=FakeTools([READ_SPEC, ASK_SPEC]),
+        tools=FakeTools([READ_SPEC, ASK_SPEC], knowledge_only=True),
     )
     agent.checkpoints = _MemoryCheckpoints()
     task = Task.from_text("what is monitor 42?")
@@ -880,6 +882,85 @@ async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path
     offered = [t["function"]["name"] for t in llm.tools_seen[0]]
     assert offered == ["files__read"]
     assert seen_ledger[0] is not None
+
+
+# --- kobo#310: answering a colleague offers knowledge-only tools --------------
+
+SKILL_SPEC = {"name": "skills.load", "description": "load a skill", "parameters": {}}
+LAKE_SPEC = {"name": "cloudtrail.query_provisioning", "description": "q", "parameters": {}}
+
+
+def _knowledge_and_credentialed_tools():
+    from daedalus.tools.compose import MultiToolProvider
+
+    skills = FakeTools([SKILL_SPEC], knowledge_only=True)
+    credentialed = FakeTools([READ_SPEC, LAKE_SPEC])  # the default: not opted in
+    return MultiToolProvider([skills, credentialed])
+
+
+async def test_answering_a_colleague_offers_only_knowledge_tools(tmp_path):
+    """The strict model: a consulted agent answers from what it already knows.
+    A provider that has not declared knowledge_only loses its tools for the
+    task, the model is told, and a call to one anyway fails closed."""
+    llm = ScriptedLLM(
+        tool_turn(ToolCall(id="1", name="cloudtrail__query_provisioning", arguments={})),
+        "I'd need the provisioning lake for that.",
+    )
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    events: list[dict] = []
+    agent.on_event = events.append
+    task = Task.from_text("who added x to the group?")
+    task.metadata["cabal_delegation_depth"] = 1
+    await agent.handle_task(task)
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["skills__load"]
+    assert {
+        "type": "tools_withheld_for_colleague",
+        "names": ["cloudtrail.query_provisioning", "files.read"],
+    } in events
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+
+
+async def test_a_human_task_keeps_the_credentialed_tools(tmp_path):
+    """Nothing changes for a task a person started: depth 0 offers every tool
+    the allowlist admits, knowledge-only or not."""
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    events: list[dict] = []
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("who added x to the group?"))
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["skills__load", "files__read", "cloudtrail__query_provisioning"]
+    assert not any(e["type"] == "tools_withheld_for_colleague" for e in events)
+    assert "You are answering a colleague" not in llm.calls[0][0]["content"]
+
+
+async def test_the_inbound_note_names_the_asker_and_the_no_tools_rule(tmp_path):
+    """The prompt block tells the agent it has no outside tools and whose
+    owner can request one; the asker's name rides in under daedalus_asked_by."""
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    task = Task.from_text("hi")
+    task.metadata["cabal_delegation_depth"] = 1
+    task.metadata["daedalus_asked_by"] = "  rin\n"
+    await agent.handle_task(task)
+    system = llm.calls[0][0]["content"]
+    assert (
+        "Answer from what you know and what your skills say. You have no outside "
+        "tools while answering a colleague; if the answer needs one, say which and "
+        "that rin's owner can request it."
+    ) in system
+    assert "You can't ask other colleagues while answering one." in system
+
+
+async def test_an_unnamed_asker_still_gets_the_note(tmp_path):
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    task = Task.from_text("hi")
+    task.metadata["cabal_delegation_depth"] = 1
+    task.metadata["daedalus_asked_by"] = {"not": "a string"}
+    await agent.handle_task(task)
+    assert "that the asking agent's owner can request it" in llm.calls[0][0]["content"]
 
 
 async def test_a_refusing_provider_drops_its_tools_and_the_turn_continues(tmp_path):

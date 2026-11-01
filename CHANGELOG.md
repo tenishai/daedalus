@@ -6,6 +6,25 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **An agent answering another agent gets knowledge-only tools** (tenishai/kobo#310, the
+  strict model). When a task arrives with `cabal_delegation_depth` ≥ 1, the tools offered
+  for that task are only those from providers that declare `knowledge_only = True`
+  (today: `skills.load`); MCP and gateway tools, the github, jira, cloudtrail and slack
+  sidecars and `colleagues.ask_colleague` are withheld (event
+  `tools_withheld_for_colleague`, names listed), and the `## You are answering a
+  colleague` prompt block now says so and names whose owner can request a tool the answer
+  needs. As a second wall, the cloudtrail lane, the github broker mint and a liminal
+  gateway call refuse on such a task before anything leaves the pod, with one sentence:
+  "I can't use my own access for a task another agent asked for; your owner can request
+  <permission> for <agent> on its Access page." Tasks a person started are unchanged.
+  Outbound asks now carry `daedalus_asked_by: <this agent's name>` beside the depth key,
+  a cross-repo string contract like `cabal_delegation_depth`; cabal copies metadata
+  through verbatim. A custom `ToolProvider` that only reads the agent's own material
+  should set `knowledge_only = True` to stay offered on a colleague's task; the default
+  is credentialed.
+
 ## [0.6.1] — 2026-10-31
 
 ### Upgrading

@@ -424,7 +424,13 @@ class GitHubToolProvider:
 
     async def _mint(self) -> tuple[dict | None, str | None]:
         """Ask the room's broker for a scoped token. (minted, None) on
-        success, (None, plain-text error) otherwise."""
+        success, (None, plain-text error) otherwise. On a colleague's task
+        nothing is minted (kobo#310, the second wall)."""
+        from daedalus.tools.colleagues import consult_refusal
+
+        refusal = consult_refusal("github")
+        if refusal is not None:
+            return None, refusal
         agent_token = self._agent_token()
         if agent_token is None or not self.self_name:
             return None, _NOT_CONFIGURED

@@ -22,6 +22,11 @@ from daedalus.bundle import Skill
 class SkillsToolProvider:
     """One tool, `skills.load(name)`, over the bundle's parsed skills."""
 
+    #: The skills are the agent's own, read from the bundle with no credential,
+    #: so they stay offered while answering a colleague (kobo#310). See
+    #: ToolProvider in protocols.py for the attribute's contract.
+    knowledge_only = True
+
     def __init__(self, skills: dict[str, Skill]):
         self.skills = skills
 

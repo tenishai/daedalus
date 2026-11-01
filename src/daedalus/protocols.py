@@ -75,6 +75,16 @@ class MemoryStore(Protocol):
 
 @runtime_checkable
 class ToolProvider(Protocol):
+    """tools() lists OpenAI-function-shaped specs; call() runs one.
+
+    Optional, read with getattr and not part of the Protocol: a class attribute
+    `knowledge_only = True` says the provider answers from what the agent
+    already has (its bundle, its skills) and reaches nothing with a credential.
+    Only such providers stay offered while the agent answers another agent's
+    task (tenishai/kobo#310); the default is credentialed, so a new provider is
+    withheld there until it opts in.
+    """
+
     async def tools(self) -> list[dict]: ...
 
     async def call(self, name: str, payload: dict) -> str: ...
