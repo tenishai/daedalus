@@ -366,8 +366,10 @@ def test_listening_line_names_the_auth_regime():
 def test_no_auth_on_a_reachable_address_warns(host):
     from daedalus.transports.a2a import A2aTransport
 
-    warning = A2aTransport(host=host).open_warning()
+    warning = A2aTransport(host=host, port=8080, name="scout").open_warning()
     assert warning and "no auth" in warning
+    assert "bundle scout" in warning and f"{host}:8080" in warning
+    assert "every tool the allowlist admits" in warning and "Add an auth block" in warning
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
@@ -381,3 +383,69 @@ def test_auth_on_any_address_does_not_warn():
     from daedalus.transports.a2a import A2aTransport
 
     assert A2aTransport(host="0.0.0.0", verifier=object()).open_warning() is None
+
+
+async def _serve_once(transport, monkeypatch) -> bool:
+    """Run serve() with uvicorn stubbed out, so only the boot output happens.
+    Returns whether the server was started."""
+    import uvicorn
+
+    served = []
+
+    class _Server:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            served.append(True)
+
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    await transport.serve(handler=None)
+    return bool(served)
+
+
+@pytest.mark.asyncio
+async def test_an_open_listener_logs_the_warning_once_and_still_serves(
+    monkeypatch, caplog, capsys
+):
+    from daedalus.transports.a2a import A2aTransport
+
+    with caplog.at_level("WARNING", logger="daedalus.transports.a2a"):
+        served = await _serve_once(
+            A2aTransport(host="0.0.0.0", port=8080, name="scout"), monkeypatch
+        )
+    assert served  # warns, never refuses (#204)
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "bundle scout" in caplog.records[0].getMessage()
+    assert "bundle scout" not in capsys.readouterr().err  # logged, so not printed too
+
+
+@pytest.mark.asyncio
+async def test_with_no_logging_configured_the_warning_prints_once(monkeypatch, capsys):
+    from daedalus.transports import a2a
+
+    monkeypatch.setattr(a2a.log, "hasHandlers", lambda: False)
+    served = await _serve_once(a2a.A2aTransport(host="0.0.0.0", name="scout"), monkeypatch)
+    assert served
+    assert capsys.readouterr().err.count("bundle scout") == 1
+
+
+def test_the_agent_names_its_a2a_transport_after_the_bundle(tmp_path):
+    pytest.importorskip("fastapi")
+    from tests.test_agent_enforcement import _a2a_agent
+
+    agent = _a2a_agent(tmp_path)
+    assert agent.transports()[0].name == agent.bundle.spec.name == "x"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs", [{"host": "127.0.0.1"}, {"host": "0.0.0.0", "verifier": object()}]
+)
+async def test_serve_is_quiet_on_loopback_or_with_auth(monkeypatch, caplog, capsys, kwargs):
+    from daedalus.transports.a2a import A2aTransport
+
+    with caplog.at_level("WARNING", logger="daedalus.transports.a2a"):
+        await _serve_once(A2aTransport(name="scout", **kwargs), monkeypatch)
+    assert not caplog.records
+    assert capsys.readouterr().err == ""

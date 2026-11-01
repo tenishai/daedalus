@@ -50,7 +50,7 @@ COPY . /src/daedalus
 # techne[vectors] (0.16.1 wave): resolve the vectors extra's dependency
 # closure (sqlite-vec, numpy, fastembed/onnxruntime on py3.12) into wheels
 # alongside everything else.
-RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ file:///src/techne"; else TECHNE="tenish-techne[vectors]>=0.18.2"; fi \
+RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ file:///src/techne"; else TECHNE="tenish-techne[vectors]>=0.19.1"; fi \
  && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="tenish-liminal @ file:///src/liminal"; else LIMINAL="tenish-liminal>=0.4.0"; fi \
  && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
       echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
@@ -73,11 +73,10 @@ RUN python -c "import daedalus, techne; from techne.core.database import connect
 RUN python -c "import claude_agent_sdk"   # the Claude Code engine (--engine claude-code), with its bundled CLI
 
 RUN python -c "from techne.core.embeddings import backend_available; assert backend_available(), 'no embedding backend'"
-# Version floor (0.18.2, matching pyproject.toml): techne may arrive as a named build context, which nothing
-# else pins. Before techne#827 (fixed in 0.16.1) the vec-first fusion could
-# drop every lexical hit -- the exact failure use_vectors=True was gated
-# on. A 0.16.0 checkout passes every other proof here and ships that bug.
-RUN python -c "import techne; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 18, 2), f'techne {techne.__version__} < 0.18.2, the version pinned in requirements-sources.txt and pyproject.toml (below 0.16.1, techne#827, the fusion bug ships with use_vectors=True)'"
+# Version floor (0.19.1, matching pyproject.toml): techne may arrive as a named build context,
+# which nothing else pins. TechneMemoryStore recalls and publishes through techne.api, new
+# in 0.19.1 (#228); an older checkout passes every other proof here and fails the first recall.
+RUN python -c "import techne, techne.api; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 19, 1), f'techne {techne.__version__} < 0.19.1, the floor in pyproject.toml: TechneMemoryStore needs techne.api'"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

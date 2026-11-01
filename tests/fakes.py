@@ -75,5 +75,5 @@ class CannedMemory:
     async def recall(self, query: str, k: int = 5) -> list[str]:
         return self.items[:k]
 
-    async def commit(self, content: str, kind: str = "fact") -> None:
-        self.committed.append((content, kind))
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
+        self.committed.append((content, kind, tags) if tags else (content, kind))

@@ -25,6 +25,64 @@ Issue and pull request numbers all refer to this repository, written in full.
   should set `knowledge_only = True` to stay offered on a colleague's task; the default
   is credentialed.
 
+## [0.6.1] — 2026-10-31
+
+### Upgrading
+
+- **`memory.personal: techne` needs techne 0.19.1 or later** (tenishai/daedalus issue
+  #228). The `techne` extra now requires `tenish-techne[vectors]>=0.19.1`, and an older
+  techne fails the bundle at load with a `BundleError`. Reinstall with
+  `pip install -U 'tenish-daedalus[techne]'` from the tenish index.
+
+### Fixed
+
+- **CI runs the techne-backed tests on every push and same-repo PR** (tenishai/daedalus
+  issue #48). The `techne` job cloned the private techne repo, which this repository's
+  CI token can't read, so it only ran by hand and failed. It now installs
+  `tenish-techne` from the tenish index through the `techne` extra, with the read-only
+  index token in the `TENISH_INDEX_TOKEN` repository secret.
+
+- **The litellm engine accepts a tool name the model returned without its server prefix**
+  (tenishai/daedalus issue #167). Gemini sometimes sends `remember` for
+  `colleagues__remember`, and the call was refused as unknown. A bare name now resolves
+  when exactly one offered tool ends in it; an ambiguous or unknown name is refused as
+  before, and the allowlist check still runs on the resolved name. The trace records a
+  `bare_tool_name` event when this happens.
+
+- **The open-listener warning names the bundle and goes to the log** (tenishai/daedalus
+  issue #204). An a2a transport on an address other than loopback with no `auth` block
+  already printed a stderr warning; it now goes through logging at WARNING when the
+  process has configured logging (else stderr, once), and the text names the
+  bundle and `host:port`, says anyone who can reach it can use every tool the allowlist
+  admits, and says to add `auth`. It still serves; loopback and `auth` stay quiet.
+
+### Added
+
+- **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
+  `DAEDALUS_SCRIPTED_ENGINE=1`, `--engine scripted` runs one command per message instead of
+  calling a model: `remember: <fact>` commits through the agent's memory store,
+  `recall: <query>` replies with the store's hits as a JSON list of `content` and `source`, and
+  `call: <tool> <json args>` calls a tool through the same allowlist, approval gates and
+  tool provider the litellm engine uses. Anything else fails the task with reason 704.
+  Without the variable the engine is refused at load. `EngineTurn` gains an optional
+  `memory` field for it.
+
+### Changed
+
+- **techne memory reaches the team pool** (tenishai/daedalus issue #228). `TechneMemoryStore`
+  still recalls up to k of the agent's own memories from its knowledge, and now adds up to
+  k rows from other stores through `techne.api.recall`, the same recall `techne_recall`
+  runs: a fact another agent published comes back from an installed recall source such as
+  techne-archivist-sync, or from a federated store. `recall_hits()` says where each hit
+  came from (`local`, or the source's or store's name, e.g. `liminal_archivist`). At the
+  end of each task, including one finished by `resume()`, the agent calls
+  `techne.api.publish()` once, which sends knowledge carrying one of techne's
+  `archivist_publish_tags`; with that list empty, techne's default, nothing is sent.
+  `MemoryStore.commit` takes `tags`, and the scripted engine's `remember:` turns `#words`
+  into tags. `memory.home` now also supplies techne's config.yaml.
+  The agent's own recall now leaves out soft-archived knowledge, as `techne_recall`
+  does; before, it returned it (tenishai/daedalus issue #233).
+
 ## [0.6.0] — 2026-10-26
 
 ### Upgrading

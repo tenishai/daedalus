@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
-updated: 2026-10-29
-anchor: src/daedalus/protocols.py sha=177bf6218394ae9e78fc696ed7fb15af774eacf4
+updated: 2026-11-01
+anchor: src/daedalus/protocols.py sha=86f493de93e25713763ab962ddbe0ee7c23ec3e5
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -9,7 +9,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `LLM.complete(messages, tools=None) -> LLMResponse` (tools OpenAI function-shaped; model/max_tokens are construction config, not call args)
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
-- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact")`
+- `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact", tags="")`; optional, unannotated: `.recall_hits(query, k) -> list[{content, source}]` and `.publish() -> dict`, called once at task end, from handle_task or resume, by Agent._publish_memory (#228)
 - `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage. Optional class attribute `knowledge_only = True` (read with getattr, not a Protocol member): the provider answers from the agent's own material with no credential, so its tools stay offered while answering a colleague (kobo#310); default credentialed, so a new provider is withheld there until it opts in. Only SkillsToolProvider sets it.
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`
