@@ -1,4 +1,8 @@
-# Slack app manifest for a daedalus bundle with the slack transport.
+# Slack app manifest for a daedalus bundle with the slack transport, the
+# Socket Mode way in. (The other way in needs no manifest here: a room that
+# creates the app itself points its event subscriptions at a relay, and the
+# runtime takes the forwarded events at POST /slack/events when SLACK_APP_TOKEN
+# is absent.)
 # Create at api.slack.com/apps -> Create New App -> From a manifest.
 # After creating: generate an App-Level Token (connections:write) for
 # SLACK_APP_TOKEN, install to the workspace for SLACK_BOT_TOKEN, and invite

@@ -132,11 +132,15 @@ liminal is not the primary.
   `/events`; `auth.operator_subs` (default `["operator:*", "service:kobo"]`) says who may
   use the operator lanes. Without `auth` the boot line says NO AUTH, and off loopback a
   warning goes to stderr. Reach for it when: other services or agents send it work.
-- **`slack`**: Socket Mode, with `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`. `channel`
-  limits where it answers (none listed = every invited channel), `wake` is `mention`,
-  `thread` or `channel`, and `approvers` lists who may approve gates. Reaction approvals
-  are wired only with both a `channel` allowlist and `approvers`. Needs the `slack` extra.
-  Reach for it when: the agent's users are in Slack.
+- **`slack`**: with `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`, Socket Mode. With the bot
+  token alone, no socket: Slack's events arrive at `POST /slack/events` on the `a2a`
+  app, forwarded by a relay that proves itself with the `X-Kobo-Relay-Secret` header
+  matching `SLACK_RELAY_SECRET` (so the bundle needs an `a2a` block too). The boot
+  line says which way in is active. `channel` limits where it answers (none listed =
+  every invited channel), `wake` is `mention`, `thread` or `channel`, and `approvers`
+  lists who may approve gates. Reaction approvals are wired only with both a `channel`
+  allowlist and `approvers`. Needs the `slack` extra. Reach for it when: the agent's
+  users are in Slack.
 
 ### Memory
 

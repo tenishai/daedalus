@@ -14,11 +14,17 @@ created it (#197); card
 signing stays deferred (cabal accepts an empty card at graduation and does
 not verify cards on dispatch). Requires the a2a extra: pip install
 'tenish-daedalus[a2a]'.
+
+POST /slack/events is the Slack transport's HTTP way in (kobo#304): the room's
+relay forwards Slack's event envelopes here when the agent has no app-level
+token. It is gated by the per-agent relay secret, not the JWT verifier, and it
+exists only when the Slack transport asked for it (`slack=`); otherwise 404.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import logging
@@ -207,8 +213,14 @@ def build_a2a_app(
     verifier=None,
     trace_content: bool | None = None,
     max_tasks: int = MAX_STORED_TASKS,
+    slack=None,
 ) -> FastAPI:
     """Separable from serving so tests drive it with a TestClient.
+
+    `slack` (a SlackTransport serving over HTTP, duck-typed: `relay_secret`,
+    `receive(envelope, handler)`) turns on POST /slack/events (kobo#304). The
+    route hands every admitted envelope to that transport with THIS app's
+    `handler`, the same Agent every transport serves.
 
     `max_tasks` bounds the in-memory task store (#202): past it, the least
     recently stored FINISHED tasks are dropped, with their owner records. A task
@@ -383,6 +395,41 @@ def build_a2a_app(
             store(task)
         return task_to_a2a(task)
 
+    @app.post("/slack/events")
+    async def slack_events(request: Request):
+        """The Slack transport's HTTP way in (kobo#304). Slack posts to the
+        room's relay; the relay verifies Slack's signature and forwards the
+        envelope here with the per-agent secret. 503 while the secret is
+        unset (the room has not wired this agent), 403 when it differs, 200
+        `{"accepted": true}` at once for anything admitted; the agent's turn
+        runs after the answer. A repeated event_id is accepted and dropped in
+        the transport, so a retry never runs the turn twice. Slack's
+        url_verification is the room's to answer, but is answered here too.
+        """
+        if slack is None:
+            return JSONResponse(
+                {"error": "this agent takes Slack events over Socket Mode, not HTTP"},
+                status_code=404,
+            )
+        secret = slack.relay_secret
+        if not secret:
+            return JSONResponse(
+                {"error": "SLACK_RELAY_SECRET is not set on this agent"}, status_code=503
+            )
+        given = request.headers.get("x-kobo-relay-secret") or ""
+        if not hmac.compare_digest(given.encode("utf-8"), secret.encode("utf-8")):
+            return JSONResponse({"error": "relay secret does not match"}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "body is not valid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body is not a Slack envelope"}, status_code=400)
+        if body.get("type") == "url_verification":
+            return {"challenge": body.get("challenge", "")}
+        slack.receive(body, handler)
+        return {"accepted": True}
+
     @app.post("/")
     async def rpc(request: Request):
         denied, claims = await authorize(request)
@@ -416,8 +463,12 @@ class A2aTransport:
         events: EventBus | None = None,
         verifier=None,
         name: str | None = None,
+        slack=None,
     ):
         self.name = name  # the bundle, for the open-listener warning (#204)
+        # The Slack transport when it takes events over HTTP (kobo#304); the
+        # Agent attaches it after building both transports. None = no route.
+        self.slack = slack
         self.card = card
         self.host = host
         self.port = port
@@ -428,7 +479,11 @@ class A2aTransport:
         import uvicorn
 
         app = build_a2a_app(
-            handler, card=self.card, events=self.events, verifier=self.verifier
+            handler,
+            card=self.card,
+            events=self.events,
+            verifier=self.verifier,
+            slack=self.slack,
         )
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
         print(self.listening_line())
