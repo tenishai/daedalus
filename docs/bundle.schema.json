@@ -547,6 +547,7 @@
         "max_tokens": {
           "anyOf": [
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             },
             {
@@ -555,7 +556,20 @@
             }
           ],
           "title": "Max Tokens",
+          "description": "The visible reply's ceiling in tokens; thinking is budgeted separately under thinking.budget_tokens.",
           "default": 8192
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThinkingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Thinking budget, kept apart from max_tokens (litellm engine only)."
         },
         "request_timeout": {
           "anyOf": [
@@ -656,6 +670,51 @@
         }
       },
       "title": "SlackReadSpec",
+      "type": "object"
+    },
+    "ThinkingSpec": {
+      "additionalProperties": true,
+      "description": "How much the model may think before it answers, kept apart from the visible\nreply's `max_tokens` (tenishai/daedalus#240). Providers that count thinking against\n`max_tokens` could spend the whole reply budget on it: a one-line answer came back\nas `[reply truncated ...]` twice on the same day. The litellm engine only; the\nprovider table in daedalus.llm says what each route is sent.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "off",
+                "on"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Mode",
+          "description": "auto asks known reasoning models to think; on always asks; off turns it off where the route can.",
+          "default": "auto"
+        },
+        "budget_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1024,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "description": "Thinking tokens added on top of max_tokens (default 4096, floor 1024).",
+          "title": "Budget Tokens"
+        }
+      },
+      "title": "ThinkingSpec",
       "type": "object"
     },
     "ToolsSpec": {

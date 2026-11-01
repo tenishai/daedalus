@@ -3,13 +3,115 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from typing import TYPE_CHECKING
 
 from daedalus.protocols import LLMResponse, ToolCall
+
+if TYPE_CHECKING:
+    from daedalus.bundle import ThinkingSpec
+
+log = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
     pass
+
+
+# --- thinking, apart from the visible reply (tenishai/daedalus#240) -----------------
+#
+# Every provider-specific fact about thinking lives in this one table. A row names the
+# routes it covers as (prefix, needle-or-None) pairs, first match wins, and the comment
+# says what each mode sends; `thinking_kwargs` below reads it and nothing else does.
+# Routes no row covers are sent nothing. The provider prefix decides, so a Claude served
+# through an OpenAI-compatible proxy (`openai/claude-...`) takes the openai row.
+#
+#   anthropic   `anthropic/`, `vertex_ai/claude*`, `bedrock/anthropic*`, bare `claude*`.
+#               on (and auto on a known reasoning model, Claude 3.7 or later): litellm's
+#               `thinking={"type": "enabled", "budget_tokens": N}`, and the request's
+#               max_tokens raised by N so the answer keeps its own budget. The pinned
+#               litellm (1.104.2) translates that shape for the models that no longer
+#               take a budget (4.7 and the 5 families: adaptive thinking plus an effort
+#               level derived from N, 1024 low / 2048 medium / 4096 high / 8192 xhigh),
+#               and forwards it as is to the models that do. off: nothing is sent, which
+#               is "no thinking" on models that think only when asked, and the model's
+#               default on those that always think (`disabled` is a 400 there, and the
+#               vertex route does not drop it for us).
+#   openai      `openai/`, `hosted_vllm/`: OpenAI-compatible servers in front of Qwen-style
+#               models, which read `chat_template_kwargs.enable_thinking` from the body.
+#               off sends False, on sends True (max_tokens raised by N, since vLLM counts
+#               the think-trace against it), auto sends nothing: whether the model
+#               reasons at all is unknown from its id.
+_THINKING_ROUTES: tuple[tuple[str, tuple[tuple[str, str | None], ...]], ...] = (
+    (
+        "anthropic",
+        (
+            ("anthropic/", None),
+            ("claude", None),
+            ("vertex_ai/", "claude"),
+            ("bedrock/", "anthropic"),
+        ),
+    ),
+    ("openai", (("openai/", None), ("hosted_vllm/", None))),
+)
+
+#: Thinking tokens allowed on top of max_tokens when a bundle or tier names none.
+DEFAULT_THINKING_BUDGET = 4096
+
+#: The first Claude generation that thinks on request (3.7); everything from there on
+#: is a reasoning model, so `auto` asks it to think with a budget of its own.
+_FIRST_REASONING_CLAUDE = (3, 7)
+_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)*(\d+)(?:-(\d+))?")
+
+
+def _thinking_family(model: str) -> str | None:
+    lowered = model.lower()
+    for family, routes in _THINKING_ROUTES:
+        for prefix, needle in routes:
+            if lowered.startswith(prefix) and (needle is None or needle in lowered):
+                return family
+    return None
+
+
+def is_reasoning_claude(model: str) -> bool:
+    """Whether a Claude route names a generation that thinks (3.7 and later). An id
+    with no version in it is unknown, so `auto` leaves it alone."""
+    found = _CLAUDE_VERSION.search(model.lower())
+    if not found:
+        return False
+    major, minor = int(found.group(1)), int(found.group(2) or 0)
+    return (major, minor) >= _FIRST_REASONING_CLAUDE
+
+
+def thinking_kwargs(
+    model: str, spec: ThinkingSpec | None, max_tokens: int
+) -> tuple[dict, int]:
+    """The litellm kwargs for `spec` on `model`, and the max_tokens to send.
+
+    Returns ({}, max_tokens) whenever nothing is asked for: routes the table above
+    does not know, `auto` on a model whose reasoning is unknown, and `off` where the
+    route has no way to say so. Pure, so the contract tests read it directly.
+    """
+    mode = spec.mode if spec is not None else "auto"
+    budget = (spec.budget_tokens if spec is not None else None) or DEFAULT_THINKING_BUDGET
+    family = _thinking_family(model)
+    if family == "anthropic":
+        if mode == "on" or (mode == "auto" and is_reasoning_claude(model)):
+            return (
+                {"thinking": {"type": "enabled", "budget_tokens": budget}},
+                max_tokens + budget,
+            )
+        return {}, max_tokens
+    if family == "openai":
+        if mode == "off":
+            return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}, max_tokens
+        if mode == "on":
+            return (
+                {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+                max_tokens + budget,
+            )
+    return {}, max_tokens
 
 
 _THINK_OPEN = "<think>"
@@ -74,9 +176,13 @@ class LiteLLMClient:
         api_base: str | None = None,
         api_key: str | None = None,
         timeout: float | None = None,
+        thinking: ThinkingSpec | None = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
+        # What the provider is told about thinking, and the max_tokens that goes with
+        # it (#240): fixed per client, like everything else here.
+        self.thinking_kwargs, self.max_tokens_sent = thinking_kwargs(model, thinking, max_tokens)
         # Seconds per call (#201). None leaves litellm's own default, 6000 s.
         self.timeout = timeout
         self.api_base = api_base
@@ -98,7 +204,8 @@ class LiteLLMClient:
         kwargs: dict = {
             "model": self.model,
             "messages": cache_marked(messages, self.model),
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens_sent,
+            **self.thinking_kwargs,
         }
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -129,11 +236,30 @@ class LiteLLMClient:
             tool_calls.append(ToolCall(id=raw.id, name=raw.function.name, arguments=arguments))
 
         usage = getattr(response, "usage", None)
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        if finish_reason == "length":
+            # The one line that makes a cut reply diagnosable from the agent's log
+            # (#240): did the answer run long, or did thinking eat the budget first?
+            # The reply itself still gets the engine's truncated sentence.
+            details = getattr(usage, "completion_tokens_details", None)
+            reasoning_tokens = getattr(details, "reasoning_tokens", None)
+            log.info(
+                "reply truncated: model=%s max_tokens_sent=%d completion_tokens=%d "
+                "reasoning_tokens=%s thinking=%s",
+                self.model,
+                self.max_tokens_sent,
+                completion_tokens,
+                reasoning_tokens if reasoning_tokens is not None else "unreported",
+                self.thinking_kwargs.get("thinking")
+                or self.thinking_kwargs.get("extra_body")
+                or "not sent",
+            )
         return LLMResponse(
             text=text,
             reasoning=reasoning,
             tool_calls=tool_calls,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            finish_reason=getattr(response.choices[0], "finish_reason", None),
+            output_tokens=completion_tokens,
+            finish_reason=finish_reason,
         )

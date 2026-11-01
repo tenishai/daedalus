@@ -71,7 +71,9 @@ same bundle must run either way. A model tier can also name the engine (below).
 `model.id` is a litellm route string (`anthropic/claude-sonnet-4-5`, `openai/<name>`) or
 one of the tier words `fast`, `balanced`, `best`. A tier is looked up in the YAML file
 named by `DAEDALUS_TIERS`, which maps each tier to an engine, a model and its limits once
-per deployment. Reach for a tier when: the same bundle runs in several deployments with
+per deployment, `max_tokens` and `thinking` among them, so a deployment raises the reply
+ceiling for every bundle on a tier (16384 for a reasoning model, say) without an edit to
+the bundles. Reach for a tier when: the same bundle runs in several deployments with
 different models. Cost: with no tiers file, or a tier the file doesn't offer, the bundle
 refuses to load; an `--engine` that disagrees with the tier's engine is refused too.
 `model.api_base` and `model.api_key_env` point at an OpenAI-compatible endpoint.
@@ -176,6 +178,26 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
   together. Past it the run is cancelled and the task fails with 704.
 - **`model.request_timeout`** (default 120 s): one model call, litellm engine only.
   litellm's own default is 6000 s.
+- **`model.max_tokens`** (default 8192): the visible reply's ceiling, sent to the provider
+  as its required output cap. It exists because every provider demands one, and because
+  it bounds cost and keeps a full reply inside the request timeout and the room's relay.
+  A reply that hits it ends with `[reply truncated: hit the model's max_tokens limit
+  (N)]`, and the agent's log gets one line saying the model, the ceiling that was sent,
+  the completion tokens and how many of them were thinking, when the provider reports
+  that. A one-line answer that hits the cap is thinking spending the budget, not a long
+  answer; see the next setting.
+- **`model.thinking`** (`mode`, `budget_tokens`; litellm engine only): the model's thinking
+  budget, kept apart from the reply's. `mode: auto` (default) asks models known to reason
+  (Claude 3.7 and later) to think within `budget_tokens` (default 4096) and raises the
+  request's ceiling by that much, so the answer keeps all of `max_tokens`; other routes are
+  sent nothing. `mode: on` always asks. `mode: off` asks the route not to think where it
+  can: an OpenAI-compatible server in front of a Qwen-style model gets
+  `enable_thinking: false`; a Claude that thinks only when asked is simply not asked;
+  a Claude that always thinks keeps its default. On the newest Claude models the budget
+  becomes an effort level (1024 low, 2048 medium, 4096 high, 8192 xhigh). Reach for `off`
+  on a fast tier that answers tool-shaped one-liners; reach for a bigger budget when a
+  reasoning model's replies arrive cut. Write a bare `off` or quote it; both are read as
+  the word.
 - **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.

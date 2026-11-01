@@ -15,6 +15,8 @@ def test_golden_bundle_loads(monkeypatch):
     assert spec.name == "greeter"
     assert spec.model.id == "anthropic/claude-sonnet-4-5"  # ${VAR:-default} default path
     assert spec.model.max_tokens == 1024
+    assert spec.model.thinking.mode == "auto"
+    assert spec.model.thinking.budget_tokens == 2048
     assert spec.model.request_timeout == 60
     assert spec.task_timeout == 300
     assert spec.model.budget.per_task_tokens == 50000

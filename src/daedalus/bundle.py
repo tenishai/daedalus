@@ -75,6 +75,41 @@ class BudgetSpec(_WarnExtra):
     per_task_tokens: int | None = None
 
 
+class ThinkingSpec(_WarnExtra):
+    """How much the model may think before it answers, kept apart from the visible
+    reply's `max_tokens` (tenishai/daedalus#240). Providers that count thinking against
+    `max_tokens` could spend the whole reply budget on it: a one-line answer came back
+    as `[reply truncated ...]` twice on the same day. The litellm engine only; the
+    provider table in daedalus.llm says what each route is sent."""
+
+    # auto: ask for thinking on models known to reason (Claude 3.7 and later), send
+    # nothing elsewhere. on: always ask. off: say so where the route has a way to.
+    mode: Literal["auto", "off", "on"] = Field(
+        default="auto",
+        description="auto asks known reasoning models to think; on always asks; off "
+        "turns it off where the route can.",
+    )
+    # Tokens of thinking the model may spend ON TOP of max_tokens: the request's
+    # max_tokens is raised by this much so the visible reply keeps its whole budget.
+    # Claude's floor is 1024. Unset: 4096 (daedalus.llm.DEFAULT_THINKING_BUDGET).
+    budget_tokens: int | None = Field(
+        default=None,
+        ge=1024,
+        description="Thinking tokens added on top of max_tokens (default 4096, floor 1024).",
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_booleans_are_words(cls, value):
+        # YAML 1.1 reads a bare `off`/`on` as a boolean, so `thinking: {mode: off}` in a
+        # tiers file or agent.yaml arrives here as False. Take it as the word it was.
+        if value is False:
+            return "off"
+        if value is True:
+            return "on"
+        return value
+
+
 class ModelSpec(_WarnExtra):
     # A concrete model id, or (after ${VAR} expansion) one of the tier words
     # fast/balanced/best, resolved through DAEDALUS_TIERS (daedalus.tiers,
@@ -83,7 +118,21 @@ class ModelSpec(_WarnExtra):
     # MY_MODEL set to an empty string expands to "" and fails to load ("model needs an
     # id"); it does not fall back to the tier.
     id: str | None = None
-    max_tokens: int = 8192
+    # The visible reply's ceiling in tokens, sent to the provider as max_tokens (every
+    # provider requires one). 8192 bounds cost and fits kobo's 180 s relay timeout; a
+    # tier entry may raise it per deployment. Thinking is budgeted separately
+    # (`thinking`, tenishai/daedalus#240), so this is the answer's budget alone.
+    max_tokens: int = Field(
+        default=8192,
+        gt=0,
+        description="The visible reply's ceiling in tokens; thinking is budgeted "
+        "separately under thinking.budget_tokens.",
+    )
+    # None: a tier entry may fill it; otherwise mode auto with the default budget.
+    thinking: ThinkingSpec | None = Field(
+        default=None,
+        description="Thinking budget, kept apart from max_tokens (litellm engine only).",
+    )
     # Seconds one model call may take before it fails (#201), passed to litellm as
     # `timeout`. Without it litellm waits 6000 s. 120 s fits a full max_tokens reply
     # from a hosted model and stays under kobo's 180 s relay timeout. A tier entry
