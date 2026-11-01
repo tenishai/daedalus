@@ -254,6 +254,7 @@ class Agent:
                 api_base=model_spec.api_base,
                 api_key=api_key,
                 timeout=model_spec.request_timeout,
+                thinking=model_spec.thinking,
             )
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
@@ -360,7 +361,7 @@ class Agent:
                 "engine was asked for; drop the engine choice, or pin model.id to a model"
             )
         model.id = entry.id
-        for field in ("api_base", "api_key_env", "max_tokens", "request_timeout"):
+        for field in ("api_base", "api_key_env", "max_tokens", "request_timeout", "thinking"):
             value = getattr(entry, field)
             if value is not None and field not in model.model_fields_set:
                 setattr(model, field, value)

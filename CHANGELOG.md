@@ -8,6 +8,25 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **The thinking budget is kept apart from the visible reply's, and a cut reply says why
+  in the log** (tenishai/daedalus#240). A one-line answer hit the 8192 `max_tokens` cap
+  twice on one day because the provider counted the model's thinking against it.
+  `model.thinking` (`mode: auto|off|on`, default `auto`; `budget_tokens`, default 4096,
+  floor 1024) is new: for Claude routes, `on`, and `auto` on a 3.7-or-later id, send
+  litellm's `thinking={"type": "enabled", "budget_tokens": N}` with the request's
+  `max_tokens` raised by N, so the answer keeps its whole budget (litellm translates the
+  shape for the models that take an effort level instead); `off` sends nothing. For
+  OpenAI-compatible routes (`openai/`, `hosted_vllm/`) `off` and `on` send
+  `chat_template_kwargs.enable_thinking` in `extra_body`; `auto` sends nothing. Every
+  provider fact is one table in `daedalus.llm`. When a reply finishes with reason
+  `length`, `LiteLLMClient` logs one INFO line with the model, the ceiling sent, the
+  completion tokens and the reasoning tokens when the provider reports them; the
+  truncated sentence on the reply is unchanged. A tiers-file entry may set `max_tokens`
+  and `thinking`, filled when the bundle is silent, so a deployment raises the ceiling per
+  tier; the bundle default stays 8192. `model.max_tokens` now carries a description and
+  refuses zero. A bare YAML `off`/`on` under `thinking.mode` is read as the word, not the
+  boolean YAML 1.1 makes of it. `docs/bundle.schema.json` regenerated; the greeter golden
+  bundle carries the new block.
 - **Slack events can arrive over HTTP, with no app-level token** (tenishai/kobo#304,
   tenishai/kobo#371). The a2a app gains `POST /slack/events`: the room's relay
   forwards Slack's event envelope exactly as Slack posted it, with the header

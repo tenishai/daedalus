@@ -70,7 +70,10 @@ model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string, or a tier word
                                         # (fast | balanced | best, §1.2a)
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
-  max_tokens: 8192
+  max_tokens: 8192                     # the visible reply's ceiling (§2.3)
+  thinking:                            # apart from max_tokens (#240); litellm engine
+    mode: auto                         # auto | off | on
+    budget_tokens: 4096                # added on top of max_tokens; floor 1024
   request_timeout: 120                 # seconds per model call (default 120)
   budget:
     per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
@@ -177,6 +180,8 @@ tiers:
     api_key_env: LOCAL_API_KEY
     context_tokens: 45000              # this model on this hardware
     max_repeats: 3
+    max_tokens: 16384                  # the reply ceiling for every bundle on this tier
+    thinking: {mode: off}              # or {mode: on, budget_tokens: 4096}
   # a tier can alias another (balanced: best), or be null: not offered here
 ```
 
@@ -186,9 +191,11 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
 - **The tier's engine is the default.** An explicit `--engine` or `DAEDALUS_ENGINE` that
   disagrees is refused at load, not silently obeyed.
 - **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
-  `max_tokens`, `request_timeout`, `tools.context_tokens`, `tools.max_repeats`, and the
-  Claude Code model.
-  A value the bundle set wins.
+  `max_tokens`, `thinking`, `request_timeout`, `tools.context_tokens`, `tools.max_repeats`,
+  and the Claude Code model.
+  A value the bundle set wins. The bundle default for `max_tokens` stays 8192; a
+  deployment that runs reasoning models raises it on the tier (#240), which is the one
+  place the room's org config has to say so.
 - **A tier word never reaches LiteLLM as a model name.** With no tiers file named, load
   refuses naming the tier and `DAEDALUS_TIERS`; with a tiers file that doesn't offer the
   tier, load refuses naming the tier and the tiers the file does offer.
@@ -287,6 +294,28 @@ provider degrades all loops together rather than thundering.
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
 DeepSeek R1 on vLLM). They will feed the visual builder's trace pane over SSE.
+
+**The reply ceiling and the thinking budget (#240).** `model.max_tokens` (default 8192)
+is the visible reply's ceiling: every provider requires an output cap, and this one bounds
+cost and keeps a full reply inside `request_timeout` and the room's 180 s relay. Providers
+count thinking against the same cap, so a reasoning-heavy turn could spend the whole
+budget before the answer started: a one-line reply came back as `[reply truncated ...]`
+twice on one day. `model.thinking` keeps the two apart. `LiteLLMClient` asks
+`daedalus.llm.thinking_kwargs` once, at construction, for the kwargs to send and the
+ceiling to send with them; every provider fact lives in the `_THINKING_ROUTES` table
+above it and nowhere else. For Claude routes (`anthropic/`, `vertex_ai/claude*`,
+`bedrock/anthropic*`), `on`, and `auto` on a 3.7-or-later id, send litellm's
+`thinking={"type": "enabled", "budget_tokens": N}` with `max_tokens + N`; the pinned
+litellm translates that for the models that take an effort level instead of a budget.
+`off` sends nothing: it is "no thinking" where thinking is opt-in, and the model's default
+where it always thinks (`disabled` is refused there). For OpenAI-compatible routes
+(`openai/`, `hosted_vllm/`) `off` and `on` send `chat_template_kwargs.enable_thinking`
+in `extra_body`, `on` with the raised ceiling; `auto` sends nothing. Routes the table does
+not know are sent nothing. When a response finishes with reason `length`, the client logs
+one INFO line (`reply truncated: model= max_tokens_sent= completion_tokens=
+reasoning_tokens= thinking=`) so the cause is readable from the agent's log; the engine
+still appends the truncated sentence to the reply, since a cut answer must not read as
+complete. A tier entry carries both settings, so the ceiling is per deployment per tier.
 
 ### 2.3a What the model sees each task
 
