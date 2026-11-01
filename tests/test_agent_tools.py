@@ -966,3 +966,27 @@ async def test_salvage_can_be_turned_off_for_a_self_hosted_api_base(tmp_path):
                        tools_extra="  salvage_text_calls: false\n")
     await agent.handle_task(Task.from_text("read /x"))
     assert tools.calls == []
+
+
+def test_mcp_result_text_includes_embedded_resources():
+    """A file returned as an embedded resource reaches the model, named by uri
+    and type; a text-only flattening lost it (GitHub's hosted server answers
+    get_file_contents with a confirmation line plus the file as a resource)."""
+    from types import SimpleNamespace as NS
+
+    from daedalus.tools.mcp import result_text
+
+    content = [
+        NS(type="text", text="successfully downloaded text file (SHA: abc)"),
+        NS(type="resource", resource=NS(uri="repo://acme/infra/contents/requirements.txt",
+                                        mimeType="text/plain", text="fastapi==0.115\n")),
+        NS(type="resource", resource=NS(uri="repo://acme/infra/contents/logo.png",
+                                        mimeType="image/png", blob="iVBORw0KGgo=")),
+        NS(type="image", data="...", mimeType="image/png"),
+    ]
+    assert result_text(content) == (
+        "successfully downloaded text file (SHA: abc)\n"
+        "[resource repo://acme/infra/contents/requirements.txt (text/plain)]\nfastapi==0.115\n\n"
+        "[resource repo://acme/infra/contents/logo.png (image/png)] binary, not shown"
+    )
+    assert result_text([]) == "(no text content)"
