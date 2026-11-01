@@ -32,6 +32,33 @@ def _argv(name: str, server: dict) -> list[str]:
     return [*command, *args]
 
 
+def result_text(content) -> str:
+    """A tool result as text for the model: every text block, and the text of
+    every embedded resource (an `EmbeddedResource`: a file or document the
+    server returns inline, `.resource.text` with a uri and a mime type). A
+    text-only flattening handed the model a server's "successfully downloaded"
+    line and lost the file it came with (GitHub's hosted MCP server, found by
+    the kobo wire test 2026-10-31; the same fix is liminal 0.9.3's
+    `ToolCallOutcome.text`). A resource is introduced by one line naming its
+    uri and type; a binary resource (`blob`) is named and not expanded."""
+    parts: list[str] = []
+    for c in content or ():
+        text = getattr(c, "text", None)
+        res = getattr(c, "resource", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+        elif res is not None:
+            uri = getattr(res, "uri", None) or ""
+            mime = getattr(res, "mimeType", None) or ""
+            head = f"[resource {uri}" + (f" ({mime})" if mime else "") + "]"
+            body = getattr(res, "text", None)
+            if isinstance(body, str):
+                parts.append(f"{head}\n{body}")
+            elif getattr(res, "blob", None) is not None:
+                parts.append(f"{head} binary, not shown")
+    return "\n".join(parts) if parts else "(no text content)"
+
+
 def _field(obj, new: str, old: str):
     """mcp 2.x renamed camelCase fields (inputSchema -> input_schema, isError ->
     is_error); read whichever this SDK has."""
@@ -120,8 +147,7 @@ class MCPToolProvider:
             raise MCPError(f"unknown tool {name!r}")
         session = self._sessions[server]
         result = await session.call_tool(tool, payload)
-        parts = [c.text for c in result.content if getattr(c, "text", None)]
-        text = "\n".join(parts) if parts else "(no text content)"
+        text = result_text(result.content)
         if _field(result, "is_error", "isError"):
             raise MCPError(text)
         return text
