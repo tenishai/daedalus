@@ -14,6 +14,15 @@ the `oaud` claim AWS's Google federation checks, which locally-minted
 gcloud tokens do NOT carry -- and boto3 exchanges it for role
 credentials, cached until shortly before expiry.
 
+The lease path (2026-10-29, the permissions design): when the bundle names
+`bab_url` and `bab_integration`, the pod does not assume anything. It
+POSTs to the room's permission service with the service account token
+projected for that audience, and gets back a credential the service
+minted for exactly the permissions this agent was granted, one hour long,
+with the agent's name in the session. A refusal is a sentence to the
+model, not an exception; the service being unreachable means no NEW
+credential (a cached one keeps working until it expires).
+
 The one tool queries an Okta system-log event data store for a single
 email's provisioning history -- TWO statements per call. The membership
 statement returns group add/remove events ("user X was added to group Y
@@ -30,10 +39,13 @@ follow Okta's system-log schema.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import UTC, datetime
 
 _METADATA_URL = (
     "http://metadata.google.internal/computeMetadata/v1/"
@@ -47,6 +59,10 @@ _QUERY_DEADLINE_S = 60.0
 _POLL_INTERVAL_S = 1.5
 _ROW_LIMIT = 200
 _CRED_EXPIRY_BUFFER_S = 120.0
+# On the lease path the credential is re-asked for at least this often, so a grant the
+# owner revokes stops the next call within a minute, not when the hour runs out. The
+# service hands back the same credential while it is valid and the grant stands.
+_LEASE_RECHECK_S = 60.0
 
 # Account-lifecycle event types. Deactivation (and suspension) strips every
 # group membership WITHOUT per-group group.user_membership.remove events --
@@ -124,18 +140,117 @@ def _metadata_token() -> str | None:
         return None
 
 
+def _lease_from_bab(url: str, integration: str, token_file: str, task: str) -> dict:
+    """POST /leases at the room's permission service; the pod's projected token
+    is the proof. Returns the service's JSON on 200; every other answer is a
+    `_LaneError` worded for the model."""
+    try:
+        with open(token_file, encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except OSError:
+        raise _LaneError(
+            "I can only reach the provisioning lake from my own pod -- the "
+            "permission token this pod should carry is not here."
+        ) from None
+    if not token:
+        raise _LaneError(
+            "I can only reach the provisioning lake from my own pod -- "
+            "the permission token is empty."
+        )
+    body = json.dumps({"integration": integration, "task": task}).encode()
+    request = urllib.request.Request(
+        url.rstrip("/") + "/leases",
+        data=body,
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode()).get("detail")
+        except Exception:  # noqa: BLE001  a body that is not JSON is still a refusal
+            detail = None
+        raise _LaneError(_lease_refusal(exc.code, detail, integration)) from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _LaneError(
+            "The permission service that leases my cloud access is unreachable, "
+            f"so I cannot reach the provisioning lake right now ({exc.__class__.__name__})."
+        ) from None
+
+
+def _lease_refusal(status: int, detail, integration: str) -> str:
+    """One sentence the model can act on, from a non-200 lease answer."""
+    if isinstance(detail, dict):
+        waiting = detail.get("waiting_for_approval") or []
+        refused = detail.get("refused") or []
+        if status == 202 and waiting:
+            rid = detail.get("request_id")
+            return (
+                f"My access to {integration} ({', '.join(waiting)}) is waiting for approval"
+                + (f" (request {rid})" if rid else "")
+                + "; ask a reviewer to decide it and try again."
+            )
+        if refused:
+            return (
+                f"I do not hold {', '.join(refused)} on {integration}; ask my owner to "
+                "request it on my Access page."
+            )
+        detail = detail.get("message") or json.dumps(detail)
+    if status == 401:
+        return (
+            "The permission service does not know this pod as an agent, "
+            "so it will not lease me anything."
+        )
+    if status == 403:
+        return (
+            f"I hold no access to {integration}; "
+            "ask my owner to request it on my Access page."
+        )
+    if status == 404:
+        return f"No account named {integration!r} is connected to the room."
+    return (
+        f"The permission service refused to lease my access to {integration} "
+        f"({status}: {detail})."
+    )
+
+
+def _seconds_until(expires_at: str | None) -> float:
+    """RFC 3339 -> seconds from now; a missing or odd value is treated as one hour."""
+    if not expires_at:
+        return 3600.0
+    try:
+        when = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return 3600.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
 class CloudTrailToolProvider:
     def __init__(
         self,
-        role_arn: str,
+        role_arn: str | None,
         event_data_store: str,
         region: str,
         group_prefix: str = "engineering_",
         token_fetch=None,
         boto3_module=None,
         agent_name: str = "",
+        bab_url: str | None = None,
+        bab_integration: str | None = None,
+        bab_token_file: str = "/var/run/secrets/bab/token",
+        lease_fetch=None,
     ):
+        if not role_arn and not (bab_url and bab_integration):
+            raise ValueError("cloudtrail needs role_arn, or bab_url with bab_integration")
         self.role_arn = role_arn
+        self.bab_url = bab_url
+        self.bab_integration = bab_integration
+        self.bab_token_file = bab_token_file
+        self._lease_fetch = lease_fetch or _lease_from_bab
         self.event_data_store = event_data_store
         # Raises ValueError on anything that is not an ID or ARN, before it can
         # reach a query string. `_query_eds` is what FROM interpolates.
@@ -381,6 +496,8 @@ class CloudTrailToolProvider:
     def _assume(self, boto3) -> dict:
         if self._creds is not None and time.monotonic() < self._creds_expiry:
             return self._creds
+        if self.bab_url and self.bab_integration:
+            return self._lease()
         token = self._token_fetch()
         if not token:
             raise _LaneError(
@@ -398,6 +515,28 @@ class CloudTrailToolProvider:
         # field is a datetime whose clock may not match ours -- a fixed
         # local buffer window is simpler and always safe.
         self._creds_expiry = time.monotonic() + 3600.0 - _CRED_EXPIRY_BUFFER_S
+        return self._creds
+
+    def _lease(self) -> dict:
+        """A credential from the room's permission service, in boto3's spelling,
+        cached until a little before the lease ends."""
+        lease = self._lease_fetch(
+            self.bab_url, self.bab_integration, self.bab_token_file, "cloudtrail.query_provisioning"
+        )
+        cred = lease.get("credential") or {}
+        try:
+            self._creds = {
+                "AccessKeyId": cred["aws_access_key_id"],
+                "SecretAccessKey": cred["aws_secret_access_key"],
+                "SessionToken": cred["aws_session_token"],
+            }
+        except KeyError:
+            raise _LaneError(
+                "The permission service answered without a usable credential, "
+                "so I cannot reach the lake."
+            ) from None
+        left = _seconds_until(lease.get("expires_at")) - _CRED_EXPIRY_BUFFER_S
+        self._creds_expiry = time.monotonic() + max(0.0, min(left, _LEASE_RECHECK_S))
         return self._creds
 
     def _build_query(self, email: str, lookback_days: int) -> str:

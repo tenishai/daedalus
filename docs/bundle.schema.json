@@ -186,7 +186,7 @@
     },
     "CloudTrailSpec": {
       "additionalProperties": true,
-      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`. Absent role_arn = the block is off.",
+      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`.\n\nTwo ways to a credential. `role_arn`: the pod assumes the role itself\nwith its own cloud identity. `bab_url` + `bab_integration`: the pod asks\nthe room's permission service for a one-hour lease, proving itself with\nthe service account token projected at `bab_token_file` (audience\n`bab`); the service holds the role, checks what this agent was granted\nand names the agent in the session. With both set the lease wins. With\nneither, the block is off.",
       "properties": {
         "role_arn": {
           "anyOf": [
@@ -220,6 +220,35 @@
         "group_prefix": {
           "default": "engineering_",
           "title": "Group Prefix",
+          "type": "string"
+        },
+        "bab_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bab Url"
+        },
+        "bab_integration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bab Integration"
+        },
+        "bab_token_file": {
+          "default": "/var/run/secrets/bab/token",
+          "title": "Bab Token File",
           "type": "string"
         }
       },

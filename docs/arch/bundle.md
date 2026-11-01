@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-10-26
-anchor: src/daedalus/bundle.py sha=7f7da6581bd2a863b94f0b697aebccae5b45cf11
-anchor: docs/bundle.schema.json sha=c6346de5846e2766c8a6ac876ab55990a8649973
+updated: 2026-11-01
+anchor: src/daedalus/bundle.py sha=bf4a8948fd19ed7c3c6db45dc50b440d0cb6ef14
+anchor: docs/bundle.schema.json sha=3fcdf69092453467022fcb90297816f4bd152026
 ---
 # bundle — agent.yaml schema and the bundle directory
 
@@ -12,7 +12,7 @@ OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursive
 INVARIANTS:
 - Unknown fields load with a WARNING, never an error and never silently (`_WarnExtra`): forward-compat with newer writers (kobo, kaminos).
 - docs/bundle.schema.json is drift-pinned: tests/test_schema.py::test_committed_schema_cannot_drift_from_the_runtime. Any AgentSpec change needs `daedalus schema --out docs/bundle.schema.json` in the same commit. The schema is the contract for non-Python readers (cabal's bundle reader, editors).
-- `tools.allow` empty = deny everything. `tools.provider` ∈ none|mcp|liminal|colleagues picks ONE primary; github, cloudtrail, slack_read, jira, liminal.url are SIDECARS that stack beside it (agent.py _tools_from_spec). `slack_read.channels: []` = lane ON for every invited channel; omitted = OFF (2026-09-23).
+- `tools.allow` empty = deny everything. `tools.provider` ∈ none|mcp|liminal|colleagues picks ONE primary; github, cloudtrail, slack_read, jira, liminal.url are SIDECARS that stack beside it (agent.py _tools_from_spec). `cloudtrail` is ON when `event_data_store` plus either `role_arn` (the pod assumes) or `bab_url`+`bab_integration` (a one-hour credential leased from the room's permission service with the token at `bab_token_file`) are set; `CloudTrailSpec.on` is the one predicate (2026-10-29). `slack_read.channels: []` = lane ON for every invited channel; omitted = OFF (2026-09-23).
 - Which engine runs a bundle is NOT in the bundle; `engine.claude_code` only configures that engine. Same bundle must run with and without Claude Code.
 - `memory.revision` unknown value → warn and disable; absent = the revision module is never imported.
 - A skill whose `requires:` the allowlist doesn't admit, or skills without `skills.load` allowed, warn at load (unmet_requirements); they don't fail.

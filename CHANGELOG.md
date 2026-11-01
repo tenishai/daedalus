@@ -6,6 +6,20 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **The `cloudtrail` sidecar can lease its credential instead of assuming a role.** With
+  `tools.cloudtrail.bab_url` and `bab_integration` set, the pod asks the room's permission
+  service (bab) for a one-hour credential, proving itself with the service account token
+  projected at `bab_token_file` (default `/var/run/secrets/bab/token`, audience `bab`).
+  The service holds the role, narrows the session to what this agent was granted and names
+  the agent in it; the pod assumes nothing and `role_arn` may be omitted. A refusal comes
+  back to the model as a sentence ("I do not hold X on Y; ask my owner to request it"), a
+  pending approval as "waiting for approval", and an unreachable service means no new
+  credential while a cached one keeps working until it expires. The credential is re-asked
+  for at least once a minute, so a grant the owner revokes stops the next call within a
+  minute rather than when the hour runs out.
+
 ### Changed
 
 - **An agent answering another agent gets knowledge-only tools** (tenishai/kobo#310, the

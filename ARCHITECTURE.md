@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-11-01
 anchor: pyproject.toml sha=8d581f6d8b0cd72a76a5f480574b2c12ea1d996f
-anchor: src/daedalus/agent.py sha=a178bf0caec8eae9f6d223412a5dfbf91a348c4f
+anchor: src/daedalus/agent.py sha=1ceddfe6653a1bd919db149f37405e0eeb6f2625
 ---
 # daedalus — repo card
 

@@ -188,7 +188,7 @@ Both timeouts must be positive; a bundle can raise them, not turn them off.
 | `claude-code` | `--engine claude-code` (mcp>=2.2, uvicorn, claude-agent-sdk) | Claude Code should run the agent. |
 | `a2a` | the a2a transport and JWT auth | cabal or another service sends tasks. |
 | `slack` | the slack transport | The agent lives in Slack. |
-| `aws` | the `cloudtrail` sidecar (boto3) | The agent queries CloudTrail Lake. |
+| `aws` | the `cloudtrail` sidecar (boto3) | The agent queries CloudTrail Lake, with a role it assumes itself or a credential leased from the room's permission service (`bab_url`). |
 | `techne` | `memory.personal: techne` | The agent should remember. |
 
 `claude-code` needs mcp>=2.2, and kobo pins `mcp>=1.15,<2`, so the two can't share one

@@ -522,7 +522,7 @@ class Agent:
         # The cloudtrail sidecar (cloud-access integration path, 2026-09-03):
         # same stacking rule as github -- a sidecar block, not a provider
         # value. Identity is the pod's own; there is no token to wire.
-        if spec.cloudtrail.role_arn and spec.cloudtrail.event_data_store:
+        if spec.cloudtrail.on:
             from daedalus.tools.cloudtrail import CloudTrailToolProvider
 
             try:
@@ -533,6 +533,9 @@ class Agent:
                         region=spec.cloudtrail.region,
                         group_prefix=spec.cloudtrail.group_prefix,
                         agent_name=self.bundle.spec.name,
+                        bab_url=spec.cloudtrail.bab_url,
+                        bab_integration=spec.cloudtrail.bab_integration,
+                        bab_token_file=spec.cloudtrail.bab_token_file,
                     )
                 )
             except ValueError as exc:
