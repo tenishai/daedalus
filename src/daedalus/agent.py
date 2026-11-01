@@ -1370,6 +1370,7 @@ class Agent:
         from daedalus.transports.cli import CliTransport
 
         built: list[Transport] = []
+        a2a_transport = None  # the HTTP app a Slack-over-HTTP transport attaches to
         slack_channels: list[str] = []
         slack_asked = False  # any slack block at all
         slack_open = False  # a block that named no channel
@@ -1396,16 +1397,15 @@ class Agent:
                     # A new dict -- the on-disk card / bundle.card in memory
                     # is never mutated to carry the stamp.
                     card = {**card, "enforcement": self.enforcement.card_stamp()}
-                built.append(
-                    A2aTransport(
-                        card=card,
-                        host=str(options.get("host", "127.0.0.1")),
-                        port=int(options.get("port", 9200)),
-                        events=self.events,
-                        verifier=self._a2a_verifier(options.get("auth")),
-                        name=self.bundle.spec.name,
-                    )
+                a2a_transport = A2aTransport(
+                    card=card,
+                    host=str(options.get("host", "127.0.0.1")),
+                    port=int(options.get("port", 9200)),
+                    events=self.events,
+                    verifier=self._a2a_verifier(options.get("auth")),
+                    name=self.bundle.spec.name,
                 )
+                built.append(a2a_transport)
             elif spec.kind == "slack":
                 try:
                     import slack_sdk  # noqa: F401
@@ -1469,17 +1469,24 @@ class Agent:
                     f"({', '.join(sorted(slack_wakes))}); one transport serves every "
                     "block, so they must name the same mode"
                 )
-            built.append(
-                SlackTransport(
-                    slack_channels[0] if slack_channels else "",
-                    channels=[] if slack_open else slack_channels,
-                    escalation_route=self.bundle.spec.approvals.escalation.route,
-                    approvers=slack_approvers,
-                    # The bundle's word, unless the deployment overrides it in the
-                    # environment (the room sets SLACK_WAKE_MODE per agent).
-                    wake=os.environ.get("SLACK_WAKE_MODE") or next(iter(slack_wakes), None),
-                )
+            slack = SlackTransport(
+                slack_channels[0] if slack_channels else "",
+                channels=[] if slack_open else slack_channels,
+                escalation_route=self.bundle.spec.approvals.escalation.route,
+                approvers=slack_approvers,
+                # The bundle's word, unless the deployment overrides it in the
+                # environment (the room sets SLACK_WAKE_MODE per agent).
+                wake=os.environ.get("SLACK_WAKE_MODE") or next(iter(slack_wakes), None),
             )
+            built.append(slack)
+            if slack.over_http and a2a_transport is not None:
+                # No app-level token: Slack's envelopes come by POST /slack/events
+                # on the a2a app (kobo#304). Both transports serve the same
+                # handler (this Agent), so the route reaches the Slack transport
+                # through the a2a transport and hands it the handler it already
+                # holds. With the app-level token present nothing is attached
+                # and the route answers 404: Socket Mode, exactly as before.
+                a2a_transport.slack = slack
         return built
 
     async def aclose(self) -> None:

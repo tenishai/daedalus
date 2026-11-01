@@ -8,6 +8,32 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **Slack events can arrive over HTTP, with no app-level token** (tenishai/kobo#304,
+  tenishai/kobo#371). The a2a app gains `POST /slack/events`: the room's relay
+  forwards Slack's event envelope exactly as Slack posted it, with the header
+  `X-Kobo-Relay-Secret` equal to the agent's `SLACK_RELAY_SECRET` (503 while that env
+  is unset, 403 when it differs). The route answers `200 {"accepted": true}` at once
+  and schedules the same `handle_event` Socket Mode calls, so threads, wake modes,
+  streaming, approvals and images are untouched; a `url_verification` body gets its
+  challenge back. Transport choice at start: `SLACK_APP_TOKEN` present means Socket
+  Mode exactly as before and the route answers 404; absent, with `SLACK_BOT_TOKEN`,
+  means the HTTP way in and no socket is opened. One boot line says which. Both ways
+  in pass through `SlackTransport.admit`, which drops a repeated `event_id` (the last
+  2000 remembered) before the existing `(channel, ts)` dedupe. Existing agents, which
+  all have the app-level token, change nothing.
+- **Slack events can arrive over HTTP, with no app-level token** (tenishai/kobo#304,
+  tenishai/kobo#371). The a2a app gains `POST /slack/events`: the room's relay
+  forwards Slack's event envelope exactly as Slack posted it, with the header
+  `X-Kobo-Relay-Secret` equal to the agent's `SLACK_RELAY_SECRET` (503 while that env
+  is unset, 403 when it differs). The route answers `200 {"accepted": true}` at once
+  and schedules the same `handle_event` Socket Mode calls, so threads, wake modes,
+  streaming, approvals and images are untouched; a `url_verification` body gets its
+  challenge back. Transport choice at start: `SLACK_APP_TOKEN` present means Socket
+  Mode exactly as before and the route answers 404; absent, with `SLACK_BOT_TOKEN`,
+  means the HTTP way in and no socket is opened. One boot line says which. Both ways
+  in pass through `SlackTransport.admit`, which drops a repeated `event_id` (the last
+  2000 remembered) before the existing `(channel, ts)` dedupe. Existing agents, which
+  all have the app-level token, change nothing.
 - **The `cloudtrail` sidecar can lease its credential instead of assuming a role.** With
   `tools.cloudtrail.bab_url` and `bab_integration` set, the pod asks the room's permission
   service (bab) for a one-hour credential, proving itself with the service account token
