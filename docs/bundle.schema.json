@@ -179,6 +179,18 @@
           ],
           "default": null,
           "title": "Config Dir"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
         }
       },
       "title": "ClaudeCodeSpec",

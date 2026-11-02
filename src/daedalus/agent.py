@@ -239,6 +239,11 @@ class Agent:
                 "enforce it; remove it, or run with --engine litellm (and, if the model "
                 "comes from a tier that runs on claude-code, pin model.id)"
             )
+        cwd = bundle.spec.engine.claude_code.cwd
+        if self.engine_name == "claude-code" and cwd and not Path(cwd).expanduser().is_dir():
+            # At load, not on the first task (#242): a typo'd workspace would otherwise
+            # run Claude Code in whatever directory daedalus started from.
+            raise BundleError(f"engine.claude_code.cwd {cwd!r} is not a directory")
         self.operator_subs = self._operator_subs_from_spec()
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:

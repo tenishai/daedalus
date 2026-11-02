@@ -499,6 +499,12 @@ class ClaudeCodeSpec(_WarnExtra):
     on_denied: Literal["continue", "stop"] = "continue"
     # CLAUDE_CONFIG_DIR for the child. None = inherit the operator's environment.
     config_dir: str | None = None
+    # The directory Claude Code works in (tenishai/daedalus#242). None = wherever
+    # `daedalus run` started. `~` is expanded; a path that isn't a directory fails the
+    # load when this engine runs the bundle. Claude Code auto-approves read-only tools
+    # inside it, so it widens what runs without reaching the gates; the workspace's own
+    # .claude settings and .mcp.json still never load (setting_sources=["user"]).
+    cwd: str | None = None
 
 
 class EngineSpec(_WarnExtra):

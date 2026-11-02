@@ -95,6 +95,13 @@ def test_options_pass_the_pinned_model_and_config_dir(tmp_path):
     assert o.env["CLAUDE_CONFIG_DIR"] == "/cfg/prudence"
 
 
+def test_options_pass_the_working_directory(tmp_path):
+    """#242: the bundle's cwd is where Claude Code works; unset, none is passed."""
+    o = ClaudeCodeEngine(ClaudeCodeSpec(cwd=str(tmp_path))).options(_turn(tmp_path), sdk, "p")
+    assert str(o.cwd) == str(tmp_path)
+    assert ClaudeCodeEngine(ClaudeCodeSpec()).options(_turn(tmp_path), sdk, "p").cwd is None
+
+
 def test_with_nobody_to_approve_claude_codes_unattended_mode_is_used(tmp_path):
     o = ClaudeCodeEngine(ClaudeCodeSpec()).options(_turn(tmp_path, approve=None), sdk, "p")
     assert o.can_use_tool is None
@@ -359,6 +366,20 @@ def test_a_token_budget_is_refused_with_this_engine(tmp_path):
     assert Agent(Bundle.load(tmp_path)).engine_name == "litellm"  # fine there
     with pytest.raises(BundleError, match="can't enforce it"):
         Agent(Bundle.load(tmp_path), engine="claude-code")
+
+
+def test_a_working_directory_that_is_not_one_is_refused_at_load(tmp_path):
+    """#242: a missing cwd fails the load with this engine; the litellm engine, which
+    never uses it, still loads the same bundle."""
+    make_agent(tmp_path, allow=["files.read"])
+    missing = tmp_path / "no-such-worktree"
+    with (tmp_path / "agent.yaml").open("a") as f:
+        f.write(f"engine:\n  claude_code:\n    cwd: {missing}\n")
+    assert Agent(Bundle.load(tmp_path)).engine_name == "litellm"
+    with pytest.raises(BundleError, match="is not a directory"):
+        Agent(Bundle.load(tmp_path), engine="claude-code")
+    missing.mkdir()
+    assert Agent(Bundle.load(tmp_path), engine="claude-code").engine_name == "claude-code"
 
 
 
