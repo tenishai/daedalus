@@ -1,12 +1,12 @@
 ---
 card: arch-card:daedalus-bundle
 updated: 2026-11-01
-anchor: src/daedalus/bundle.py sha=f7f28a7d4f8d7b7a83a845503625e4ab9c108188
-anchor: docs/bundle.schema.json sha=656273bed8b2123856b00283ae1922fa5b84b768
+anchor: src/daedalus/bundle.py sha=54bc91d1fb098721683529e570c7175f503f91db
+anchor: docs/bundle.schema.json sha=2b36035b9e333471c7bada1e24b4748e7e275edf
 ---
 # bundle — agent.yaml schema and the bundle directory
 
-WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: AgentSpec, card: dict, persona: str, skills: dict[str, Skill]). `AgentSpec` (pydantic) is the agent.yaml schema: name, card, persona, model (ModelSpec: id, max_tokens (the visible reply's ceiling, default 8192, gt 0), thinking (ThinkingSpec | None: mode auto|off|on, budget_tokens ≥ 1024; the thinking budget kept apart from max_tokens, #240, litellm engine only; daedalus.llm.thinking_kwargs reads it), request_timeout (s per model call, default 120, litellm engine only, #201), api_base, api_key_env, budget.per_task_tokens; id is required and is either a model or a tier word, fast|balanced|best), transports[], tools (ToolsSpec), memory (MemorySpec), checkpoints, approvals (ceiling, gates, escalation), engine.claude_code (ClaudeCodeSpec), task_timeout (s per engine run, default 600, #201). `bundle_schema()` emits it as JSON Schema → docs/bundle.schema.json.
+WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: AgentSpec, card: dict, persona: str, skills: dict[str, Skill]). `AgentSpec` (pydantic) is the agent.yaml schema: name, card, persona, model (ModelSpec: id, max_tokens (the visible reply's ceiling, default 8192, gt 0), thinking (ThinkingSpec | None: mode auto|off|on, budget_tokens ≥ 1024; the thinking budget kept apart from max_tokens, #240, litellm engine only; daedalus.llm.thinking_kwargs reads it), request_timeout (s per model call, default 120, litellm engine only, #201), api_base, api_key_env, budget.per_task_tokens; id is required and is either a model or a tier word, fast|balanced|best), transports[], tools (ToolsSpec), memory (MemorySpec), checkpoints, approvals (ceiling, gates, escalation), engine.claude_code (ClaudeCodeSpec: binary, model, builtin_tools, permission_mode, on_denied, config_dir, cwd — the directory Claude Code works in, #242), task_timeout (s per engine run, default 600, #201). `bundle_schema()` emits it as JSON Schema → docs/bundle.schema.json.
 Directory: agent.yaml, persona.md, agent-card.json (required); skills/<id>/SKILL.md (frontmatter when_to_use, requires); tools/*.py (enforcement hooks, not LLM tools); knowledge/*.md and intake/* (seeded into techne by docker/seeder.py, not by the runtime).
 OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursively (undefined without default → BundleError) → AgentSpec.model_validate → require card + persona files → strip persona comments → load_skills. Agent then builds collaborators from spec (see protocols card).
 INVARIANTS:

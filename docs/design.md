@@ -139,8 +139,9 @@ engine:                                 # used with --engine claude-code (§2.3b
     builtin_tools: [Read, Grep]         # Claude Code built-ins allowed; default none
     permission_mode: default            # default | dontAsk | acceptEdits | plan
     on_denied: continue                 # continue | stop, when a gate denies a built-in
-    # binary, model, config_dir: optional; unset = the SDK's bundled CLI,
-    # the config dir's model, the operator's CLAUDE_CONFIG_DIR
+    # binary, model, config_dir, cwd: optional; unset = the SDK's bundled CLI,
+    # the config dir's model, the operator's CLAUDE_CONFIG_DIR, and the directory
+    # daedalus started in (#242)
 
 approvals:
   ceiling:                              # tier 1 — hard capability ceiling
