@@ -2,8 +2,8 @@ name: test
 
 # test and fork-pr together cover every push to main and every PR (fork-pr
 # runs whatever test's guard excludes) -- no private deps, no secret required.
-# techne runs on workflow_dispatch only: it clones the techne sibling without a
-# token, so it works once techne is public (agora#27).
+# techne runs under test's guard too and installs tenish-techne from the tenish
+# index with the TENISH_INDEX_TOKEN secret (#48); fork PRs never see it.
 on:
   push:
     branches: [main]
@@ -24,14 +24,21 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
-        # 3.12 adds the claude-code extra (mcp 2.x, uvicorn) so the engine bridge's tests
-        # run; 3.11 stays without mcp so the "mcp not installed" paths are tested too.
+        # Three legs, listed outright: two `include` entries for one python-version would
+        # merge into one leg, not add a second. 3.12 with claude-code and bridge runs the
+        # bridge's tests on mcp 2.x; 3.12 with claude-code and mcp<2 is how a set pinned to
+        # mcp<2 installs it (tenishai/ergon#34); 3.11 has no mcp, so the "mcp not installed"
+        # paths are tested too.
         include:
           - python-version: "3.11"
             extras: dev
+            constraint: ""
+          - python-version: "3.12"
+            extras: dev,claude-code,bridge
+            constraint: ""
           - python-version: "3.12"
             extras: dev,claude-code
+            constraint: "mcp<2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The runner CONTAINER persists between jobs (same machine name across legs), so
@@ -46,38 +53,36 @@ jobs:
         run: |
           uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
-      - run: pip install -e ".[${{ matrix.extras }}]"
+      - run: pip install -e ".[${{ matrix.extras }}]" ${{ matrix.constraint != '' && format('"{0}"', matrix.constraint) || '' }}
       - run: ruff check src tests docker conftest.py
+      # Stdlib only. Fails when an anchored file changed without its arch card (#206).
+      - run: python3 scripts/check_arch_cards.py
       - run: pytest -q
 
-  # ---- techne: full suite with the private techne sibling --------------------
-  # Manual dispatch only. The sibling checkout carries no token: while techne is
-  # private this job cannot clone it, and once it is public it can -- then
-  # consider `|| github.ref == 'refs/heads/main'`. Same shape as cabal's and
-  # liminal's integration legs (agora#27, agora#31).
+  # ---- techne: full suite with tenish-techne from the tenish index ------------
+  # techne's repo is private, and this workflow's GITHUB_TOKEN reads only this repo,
+  # so a sibling checkout fails with Not Found (#48). The `techne` extra installs
+  # tenish-techne from pypi.tenish.ai instead, the wheel users get, with the
+  # read-only ergon-ci index token (repo secret TENISH_INDEX_TOKEN), as ergon's
+  # smoke job does. uv's default first-index strategy takes tenish-techne only from
+  # the tenish index, so a same-named package on PyPI can't win. Same guard as the
+  # test job: fork PRs get no secrets and run fork-pr instead. Dependabot PRs pass
+  # the guard but see only Dependabot secrets, so the same token is also stored as
+  # a Dependabot secret named TENISH_INDEX_TOKEN.
   #
-  # DAEDALUS_REQUIRE_TECHNE=1 turns the three techne-path files' module-level
-  # `pytest.importorskip("techne", ...)` from a quiet skip into a hard failure
-  # (conftest.py) -- this leg exists to run those 92 tests, so a broken
-  # or missing install must fail the build rather than report them skipped (#48).
+  # DAEDALUS_REQUIRE_TECHNE=1 turns the techne-path files' module-level
+  # `pytest.importorskip(...)` from a quiet skip into a hard failure (conftest.py):
+  # this leg exists to run those tests, so a broken or missing install must fail the
+  # build rather than report them skipped (#48).
   techne:
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, daedalus-ci]
     timeout-minutes: 20  # one small runner; a hung job starves it
     strategy:
       matrix:
         python-version: ["3.12"]
     steps:
-      - name: Checkout daedalus
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: daedalus
-
-      - name: Checkout techne
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: tenishai/techne
-          path: techne
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Same fresh-venv and uv-managed-Python reasoning as the test job above
       # (liminal#103 r1, #133).
@@ -86,18 +91,19 @@ jobs:
           uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
 
-      - name: Install (with techne sibling)
-        working-directory: daedalus
+      - name: Install (techne from the tenish index)
+        env:
+          UV_INDEX_TENISH_USERNAME: ergon-ci
+          UV_INDEX_TENISH_PASSWORD: ${{ secrets.TENISH_INDEX_TOKEN }}
         run: |
-          pip install -e "../techne[vectors]"
-          pip install -e ".[dev]"
+          uv pip install --python "$GITHUB_WORKSPACE/.venv-ci/bin/python" \
+            --index tenish=https://pypi.tenish.ai/simple/ -e ".[dev,techne]"
+          python -c "import importlib.metadata as m; print('tenish-techne', m.version('tenish-techne'))"
 
       - name: Ruff lint
-        working-directory: daedalus
         run: ruff check src tests docker conftest.py
 
       - name: Pytest (full suite, techne required)
-        working-directory: daedalus
         env:
           DAEDALUS_REQUIRE_TECHNE: "1"
         run: pytest -q
@@ -113,11 +119,12 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[dev]
       - run: ruff check src tests docker conftest.py
+      - run: python3 scripts/check_arch_cards.py
       - run: pytest -q
 
   # ---- dco: every commit a PR adds is signed off (CONTRIBUTING.md) -------------

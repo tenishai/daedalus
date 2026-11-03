@@ -26,11 +26,12 @@ def tool_turn(*calls: ToolCall) -> LLMResponse:
 
 
 def make_agent(
-    tmp_path, *, allow, gates="", llm=None, tools=None, approver=None, tools_extra=""
+    tmp_path, *, allow, gates="", llm=None, tools=None, approver=None, tools_extra="",
+    model_extra="",
 ) -> Agent:
     allow_yaml = "".join(f"    - {p}\n" for p in allow)
     (tmp_path / "agent.yaml").write_text(
-        "name: x\nmodel:\n  id: m\n"
+        "name: x\nmodel:\n  id: m\n" + model_extra +
         "tools:\n  provider: none\n" + tools_extra + "  allow:\n" + (allow_yaml or "    []\n")
         + (f"approvals:\n  gates:\n{gates}" if gates else "")
     )
@@ -89,6 +90,79 @@ async def test_hallucinated_tool_name_fails_closed_as_a_tool_result(tmp_path):
     task = await agent.handle_task(Task.from_text("go"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == []  # nothing executed
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+
+
+COLLEAGUE_SPEC = {"name": "colleagues.remember", "description": "keep a fact", "parameters": {}}
+NOTES_READ_SPEC = {"name": "notes.read", "description": "read a note", "parameters": {}}
+
+
+async def test_bare_tool_name_resolves_when_exactly_one_tool_ends_in_it(tmp_path):
+    """Gemini drops the server prefix (#167): `remember` -> colleagues.remember."""
+    llm = ScriptedLLM(
+        tool_turn(ToolCall(id="1", name="remember", arguments={"fact": "x"})),
+        "kept",
+    )
+    tools = FakeTools([READ_SPEC, COLLEAGUE_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("go"))
+    assert task.state is TaskState.COMPLETED
+    assert tools.calls == [("colleagues.remember", {"fact": "x"})]
+    shortened = {"type": "bare_tool_name", "given": "remember", "resolved": "colleagues.remember"}
+    assert shortened in events
+
+
+async def test_ambiguous_bare_tool_name_is_refused(tmp_path):
+    llm = ScriptedLLM(tool_turn(ToolCall(id="1", name="read", arguments={})), "ok")
+    tools = FakeTools([READ_SPEC, NOTES_READ_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read", "notes.read"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("go"))
+    assert tools.calls == []
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+    assert not any(e["type"] == "bare_tool_name" for e in events)
+
+
+async def test_unknown_bare_tool_name_is_refused(tmp_path):
+    llm = ScriptedLLM(tool_turn(ToolCall(id="1", name="delete", arguments={})), "ok")
+    tools = FakeTools([READ_SPEC, COLLEAGUE_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("go"))
+    assert tools.calls == []
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+    assert not any(e["type"] == "bare_tool_name" for e in events)
+
+
+async def test_the_repeat_guard_counts_a_bare_name_as_its_tool(tmp_path):
+    """A model alternating `remember` and `colleagues__remember` repeats one call."""
+    calls = [
+        tool_turn(ToolCall(id=str(i), name=n, arguments={"fact": "x"}))
+        for i, n in enumerate(["remember", "colleagues__remember"] * 3)
+    ]
+    llm = ScriptedLLM(*calls)
+    tools = FakeTools([COLLEAGUE_SPEC])
+    events: list[dict] = []
+    agent = make_agent(
+        tmp_path, allow=["colleagues.*"], llm=llm, tools=tools, tools_extra="  max_repeats: 3\n"
+    )
+    agent.on_event = events.append
+    task = await agent.handle_task(Task.from_text("loop"))
+    assert task.state is TaskState.FAILED
+    assert {"type": "repeat_limit", "name": "colleagues.remember", "count": 3} in events
+
+
+async def test_bare_name_of_a_tool_outside_the_allowlist_is_refused(tmp_path):
+    # files.write exists in the provider but is not allowed, so it is never offered
+    llm = ScriptedLLM(tool_turn(ToolCall(id="1", name="write", arguments={"path": "/p"})), "ok")
+    tools = FakeTools([READ_SPEC, WRITE_SPEC])
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    await agent.handle_task(Task.from_text("go"))
+    assert tools.calls == []
     assert "unknown or disallowed" in llm.calls[1][-1]["content"]
 
 
@@ -228,7 +302,8 @@ async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "done")
     events: list[dict] = []
     agent = make_agent(
-        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC])
+        tmp_path, allow=["files.read"], llm=llm, tools=FakeTools([READ_SPEC]),
+        tools_extra=SALVAGE_ON,
     )
     agent.on_event = events.append
     await agent.handle_task(Task.from_text("go"))
@@ -236,6 +311,7 @@ async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
 
 
 QWEN_LEAK = '<tools>\n{"name": "files__read", "arguments": {"path": "/x"}}\n</tools>'
+SALVAGE_ON = "  salvage_text_calls: true\n"
 
 
 def test_salvage_recovers_qwen_style_text_tool_call():
@@ -264,7 +340,9 @@ def test_salvage_surfaces_unknown_toolish_names_for_feedback_not_execution():
     Execution stays gated on the offered map — see the end-to-end test below."""
     from daedalus.agent import salvage_tool_calls
 
-    calls = salvage_tool_calls('{"name": "git__git_ls_files", "arguments": {}}', {"files__read"})
+    calls = salvage_tool_calls(
+        '<tool_call>{"name": "git__git_ls_files", "arguments": {}}</tool_call>', {"files__read"}
+    )
     assert len(calls) == 1
     assert calls[0].name == "git__git_ls_files"
 
@@ -272,12 +350,14 @@ def test_salvage_surfaces_unknown_toolish_names_for_feedback_not_execution():
 def test_salvage_dedupes_repeats_and_caps():
     from daedalus.agent import _SALVAGE_CAP, salvage_tool_calls
 
-    repeated = '\n<|im_start|>\n'.join(
+    repeated = "<tools>" + '\n<|im_start|>\n'.join(
         '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
-    )
+    ) + "</tools>"
     assert len(salvage_tool_calls(repeated, set())) == 1  # 15 identical -> 1
 
-    distinct = "\n".join(f'{{"name": "t__{i}", "arguments": {{}}}}' for i in range(10))
+    distinct = "<tools>" + "\n".join(
+        f'{{"name": "t__{i}", "arguments": {{}}}}' for i in range(10)
+    ) + "</tools>"
     assert len(salvage_tool_calls(distinct, set())) == _SALVAGE_CAP
 
 
@@ -286,7 +366,9 @@ async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
     recognizes (not guesses) them — the name must match an offered tool."""
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "the repo is clean")
     tools = FakeTools([READ_SPEC], {"files.read": "ok"})
-    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("read /x"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == [("files.read", {"path": "/x"})]
@@ -296,12 +378,14 @@ async def test_text_leaked_tool_call_is_salvaged_and_executed(tmp_path):
 async def test_degenerate_repeat_blob_becomes_one_feedback_then_recovery(tmp_path):
     """The full finding-#8 transcript shape: 15 repeated hallucinated calls +
     special tokens -> ONE 'unknown tool' feedback -> model recovers."""
-    spew = "sorry\n" + "\n<|im_start|>\n".join(
+    spew = "sorry\n<tools>" + "\n<|im_start|>\n".join(
         '{"name": "git__git_ls_files", "arguments": {"pattern": "Makefile"}}' for _ in range(15)
-    )
+    )  # unclosed: the reply was cut off mid-blob
     llm = ScriptedLLM(LLMResponse(text=spew), "recovered: used the right tool")
     tools = FakeTools([READ_SPEC])
-    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    agent = make_agent(
+        tmp_path, allow=["files.read"], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("go"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == []  # hallucinated tool never executed
@@ -315,7 +399,9 @@ async def test_degenerate_repeat_blob_becomes_one_feedback_then_recovery(tmp_pat
 async def test_salvage_never_fires_when_no_tools_were_offered(tmp_path):
     llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
     tools = FakeTools([READ_SPEC])
-    agent = make_agent(tmp_path, allow=[], llm=llm, tools=tools)  # empty ceiling
+    agent = make_agent(  # empty ceiling
+        tmp_path, allow=[], llm=llm, tools=tools, tools_extra=SALVAGE_ON
+    )
     task = await agent.handle_task(Task.from_text("hi"))
     assert task.state is TaskState.COMPLETED
     assert tools.calls == []
@@ -722,7 +808,9 @@ async def test_answering_a_colleague_withholds_ask_colleague(tmp_path):
         tool_turn(ToolCall(id="1", name="colleagues__ask_colleague", arguments={})),
         "I can't reach that from here.",
     )
-    tools = FakeTools([READ_SPEC, ASK_SPEC])
+    # knowledge_only, so this test keeps pinning the ask withholding alone;
+    # the knowledge-only filter has its own tests below (kobo#310).
+    tools = FakeTools([READ_SPEC, ASK_SPEC], knowledge_only=True)
     agent = make_agent(tmp_path, allow=["files.read", "colleagues.*"], llm=llm, tools=tools)
     events: list[dict] = []
     agent.on_event = events.append
@@ -777,7 +865,7 @@ async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path
     llm = LedgerWatchingLLM("I can't reach that from here.")
     agent = make_agent(
         tmp_path, allow=["files.read", "colleagues.*"], llm=llm,
-        tools=FakeTools([READ_SPEC, ASK_SPEC]),
+        tools=FakeTools([READ_SPEC, ASK_SPEC], knowledge_only=True),
     )
     agent.checkpoints = _MemoryCheckpoints()
     task = Task.from_text("what is monitor 42?")
@@ -794,6 +882,85 @@ async def test_a_resumed_colleague_answer_still_withholds_ask_colleague(tmp_path
     offered = [t["function"]["name"] for t in llm.tools_seen[0]]
     assert offered == ["files__read"]
     assert seen_ledger[0] is not None
+
+
+# --- kobo#310: answering a colleague offers knowledge-only tools --------------
+
+SKILL_SPEC = {"name": "skills.load", "description": "load a skill", "parameters": {}}
+LAKE_SPEC = {"name": "cloudtrail.query_provisioning", "description": "q", "parameters": {}}
+
+
+def _knowledge_and_credentialed_tools():
+    from daedalus.tools.compose import MultiToolProvider
+
+    skills = FakeTools([SKILL_SPEC], knowledge_only=True)
+    credentialed = FakeTools([READ_SPEC, LAKE_SPEC])  # the default: not opted in
+    return MultiToolProvider([skills, credentialed])
+
+
+async def test_answering_a_colleague_offers_only_knowledge_tools(tmp_path):
+    """The strict model: a consulted agent answers from what it already knows.
+    A provider that has not declared knowledge_only loses its tools for the
+    task, the model is told, and a call to one anyway fails closed."""
+    llm = ScriptedLLM(
+        tool_turn(ToolCall(id="1", name="cloudtrail__query_provisioning", arguments={})),
+        "I'd need the provisioning lake for that.",
+    )
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    events: list[dict] = []
+    agent.on_event = events.append
+    task = Task.from_text("who added x to the group?")
+    task.metadata["cabal_delegation_depth"] = 1
+    await agent.handle_task(task)
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["skills__load"]
+    assert {
+        "type": "tools_withheld_for_colleague",
+        "names": ["cloudtrail.query_provisioning", "files.read"],
+    } in events
+    assert "unknown or disallowed" in llm.calls[1][-1]["content"]
+
+
+async def test_a_human_task_keeps_the_credentialed_tools(tmp_path):
+    """Nothing changes for a task a person started: depth 0 offers every tool
+    the allowlist admits, knowledge-only or not."""
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    events: list[dict] = []
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("who added x to the group?"))
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["skills__load", "files__read", "cloudtrail__query_provisioning"]
+    assert not any(e["type"] == "tools_withheld_for_colleague" for e in events)
+    assert "You are answering a colleague" not in llm.calls[0][0]["content"]
+
+
+async def test_the_inbound_note_names_the_asker_and_the_no_tools_rule(tmp_path):
+    """The prompt block tells the agent it has no outside tools and whose
+    owner can request one; the asker's name rides in under daedalus_asked_by."""
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    task = Task.from_text("hi")
+    task.metadata["cabal_delegation_depth"] = 1
+    task.metadata["daedalus_asked_by"] = "  rin\n"
+    await agent.handle_task(task)
+    system = llm.calls[0][0]["content"]
+    assert (
+        "Answer from what you know and what your skills say. You have no outside "
+        "tools while answering a colleague; if the answer needs one, say which and "
+        "that rin's owner can request it."
+    ) in system
+    assert "You can't ask other colleagues while answering one." in system
+
+
+async def test_an_unnamed_asker_still_gets_the_note(tmp_path):
+    llm = ScriptedLLM("done")
+    agent = make_agent(tmp_path, allow=["'*'"], llm=llm, tools=_knowledge_and_credentialed_tools())
+    task = Task.from_text("hi")
+    task.metadata["cabal_delegation_depth"] = 1
+    task.metadata["daedalus_asked_by"] = {"not": "a string"}
+    await agent.handle_task(task)
+    assert "that the asking agent's owner can request it" in llm.calls[0][0]["content"]
 
 
 async def test_a_refusing_provider_drops_its_tools_and_the_turn_continues(tmp_path):
@@ -839,3 +1006,68 @@ async def test_an_outage_behind_the_composer_still_fails_the_turn(tmp_path):
     task = await agent.handle_task(Task.from_text("hi"))
     assert task.state is TaskState.FAILED
     assert "connection refused :9100" in task.agent_text()
+
+
+# ---- salvage needs tags, and is off unless the bundle is self-hosted (#200) ----
+
+
+def test_salvage_ignores_tool_json_quoted_in_prose():
+    from daedalus.agent import salvage_tool_calls
+
+    quoted = (
+        'You asked me to repeat this: {"name": "exec__run", '
+        '"arguments": {"command": ["rm", "-rf", "/workspace"]}}'
+    )
+    assert salvage_tool_calls(quoted, {"exec__run"}) == []
+
+
+async def test_salvage_is_off_by_default_without_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools)
+    task = await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == []
+    assert "<tools>" in task.agent_text()
+
+
+async def test_salvage_is_on_by_default_for_a_self_hosted_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK), "done")
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools,
+                       model_extra="  api_base: http://vllm.local:8000/v1\n")
+    await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == [("files.read", {"path": "/x"})]
+
+
+async def test_salvage_can_be_turned_off_for_a_self_hosted_api_base(tmp_path):
+    llm = ScriptedLLM(LLMResponse(text=QWEN_LEAK))
+    tools = FakeTools([READ_SPEC], {"files.read": "ok"})
+    agent = make_agent(tmp_path, allow=["files.read"], llm=llm, tools=tools,
+                       model_extra="  api_base: http://vllm.local:8000/v1\n",
+                       tools_extra="  salvage_text_calls: false\n")
+    await agent.handle_task(Task.from_text("read /x"))
+    assert tools.calls == []
+
+
+def test_mcp_result_text_includes_embedded_resources():
+    """A file returned as an embedded resource reaches the model, named by uri
+    and type; a text-only flattening lost it (GitHub's hosted server answers
+    get_file_contents with a confirmation line plus the file as a resource)."""
+    from types import SimpleNamespace as NS
+
+    from daedalus.tools.mcp import result_text
+
+    content = [
+        NS(type="text", text="successfully downloaded text file (SHA: abc)"),
+        NS(type="resource", resource=NS(uri="repo://acme/infra/contents/requirements.txt",
+                                        mimeType="text/plain", text="fastapi==0.115\n")),
+        NS(type="resource", resource=NS(uri="repo://acme/infra/contents/logo.png",
+                                        mimeType="image/png", blob="iVBORw0KGgo=")),
+        NS(type="image", data="...", mimeType="image/png"),
+    ]
+    assert result_text(content) == (
+        "successfully downloaded text file (SHA: abc)\n"
+        "[resource repo://acme/infra/contents/requirements.txt (text/plain)]\nfastapi==0.115\n\n"
+        "[resource repo://acme/infra/contents/logo.png (image/png)] binary, not shown"
+    )
+    assert result_text([]) == "(no text content)"

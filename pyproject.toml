@@ -14,23 +14,29 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "click>=8.1",
-    "litellm>=1.40",
+    # Pinned exactly after litellm 1.107.0 shipped a credential stealer on PyPI
+    # (2026-10-21; 1.82.7/1.82.8 in March): an open lower bound lets any rebuild
+    # take whatever is newest that hour. 1.104.2 is what the runtime image carries.
+    "litellm==1.104.2",
 ]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
-# The Claude Code engine (engines/claude_code.py, on the Agent SDK) and the loopback MCP
-# bridge for other engines (engines/bridge.py, mcp 2.x server API).
-claude-code = ["mcp>=2.2", "uvicorn>=0.29", "claude-agent-sdk>=0.2.160"]
+# The Claude Code engine (engines/claude_code.py): the Agent SDK alone. It serves our tools
+# through the SDK's in-process MCP server, so it runs on whichever mcp the SDK accepts
+# (1.x or 2.x), which lets it co-install with packages pinned to mcp<2 (tenishai/ergon#34).
+claude-code = ["claude-agent-sdk>=0.2.160"]
+# The loopback MCP bridge (engines/bridge.py) for engines that run their own loop: the
+# mcp 2.x server API. No engine uses it yet; through 0.7.0 it was part of claude-code.
+bridge = ["mcp>=2.2", "uvicorn>=0.29"]
 a2a = ["fastapi>=0.110", "uvicorn>=0.29", "joserfc>=0.9", "httpx>=0.27"]
 slack = ["slack-sdk>=3.40", "aiohttp>=3.9", "httpx>=0.27"]
 aws = ["boto3>=1.34"]
-# memory.techne.TechneMemoryStore defaults use_vectors=True, which needs
-# techne >= 0.16.1 (techne#827). The floor is 0.18.2 because that is the first
-# release published as `tenish-techne`; the import package is still `techne`.
-# techne is not on a public index, so install through requirements-sources.txt,
-# which supplies the concrete source.
-techne = ["tenish-techne[vectors]>=0.18.2"]
+# memory.techne.TechneMemoryStore recalls and publishes through techne.api, which
+# first shipped in techne 0.19.1 (tenishai/techne#1335). The distribution is
+# `tenish-techne`; the import package is still `techne`. techne is not on PyPI:
+# install from the tenish index, or through requirements-sources.txt.
+techne = ["tenish-techne[vectors]>=0.19.1"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -54,6 +60,14 @@ path = "src/daedalus/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/daedalus"]
+
+# The guides `daedalus guide` prints, copied into the package at build time so an
+# installed daedalus has them (src/daedalus/docs/__init__.py). Keep this table and
+# that module's MANIFEST in step; tests/test_guides.py checks both directions.
+# Not docs/arch/ or docs/proposals/: those are for people changing the code.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/welcome.md" = "daedalus/docs/welcome.md"
+"docs/design.md" = "daedalus/docs/design.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

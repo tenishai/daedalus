@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from daedalus.bundle import AgentSpec
-    from daedalus.protocols import Budget, CheckpointStore
+    from daedalus.protocols import Budget, CheckpointStore, MemoryStore
     from daedalus.task import Task
 
 
@@ -37,6 +38,12 @@ class EngineTurn:
     # (gated, and the approver is the fail-closed DenyAll). The engine withholds such
     # tools rather than offer them to be refused. The rule lives in the Agent.
     withheld: Callable[[str], bool] | None = None
+    # The agent's memory store. Model-driven engines don't touch it (the Agent recalls
+    # before the turn); the scripted engine drives it directly (#227).
+    memory: MemoryStore | None = None
+    # This task's workspace (#247), when the bundle sets tools.workspace. An engine that
+    # runs in a directory of its own (Claude Code) runs there instead of its bundle cwd.
+    workspace: Path | None = None
 
 
 class Engine(Protocol):

@@ -6,6 +6,329 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `claude-code` extra no longer requires mcp 2.x** (tenishai/ergon#34). It needed
+  `mcp>=2.2` and uvicorn only for the loopback MCP bridge (`engines/bridge.py`, PR 107), which
+  no engine uses: the Claude Code engine serves its tools through the Agent SDK's in-process
+  MCP server (PR 108). `claude-code` is now `claude-agent-sdk` alone, which accepts mcp 1.x or
+  2.x, so it co-installs with kobo's `mcp>=1.15,<2` and ergon's version set can include it. The
+  bridge's requirements are a new `bridge` extra, and the bridge refuses to start on mcp 1.x
+  with a message naming that extra. CI runs the `claude-code` extra on mcp 1.x as a third leg.
+
+## [0.7.0] — 2026-11-03
+
+### Upgrading
+
+- **A custom `ToolProvider` is withheld on a colleague's task unless it says otherwise.**
+  An agent answering another agent (`cabal_delegation_depth` ≥ 1) is now offered only
+  tools whose provider sets `knowledge_only = True` (see Changed). A provider that only
+  reads the agent's own material should set it to stay offered there.
+- **Bundles that use `tools.workspace` or `tools.bind` need this release.** kobo validates
+  bundles against its vendored copy of `docs/bundle.schema.json`, so refresh that copy
+  before kobo builds one.
+
+### Added
+
+- **The agent's face on every Slack message.** With `SLACK_ICON_URL` set (the room
+  serves the agent's own picture there) and the app's `chat:write.customize` scope,
+  every `chat.postMessage` and every streamed reply (`chat.startStream`) carries that picture as its icon, chunks included; an
+  owner changes the face in the room and Slack follows on the next message. An app
+  installed before the scope refuses the field once, and the transport posts plain
+  from then on, never dropping a message.
+
+- **One agent can work a different checkout on each task** (tenishai/daedalus#247,
+  for tenishai/agents#171). `tools.workspace.parent` names a directory of prepared
+  per-task folders, and a builtin `files` or `exec` root written as the literal
+  `{workspace}` (or `{workspace}/sub`) is filled per task. Task metadata
+  `daedalus_workspace` holds one folder name, never a path. A name that isn't one plain
+  folder, a symlink out of the parent or a missing folder fails the task with 701 before
+  any tool is listed, so a caller can choose which folder a task uses but never widen the
+  roots. The token without a parent, a parent that isn't a directory (checked whenever it
+  is set), or a sub-root with `..` fail at load; a parent removed after load fails the task
+  with 701. The Claude Code engine runs in the task's workspace, ahead of
+  `engine.claude_code.cwd`. `tools.bind` (`{tool: {argument: dotted.metadata.path}}`)
+  fills a tool's arguments from task metadata on every call, before the approval gates.
+  Bound arguments are removed from the listing the model sees, whatever the model sends
+  for them is overwritten, and a missing value fails the call; a bind key that matches no
+  offered tool emits `bind_unmatched`. `daedalus run -m … --metadata '<json object>'`
+  merges into the one-shot task's metadata, so a launcher can name the workspace and
+  bound values. A bundle with neither field behaves as before. `docs/bundle.schema.json`
+  regenerated, so kobo's vendored copy needs refreshing for bundles that use them.
+
+- **The thinking budget is kept apart from the visible reply's, and a cut reply says why
+  in the log** (tenishai/daedalus#240). A one-line answer hit the 8192 `max_tokens` cap
+  twice on one day because the provider counted the model's thinking against it.
+  `model.thinking` (`mode: auto|off|on`, default `auto`; `budget_tokens`, default 4096,
+  floor 1024) is new: for Claude routes, `on`, and `auto` on a 3.7-or-later id, send
+  litellm's `thinking={"type": "enabled", "budget_tokens": N}` with the request's
+  `max_tokens` raised by N, so the answer keeps its whole budget (litellm translates the
+  shape for the models that take an effort level instead); `off` sends nothing. For
+  OpenAI-compatible routes (`openai/`, `hosted_vllm/`) `off` and `on` send
+  `chat_template_kwargs.enable_thinking` in `extra_body`; `auto` sends nothing. Every
+  provider fact is one table in `daedalus.llm`. When a reply finishes with reason
+  `length`, `LiteLLMClient` logs one INFO line with the model, the ceiling sent, the
+  completion tokens and the reasoning tokens when the provider reports them; the
+  truncated sentence on the reply is unchanged. A tiers-file entry may set `max_tokens`
+  and `thinking`, filled when the bundle is silent, so a deployment raises the ceiling per
+  tier; the bundle default stays 8192. `model.max_tokens` now carries a description and
+  refuses zero. A bare YAML `off`/`on` under `thinking.mode` is read as the word, not the
+  boolean YAML 1.1 makes of it. `docs/bundle.schema.json` regenerated; the greeter golden
+  bundle carries the new block.
+- **Slack events can arrive over HTTP, with no app-level token** (tenishai/kobo#304,
+  tenishai/kobo#371). The a2a app gains `POST /slack/events`: the room's relay
+  forwards Slack's event envelope exactly as Slack posted it, with the header
+  `X-Kobo-Relay-Secret` equal to the agent's `SLACK_RELAY_SECRET` (503 while that env
+  is unset, 403 when it differs). The route answers `200 {"accepted": true}` at once
+  and schedules the same `handle_event` Socket Mode calls, so threads, wake modes,
+  streaming, approvals and images are untouched; a `url_verification` body gets its
+  challenge back. Transport choice at start: `SLACK_APP_TOKEN` present means Socket
+  Mode exactly as before and the route answers 404; absent, with `SLACK_BOT_TOKEN`,
+  means the HTTP way in and no socket is opened. One boot line says which. Both ways
+  in pass through `SlackTransport.admit`, which drops a repeated `event_id` (the last
+  2000 remembered) before the existing `(channel, ts)` dedupe. Existing agents, which
+  all have the app-level token, change nothing.
+- **`engine.claude_code.cwd` sets the directory Claude Code works in** (tenishai/daedalus#242,
+  PR 243), passed to the Agent SDK as `cwd`. A path that isn't a directory fails the load
+  when the claude-code engine runs the bundle; the litellm engine, which never uses it,
+  still loads the same bundle. Schema regenerated.
+- **The `cloudtrail` sidecar can lease its credential instead of assuming a role.** With
+  `tools.cloudtrail.bab_url` and `bab_integration` set, the pod asks the room's permission
+  service (bab) for a one-hour credential, proving itself with the service account token
+  projected at `bab_token_file` (default `/var/run/secrets/bab/token`, audience `bab`).
+  The service holds the role, narrows the session to what this agent was granted and names
+  the agent in it; the pod assumes nothing and `role_arn` may be omitted. A refusal comes
+  back to the model as a sentence ("I do not hold X on Y; ask my owner to request it"), a
+  pending approval as "waiting for approval", and an unreachable service means no new
+  credential while a cached one keeps working until it expires. The credential is re-asked
+  for at least once a minute, so a grant the owner revokes stops the next call within a
+  minute rather than when the hour runs out.
+
+### Changed
+
+- **An agent answering another agent gets knowledge-only tools** (tenishai/kobo#310, the
+  strict model). When a task arrives with `cabal_delegation_depth` ≥ 1, the tools offered
+  for that task are only those from providers that declare `knowledge_only = True`
+  (today: `skills.load`); MCP and gateway tools, the github, jira, cloudtrail and slack
+  sidecars and `colleagues.ask_colleague` are withheld (event
+  `tools_withheld_for_colleague`, names listed), and the `## You are answering a
+  colleague` prompt block now says so and names whose owner can request a tool the answer
+  needs. As a second wall, the cloudtrail lane, the github broker mint and a liminal
+  gateway call refuse on such a task before anything leaves the pod, with one sentence:
+  "I can't use my own access for a task another agent asked for; your owner can request
+  <permission> for <agent> on its Access page." Tasks a person started are unchanged.
+  Outbound asks now carry `daedalus_asked_by: <this agent's name>` beside the depth key,
+  a cross-repo string contract like `cabal_delegation_depth`; cabal copies metadata
+  through verbatim. A custom `ToolProvider` that only reads the agent's own material
+  should set `knowledge_only = True` to stay offered on a colleague's task; the default
+  is credentialed.
+
+### Fixed
+
+- **MCP tool results keep the file an embedded resource carries** (PR 238). The `mcp`
+  provider flattened a result to its text blocks, so a server that returns a file as an
+  `EmbeddedResource` (GitHub's hosted MCP server answers `get_file_contents` that way)
+  reached the model as one confirmation line. `result_text` now renders each resource's
+  text after a line naming its uri and mime type, names a binary resource without
+  expanding it, and still skips image blocks.
+
+## [0.6.1] — 2026-10-31
+
+### Upgrading
+
+- **`memory.personal: techne` needs techne 0.19.1 or later** (tenishai/daedalus issue
+  #228). The `techne` extra now requires `tenish-techne[vectors]>=0.19.1`, and an older
+  techne fails the bundle at load with a `BundleError`. Reinstall with
+  `pip install -U 'tenish-daedalus[techne]'` from the tenish index.
+
+### Fixed
+
+- **CI runs the techne-backed tests on every push and same-repo PR** (tenishai/daedalus
+  issue #48). The `techne` job cloned the private techne repo, which this repository's
+  CI token can't read, so it only ran by hand and failed. It now installs
+  `tenish-techne` from the tenish index through the `techne` extra, with the read-only
+  index token in the `TENISH_INDEX_TOKEN` repository secret.
+
+- **The litellm engine accepts a tool name the model returned without its server prefix**
+  (tenishai/daedalus issue #167). Gemini sometimes sends `remember` for
+  `colleagues__remember`, and the call was refused as unknown. A bare name now resolves
+  when exactly one offered tool ends in it; an ambiguous or unknown name is refused as
+  before, and the allowlist check still runs on the resolved name. The trace records a
+  `bare_tool_name` event when this happens.
+
+- **The open-listener warning names the bundle and goes to the log** (tenishai/daedalus
+  issue #204). An a2a transport on an address other than loopback with no `auth` block
+  already printed a stderr warning; it now goes through logging at WARNING when the
+  process has configured logging (else stderr, once), and the text names the
+  bundle and `host:port`, says anyone who can reach it can use every tool the allowlist
+  admits, and says to add `auth`. It still serves; loopback and `auth` stay quiet.
+
+### Added
+
+- **A model-free `scripted` engine for tests** (tenishai/daedalus issue #227). With
+  `DAEDALUS_SCRIPTED_ENGINE=1`, `--engine scripted` runs one command per message instead of
+  calling a model: `remember: <fact>` commits through the agent's memory store,
+  `recall: <query>` replies with the store's hits as a JSON list of `content` and `source`, and
+  `call: <tool> <json args>` calls a tool through the same allowlist, approval gates and
+  tool provider the litellm engine uses. Anything else fails the task with reason 704.
+  Without the variable the engine is refused at load. `EngineTurn` gains an optional
+  `memory` field for it.
+
+### Changed
+
+- **techne memory reaches the team pool** (tenishai/daedalus issue #228). `TechneMemoryStore`
+  still recalls up to k of the agent's own memories from its knowledge, and now adds up to
+  k rows from other stores through `techne.api.recall`, the same recall `techne_recall`
+  runs: a fact another agent published comes back from an installed recall source such as
+  techne-archivist-sync, or from a federated store. `recall_hits()` says where each hit
+  came from (`local`, or the source's or store's name, e.g. `liminal_archivist`). At the
+  end of each task, including one finished by `resume()`, the agent calls
+  `techne.api.publish()` once, which sends knowledge carrying one of techne's
+  `archivist_publish_tags`; with that list empty, techne's default, nothing is sent.
+  `MemoryStore.commit` takes `tags`, and the scripted engine's `remember:` turns `#words`
+  into tags. `memory.home` now also supplies techne's config.yaml.
+  The agent's own recall now leaves out soft-archived knowledge, as `techne_recall`
+  does; before, it returned it (tenishai/daedalus issue #233).
+
+## [0.6.0] — 2026-10-26
+
+### Upgrading
+
+- **`tools.builtin.files` refuses roots that serve the host** (tenishai/daedalus issue
+  #199). `roots: ["/"]` used to load, and `files.read` then served `/proc/self/environ`,
+  the agent's whole environment, to anyone who could message it. A root is now refused at
+  load, with a `BundleError` naming it, when it is `/`, at or under `/proc`, `/sys`, `/dev`,
+  `/run` or `/etc`, `$HOME` or any directory above it, or at or under `$TECHNE_HOME`.
+  Symlinks are resolved first. A bundle with such a root fails to boot until the root names
+  a workspace directory.
+- **Text tool calls are salvaged only inside tags, and only for self-hosted models by
+  default** (tenishai/daedalus issue #200). The litellm engine used to run any tool-shaped
+  JSON it found in a reply, including JSON the model only quoted, so a caller could ask
+  the model to repeat `{"name": "exec__run", ...}` and have it run, skipping the model's
+  own decision to call. Salvage now reads only JSON inside `<tool_call>` or `<tools>` tags,
+  and it runs only when the new `tools.salvage_text_calls` is true. Unset, it is on when
+  `model.api_base` is set (a self-hosted endpoint such as vLLM) and off otherwise. A
+  self-hosted model that leaks bare JSON outside tags is no longer salvaged; its reply comes
+  back as text. `docs/bundle.schema.json` gains the field, so a vendored copy (kobo)
+  needs re-vendoring to accept it.
+- **`GET /events` needs a token when the a2a transport has `auth`.** Send the same
+  `Authorization: Bearer <cabal-minted JWT>` the POST routes take (same issuer and
+  audience); without it the route returns 401. Bundles with no `auth` block are unchanged.
+  kaminos's trace proxy sends no token, so its trace pane, like its test chat, works only
+  against bundles without `auth`.
+- **`/events` no longer carries tool arguments, tool results or reasoning text by default.**
+  `tool_call`, `tool_result` and `reasoning` events go out with `arguments_chars`,
+  `content_chars` and `text_chars` in place of the content; names and every other event
+  are unchanged. Set `DAEDALUS_TRACE_CONTENT=1` in the agent's environment to send the
+  content as before. `run -v` and the Slack progress lines read the in-process bus and
+  still see everything.
+- **The operator lanes admit only allowlisted subs.** teach, knowledge, tool and
+  learnings tasks are refused unless the verified sub is `operator:<anything>` or exactly
+  `service:kobo`, the sub kobo's deploy docs mint for `CABAL_OPERATOR_TOKEN`. If your
+  room's token uses another sub, the agent emits `teach_refused` (and the other
+  `<lane>_refused` events) with that sub; add it to the a2a transport's `auth` block:
+  `operator_subs: ["operator:*", "<your kobo sub>"]`. A list replaces the default, and an
+  entry ending in `*` matches by prefix. kobo falls back to its archive commit when the
+  instant lane refuses, so a refused teach lands at the next rebuild instead of being lost.
+- **Tasks now have a deadline, and model calls a timeout.** An engine run that takes
+  longer than `task_timeout` (agent.yaml top level, seconds, default 600) is cancelled,
+  tool calls included, and the task fails with reason 704. A litellm model call that
+  takes longer than `model.request_timeout` (seconds, default 120; a tiers-file entry can
+  set it for its model) fails with an `LLMError`; before, litellm waited up to 6000 s. A
+  bundle whose tasks legitimately run longer must raise `task_timeout`. Both fields are
+  new in `docs/bundle.schema.json`, so a copy vendored elsewhere (kobo) needs
+  re-vendoring to accept them.
+- **`POST /a2a/tasks` with an id the agent already holds now returns 409.** It used to
+  replace the stored task. cabal and kobo mint a fresh id for every dispatch, so they are
+  unaffected; a caller that reuses ids must send a new one. This applies with or without
+  `auth`.
+- **With `auth`, a task answers only to the sub that created it.** `tasks/get` and a
+  `message/send` continuation from any other sub, or from a token with no sub, get the
+  same error as an unknown id. cabal's re-mint copies the caller's sub, so a person or
+  kobo continuing its own task through cabal is unaffected. Without `auth`, every task
+  stays visible to every caller, as before.
+
+### Added
+
+- **`daedalus guide`** lists the guides that ship in the package, and `daedalus guide
+  welcome` prints the tour: what daedalus is, where techne, liminal, cabal and kobo fit,
+  and every engine, tier, tool provider, approval tier, transport, memory option, timeout
+  and extra, with when to reach for each. `daedalus guide design` prints docs/design.md.
+  An unknown name exits non-zero and lists the valid ones.
+- **`docs/bundle.schema.json` describes four fields**: `tools.builtin` (its groups, and the
+  files roots refused at load), `tools.salvage_text_calls`, `model.request_timeout` and
+  `task_timeout`, so an editor reading the schema shows them.
+
+### Changed
+
+- **The a2a boot line names its auth regime, and an open listener warns** (tenishai/daedalus
+  issue #204). The line now reads `(a2a listening on 0.0.0.0:8080, NO AUTH)` or `..., JWT
+  auth)`, and with no `auth` block on an address other than loopback the runtime also prints
+  a WARNING to stderr: anyone who can reach the port can send it tasks. It does not refuse
+  to start, because kobo writes no `auth` block when cabal isn't configured.
+- **CI runs `scripts/check_arch_cards.py`** in the `test` and `fork-pr` jobs (issue
+  #206), so a change to an anchored file without its architecture card fails the build
+  instead of merging.
+
+### Security
+
+- **litellm is pinned exactly, to 1.104.2** (PR #193). The pin replaces a range, so a fresh
+  install can no longer pick up a newer litellm; it went in after litellm 1.107.0 on PyPI
+  (2026-10-21, since quarantined) shipped a credential stealer. Raise it only to a release
+  someone has checked.
+- **The `/events` trace stream is behind the transport's verifier.** It used to answer
+  without a token even when `auth` was configured, and its replay of the last 100 events
+  included full tool results: files the agent read, Slack threads, colleague answers.
+  Anything that could reach the pod's port could read them (issue #196).
+- **The operator-lane gate is an allowlist** (issue #195, closing issue #47). It used to
+  refuse `persona:`, `agent:` and bare `operator` and admit every other verified sub, so a
+  service token minted for something else could deliver a tool file, which the agent runs
+  as itself at its next boot. The code and docs no longer call the tool file's
+  import-statement check validation: it is a lint, and `__import__("os")` passes it.
+- **a2a tasks belong to the caller that created them** (issue #197). Any token cabal
+  minted for the agent's audience could read another caller's task with `tasks/get`,
+  append a turn to it with `message/send`, or replace it through `POST /a2a/tasks` with
+  the same id, so an agent-to-agent token could read a human operator's conversation.
+  The transport now records the verified sub on each stored task and answers other subs
+  as if the task did not exist, and refuses a repeated id with 409.
+
+### Fixed
+
+- **The a2a task store and the Slack thread map are bounded** (tenishai/daedalus issue
+  #202). Both grew for the life of the pod, Slack threads with their images, until a busy
+  agent was OOM-killed. The a2a store keeps at most 1000 tasks and drops the least recently
+  stored finished ones (a running task is never dropped; a dropped id answers like an
+  unknown one). Slack keeps the 500 most recently used threads, and a dropped thread starts
+  a fresh conversation. Images still stay in a kept thread's history.
+- **The files builtin and the checkpoint store no longer block the event loop**
+  (tenishai/daedalus issue #205). A `files.search` over a large root, a large read or a
+  sqlite checkpoint write ran on the loop and stalled every other coroutine, `/healthz`
+  included. They run on a worker thread now, and `files.search` stops after 10 seconds,
+  walk included, with a note saying how many files it searched and that a missing match is
+  not an absent one. A regex with catastrophic backtracking on one line is still not
+  bounded.
+- **Under auth, a reused `contextId` no longer replaces another caller's journal row**
+  (tenishai/daedalus issue #212). The journal kept one row per `context_id`, and a fresh
+  `message/send` takes the caller's `contextId`, so sub B could send A's id and replace A's
+  row, which is the learnings summarizer's source. Rows now carry the task's verified sub,
+  and the upsert replaces only a row with the same `context_id` and owner. Without auth
+  every owner is empty and nothing changes; an existing `journal.db` gains the column in
+  place.
+- **`docs/design.md` §3 no longer claims three security properties the code doesn't have**
+  (tenishai/daedalus issue #203). Gate plans carry the call's full arguments and the Slack
+  approver posts them verbatim; nothing parks a task in `input-required`; and core has no
+  masking or placeholder-refusal primitives. The section now says so, and names the one
+  redaction that exists (the `/events` trace).
+- **A hung provider no longer holds a task for up to 100 minutes, and a failed a2a task
+  no longer stays WORKING** (issue #201). litellm's default request timeout is 6000 s and
+  nothing else bounded a task, so a stalled provider kept the request open after cabal
+  had given up, `tasks/get` answered WORKING until the pod restarted, and the Slack
+  thread kept its eyes reaction. Model calls now time out, the engine run has a
+  deadline that cancels whatever is in flight, and a run past it ends FAILED with reason
+  704 on every transport. When an a2a handler raises or is cancelled, its stored task is
+  marked FAILED with reason 704; the HTTP and JSON-RPC errors are unchanged.
+
+
 ## [0.5.5] — 2026-10-15
 
 ### Upgrading

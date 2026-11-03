@@ -2,12 +2,15 @@
 approvals (tenishai/agents#51). Exercised over the real HTTP transport, not by calling
 handlers directly (architect pattern 0de3a9cb6c1d6f3d)."""
 
+import importlib.metadata
 import json
 from contextlib import asynccontextmanager
 
 import pytest
 
-pytest.importorskip("mcp.server.lowlevel", reason="the bridge needs the mcp extra")
+pytest.importorskip("mcp.server.lowlevel", reason="the bridge needs the bridge extra")
+if int(importlib.metadata.version("mcp").split(".")[0]) < 2:
+    pytest.skip("the bridge needs mcp>=2.2 (the bridge extra)", allow_module_level=True)
 pytest.importorskip("uvicorn", reason="the bridge serves over uvicorn")
 
 from daedalus.engines import EngineTurn  # noqa: E402

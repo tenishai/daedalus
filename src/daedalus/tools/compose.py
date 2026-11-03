@@ -44,6 +44,11 @@ class MultiToolProvider:
                 specs.append(spec)
         return specs
 
+    def provider_of(self, name: str) -> ToolProvider | None:
+        """The provider that listed `name` in the last tools() call, or None.
+        Agent._knowledge_only reads its `knowledge_only` attribute (kobo#310)."""
+        return self._owner.get(name)
+
     async def call(self, name: str, payload: dict) -> str:
         if name not in self._owner:
             await self.tools()

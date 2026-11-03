@@ -6,6 +6,7 @@ failed tasks keep theirs so they can be inspected or resumed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -38,7 +39,17 @@ class SqliteCheckpoints:
         finally:
             conn.close()
 
+    # sqlite runs on a worker thread, not the event loop (#205).
     async def save(self, task_id: str, state: dict) -> None:
+        await asyncio.to_thread(self._save, task_id, state)
+
+    async def load(self, task_id: str) -> dict | None:
+        return await asyncio.to_thread(self._load, task_id)
+
+    async def drop(self, task_id: str) -> None:
+        await asyncio.to_thread(self._drop, task_id)
+
+    def _save(self, task_id: str, state: dict) -> None:
         payload = json.dumps(state, default=str)
         with self._connect() as conn:
             conn.execute(
@@ -49,13 +60,13 @@ class SqliteCheckpoints:
                 (task_id, payload),
             )
 
-    async def load(self, task_id: str) -> dict | None:
+    def _load(self, task_id: str) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT state FROM checkpoints WHERE task_id = ?", (task_id,)
             ).fetchone()
         return json.loads(row[0]) if row else None
 
-    async def drop(self, task_id: str) -> None:
+    def _drop(self, task_id: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM checkpoints WHERE task_id = ?", (task_id,))

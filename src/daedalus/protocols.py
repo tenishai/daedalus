@@ -1,8 +1,9 @@
 """Protocol seams and their no-op defaults.
 
 Every cross-cutting concern is a Protocol with a no-op default injected at
-wiring time — never None-checked in the hot path. Real backends arrive via
-extras and entry points (techne, liminal, slack).
+wiring time — never None-checked in the hot path. Real backends are chosen by
+agent.yaml and imported lazily; their packages come from extras (techne, slack)
+or a separate install (liminal). There are no entry points.
 """
 
 from __future__ import annotations
@@ -63,13 +64,27 @@ class Transport(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
+    """Optional, so never annotated here (an annotated member is required by
+    isinstance): `recall_hits(query, k) -> list[dict]` with "content" and "source",
+    and `publish() -> dict`, which the Agent calls once at task end (#228)."""
+
     async def recall(self, query: str, k: int = 5) -> list[str]: ...
 
-    async def commit(self, content: str, kind: str = "fact") -> None: ...
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None: ...
 
 
 @runtime_checkable
 class ToolProvider(Protocol):
+    """tools() lists OpenAI-function-shaped specs; call() runs one.
+
+    Optional, read with getattr and not part of the Protocol: a class attribute
+    `knowledge_only = True` says the provider answers from what the agent
+    already has (its bundle, its skills) and reaches nothing with a credential.
+    Only such providers stay offered while the agent answers another agent's
+    task (tenishai/kobo#310); the default is credentialed, so a new provider is
+    withheld there until it opts in.
+    """
+
     async def tools(self) -> list[dict]: ...
 
     async def call(self, name: str, payload: dict) -> str: ...
@@ -109,7 +124,7 @@ class NoMemory:
     async def recall(self, query: str, k: int = 5) -> list[str]:
         return []
 
-    async def commit(self, content: str, kind: str = "fact") -> None:
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
         return None
 
 

@@ -26,9 +26,18 @@ class FakeWeb:
         self.calls: list[dict] = []
         self._ts = 0
 
-    async def chat_postMessage(self, channel, text, thread_ts=None):
+    async def chat_startStream(self, channel, **kwargs):
+        if kwargs.get("icon_url") and getattr(self, "refuse_icon", False):
+            raise RuntimeError("missing_scope")
         self._ts += 1
-        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        self.calls.append({"channel": channel, "stream": True, **kwargs})
+        return {"ts": f"ts-{self._ts}"}
+
+    async def chat_postMessage(self, channel, text, thread_ts=None, **kwargs):
+        if kwargs.get("icon_url") and getattr(self, "refuse_icon", False):
+            raise RuntimeError("missing_scope")
+        self._ts += 1
+        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts, **kwargs})
         return {"ts": f"ts-{self._ts}"}
 
 
@@ -2031,3 +2040,66 @@ def test_a_model_chosen_tool_name_cannot_carry_angle_brackets():
 
     line = _progress_line({"type": "tool_call", "name": "<!channel>.x", "arguments": {}})
     assert "<" not in line and ">" not in line
+
+
+async def test_the_message_path_keeps_threads_bounded(monkeypatch):
+    """#202, PR 219 review: drive the real event path, not the helper alone."""
+    from daedalus.transports import slack
+
+    monkeypatch.setattr(slack, "_THREAD_CAP", 3)
+    transport, api, handler = make()
+    for i in range(5):
+        await transport.handle_event(event(f"m{i}", ts=f"{100 + i}.0"), handler)
+    assert len(transport._threads) == 3
+    assert (CH, "100.0") not in transport._threads
+    assert (CH, "104.0") in transport._threads
+
+
+async def test_every_post_carries_the_rooms_icon_when_one_is_given():
+    """The room's SLACK_ICON_URL rides on every chat.postMessage, chunks included,
+    so the agent's face from the room is what people see in Slack."""
+    from daedalus.transports.slack import SlackApi
+
+    web = FakeWeb()
+    api = SlackApi(web, icon_url="https://room.example/slack/relay/abc/face.png")
+    await api.post("C1", "hello", thread_ts="t1")
+    await api.post("C1", "x" * 7000)
+    face = "https://room.example/slack/relay/abc/face.png"
+    assert web.calls and all(c["icon_url"] == face for c in web.calls)
+    plain = SlackApi(FakeWeb())
+    assert plain.icon_url is None
+
+
+async def test_an_app_that_refuses_the_icon_posts_plain_from_then_on():
+    """An install that predates chat:write.customize refuses icon_url; the message
+    still goes out, without the icon, and later posts stop asking."""
+    from daedalus.transports.slack import SlackApi
+
+    web = FakeWeb()
+    web.refuse_icon = True
+    api = SlackApi(web, icon_url="https://room.example/face.png")
+    ts = await api.post("C1", "hello")
+    assert ts == "ts-1" and web.calls == [{"channel": "C1", "text": "hello", "thread_ts": None}]
+    assert api.icon_url is None
+    await api.post("C1", "again")
+    assert len(web.calls) == 2 and "icon_url" not in web.calls[1]
+
+
+async def test_a_streamed_reply_opens_with_the_rooms_icon_too():
+    """Replies are streamed (chat.startStream), not posted, so the icon has to ride
+    the stream's opening call as well; a refusal there falls back the same way."""
+    from daedalus.transports.slack import SlackApi
+
+    web = FakeWeb()
+    api = SlackApi(web, icon_url="https://room.example/face.png")
+    ts = await api.start_stream("C1", "t1", "U1", "T1")
+    assert ts == "ts-1"
+    assert web.calls[-1] == {
+        "channel": "C1", "stream": True, "thread_ts": "t1", "recipient_user_id": "U1",
+        "recipient_team_id": "T1", "icon_url": "https://room.example/face.png",
+    }
+    refused = FakeWeb()
+    refused.refuse_icon = True
+    api2 = SlackApi(refused, icon_url="https://room.example/face.png")
+    assert await api2.start_stream("C1", None, None, None) == "ts-1"
+    assert refused.calls == [{"channel": "C1", "stream": True}] and api2.icon_url is None

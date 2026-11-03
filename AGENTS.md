@@ -3,6 +3,9 @@
 Instructions for AI coding agents working in this repo. Claude Code loads this via
 `CLAUDE.md` (`@AGENTS.md`); other AGENTS.md-aware tools read it directly.
 
+`daedalus guide welcome` prints the user-facing tour of daedalus and its options from the
+installed package; the guides live in `docs/` and ship via pyproject's force-include.
+
 ## Build, test, lint
 
 ```bash
@@ -45,11 +48,13 @@ right.
   line hides. `tests/test_skip_counts_are_honest.py` keeps those numbers true; it does
   not make the tests run.
 
-  A separate `techne` CI job installs the sibling and runs the full suite with
-  `DAEDALUS_REQUIRE_TECHNE=1`, which turns a missing/broken techne import into a hard
-  failure instead of a skip (`conftest.py`) — but it is `workflow_dispatch`-only
-  and clones techne without a token, so it can only run once `tenishai/techne` is public
-  (agora#27). Until then, the 92 tests are covered locally, not in CI on every PR.
+  A separate `techne` CI job installs tenish-techne from the tenish index (the
+  `techne` extra, read-only token in the `TENISH_INDEX_TOKEN` secret) and runs the full
+  suite with `DAEDALUS_REQUIRE_TECHNE=1`, which turns a missing/broken techne import into
+  a hard failure instead of a skip (`conftest.py`). It runs on every push to main and
+  every same-repo PR (#48); fork PRs get no secrets and skip it. Dependabot PRs read
+  Dependabot secrets only, so the token is stored under the same name in both places;
+  rotate both together.
 - **The distribution is `tenish-daedalus`; the import package and the CLI are `daedalus`.**
   Anything that looks the package up by distribution name (`pip show`, `importlib.metadata`,
   an extras install string) needs the long name.
@@ -60,7 +65,7 @@ right.
   `AgentSpec` field and you must run `daedalus schema --out docs/bundle.schema.json` in
   the same commit or CI fails.
 - **Operator-gate events are matched by exact name**, in the `_OPERATOR_GATE_EVENTS`
-  frozenset at `src/daedalus/cli.py:92` — deliberately not by suffix. The comment there
+  frozenset in `src/daedalus/cli.py` — deliberately not by suffix. The comment there
   records the incident (#49) where a suffix match swallowed two unrelated events. Adding a
   gate event means adding it to that set explicitly.
 - **Golden bundles are documentation.** `tests/golden/<name>/` bundles are loaded and
@@ -77,7 +82,7 @@ src/daedalus/
   transports/      cli, a2a, slack — one file per transport
   memory/          techne adapter (optional)
   tools/           tool providers (optional)
-  enforcement.py   the hook law layer (bundle/tools/*.py pre_task/post_draft); tiers 1-2 are in agent.py
+  enforcement.py   the three-tier approval model
 tests/golden/      bundles that are both fixture and worked example
 docs/proposals/    design notes, not documentation of current behaviour
 ```
@@ -94,4 +99,4 @@ Check before you push:
 python3 scripts/check_arch_cards.py
 ```
 
-It fails when an anchored file has changed without its card, or when a card and the index disagree.
+It fails when an anchored file has changed without its card, or when a card and the index disagree. CI runs it in the `test` and `fork-pr` jobs (#206), so a miss fails the build.

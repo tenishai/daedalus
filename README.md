@@ -5,18 +5,25 @@ an A2A agent card, and a wiring file — and daedalus is the runtime that
 brings it to life: pluggable transports (CLI, A2A, Slack), a three-tier
 approval model, and Protocol seams for memory, tools, and checkpoints.
 
+Run `daedalus guide welcome` for what it can do and every option, from the
+installed package.
+
+## Where this fits
+
 **daedalus runs on its own.** Its only dependencies are pydantic, pyyaml,
-click and litellm. The tenish projects below are optional extras behind
-Protocol seams, not requirements — an agent with no memory and no tool
-gateway still runs.
+click and litellm. Every tenish project below is optional: an agent with no
+memory and no tool gateway still runs.
 
-- [techne](https://github.com/tenishai/techne) — memory (optional)
-- [liminal](https://github.com/tenishai/liminal) — tool gateway (optional)
-- cabal — orchestration (optional)
-- **daedalus** — agent construction kit (this repo)
-- a visual builder GUI — a companion project, in development
+- [techne](https://github.com/tenishai/techne): memory, `memory.personal: techne`
+  (optional, `techne` extra).
+- [liminal](https://github.com/tenishai/liminal): tool gateway, `tools.provider: liminal`
+  (optional, install `tenish-liminal` separately).
+- cabal: orchestration; calls the a2a transport and hosts the colleagues switchboard
+  (optional).
+- kobo: composes bundles and teaches agents through cabal (optional).
+- a visual builder GUI: a companion project, in development.
 
-> Status: 0.5.5, released. Bundle loader, runtime, CLI/A2A/Slack transports,
+> Status: 0.7.0, released. Bundle loader, runtime, CLI/A2A/Slack transports,
 > approvals and enforcement have all shipped. Design rationale:
 > [docs/design.md](docs/design.md) — where it disagrees with the code, the
 > code is right.
@@ -43,6 +50,11 @@ daedalus create prudence            # scaffolds the bundle below
 daedalus chat ./prudence            # talk to it
 ```
 
+If the model writes its tool calls as `<tool_call>` text instead of native tool calls
+(Qwen on vLLM does), set `tools.salvage_text_calls: true` in the bundle's `agent.yaml`.
+Salvage is on by default only when `model.api_base` is set there, and the env vars above
+don't set it.
+
 For Anthropic, set `ANTHROPIC_API_KEY` instead of the three variables above; the default
 model is `anthropic/claude-sonnet-4-5`. Any provider litellm supports works the same way.
 
@@ -51,7 +63,7 @@ model is `anthropic/claude-sonnet-4-5`. Any provider litellm supports works the 
 switches provider without editing the bundle. Any litellm route string works,
 including a local endpoint via `api_base` in agent.yaml. The other commands are
 `daedalus run` (serve the declared transports, or `-m "text"` for one reply),
-`version` and `schema`.
+`version`, `schema` and `guide`.
 
 ## The idea in one file tree
 

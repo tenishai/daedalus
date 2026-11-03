@@ -1,4 +1,4 @@
-"""The slack transport — Socket Mode, clean-room.
+"""The slack transport — Socket Mode or events over HTTP, clean-room.
 
 Carries the battle scars of two prior production Slack agents as
 requirements, not code:
@@ -22,6 +22,14 @@ requirements, not code:
 
 Requires the slack extra: pip install 'tenish-daedalus[slack]'. Tokens come from
 SLACK_BOT_TOKEN and SLACK_APP_TOKEN unless passed explicitly.
+
+Two ways in, one transport (kobo#304). With SLACK_APP_TOKEN the transport opens
+a Socket Mode connection, exactly as it always has. Without it, and with
+SLACK_BOT_TOKEN, no socket is opened: Slack's event envelopes arrive by
+`POST /slack/events` on the agent's a2a app, forwarded by the room's relay and
+gated by the `X-Kobo-Relay-Secret` header matching SLACK_RELAY_SECRET. Both
+ways pass each envelope through `admit()` (dedupe on event_id) and then the
+same `handle_event`; nothing after that point knows which way the event came.
 """
 
 from __future__ import annotations
@@ -42,6 +50,22 @@ from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
 _MENTION = re.compile(r"<@[A-Z0-9]+>\s*")
 _MENTION_ID = re.compile(r"<@([A-Z0-9]+)>")
 _SEEN_CAP = 500
+#: Envelope ids both ways in remember (kobo#304): Slack retries a delivery it
+#: did not see acked within three seconds, and the relay may forward one twice.
+_EVENT_ID_CAP = 2000
+#: The env var the room sets per agent; the relay sends it as X-Kobo-Relay-Secret.
+RELAY_SECRET_ENV = "SLACK_RELAY_SECRET"
+#: Where the a2a app takes forwarded envelopes when the HTTP way in is active.
+EVENTS_PATH = "/slack/events"
+#: Envelope ids both ways in remember (kobo#304): Slack retries a delivery it
+#: did not see acked within three seconds, and the relay may forward one twice.
+_EVENT_ID_CAP = 2000
+#: The env var the room sets per agent; the relay sends it as X-Kobo-Relay-Secret.
+RELAY_SECRET_ENV = "SLACK_RELAY_SECRET"
+#: Where the a2a app takes forwarded envelopes when the HTTP way in is active.
+EVENTS_PATH = "/slack/events"
+#: Slack threads kept in memory, least recently used dropped first (#202).
+_THREAD_CAP = 500
 
 logger = logging.getLogger(__name__)
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
@@ -409,11 +433,35 @@ def _chunk_message(text: str, budget: int = _POST_BUDGET) -> list[str]:
     return _stitch_fences(_pack(text, budget - _STITCH_OVERHEAD, ("\n\n", "\n", None)))
 
 
-class SlackApi:
-    """The four Slack operations the transport needs, behind a seam tests fake."""
+ICON_URL_ENV = "SLACK_ICON_URL"
 
-    def __init__(self, web_client):
+
+class SlackApi:
+    """The four Slack operations the transport needs, behind a seam tests fake.
+
+    `icon_url` (the room's `SLACK_ICON_URL`, 2026-11-03): the picture every
+    message this agent posts carries, Slack's per-message `icon_url` under the
+    `chat:write.customize` scope. The room serves the agent's own face there, so
+    an owner changes it in the room and Slack follows on the next message, and
+    nobody has to reach the app's settings page. An app whose install predates
+    the scope refuses the field; the first refusal drops the icon for the life
+    of the process and the post goes out plain, never lost."""
+
+    def __init__(self, web_client, icon_url: str | None = None):
         self._web = web_client
+        self.icon_url = (icon_url or "").strip() or None
+
+    async def _post(self, **kwargs):
+        if self.icon_url:
+            try:
+                return await self._web.chat_postMessage(icon_url=self.icon_url, **kwargs)
+            except Exception as exc:  # noqa: BLE001 -- the icon is decoration
+                logger.warning(
+                    "slack: posting with the room's icon failed (%s); posting plain from now on",
+                    exc,
+                )
+                self.icon_url = None
+        return await self._web.chat_postMessage(**kwargs)
 
     async def post(self, channel: str, text: str, thread_ts: str | None = None) -> str:
         """Post text, chunked to stay under Slack's render budget so long
@@ -428,11 +476,9 @@ class SlackApi:
         became one message or several.
         """
         chunks = _chunk_message(text)
-        first = await self._web.chat_postMessage(
-            channel=channel, text=chunks[0], thread_ts=thread_ts
-        )
+        first = await self._post(channel=channel, text=chunks[0], thread_ts=thread_ts)
         for chunk in chunks[1:]:
-            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+            await self._post(channel=channel, text=chunk, thread_ts=thread_ts)
         return first["ts"]
 
     async def update(
@@ -447,7 +493,7 @@ class SlackApi:
         chunks = _chunk_message(text)
         await self._web.chat_update(channel=channel, ts=ts, text=chunks[0])
         for chunk in chunks[1:]:
-            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+            await self._post(channel=channel, text=chunk, thread_ts=thread_ts)
 
     async def react(self, channel: str, ts: str, name: str) -> None:
         try:
@@ -551,6 +597,19 @@ class SlackApi:
             kwargs["recipient_user_id"] = user
         if team:
             kwargs["recipient_team_id"] = team
+        # The streamed reply is the one people read, so it carries the room's
+        # icon too (chat.startStream takes icon_url like chat.postMessage); a
+        # refusal drops the icon exactly as _post does and the stream still opens.
+        if self.icon_url:
+            try:
+                response = await self._web.chat_startStream(icon_url=self.icon_url, **kwargs)
+                return response["ts"]
+            except Exception as exc:  # noqa: BLE001 -- the icon is decoration
+                logger.warning(
+                    "slack: streaming with the room's icon failed (%s); posting plain from now on",
+                    exc,
+                )
+                self.icon_url = None
         response = await self._web.chat_startStream(**kwargs)
         return response["ts"]
 
@@ -749,6 +808,7 @@ class SlackTransport:
         approvers: Iterable[str] | None = None,
         api: SlackApi | None = None,
         wake: str | None = None,
+        relay_secret: str | None = None,
     ):
         # How a channel wakes the agent (WAKE_* above). None means the default,
         # `mention`, which is exactly the behaviour before this option existed.
@@ -780,10 +840,26 @@ class SlackTransport:
         self.channels = list(dict.fromkeys(c for c in given if c))
         self.bot_token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
         self.app_token = app_token or os.environ.get("SLACK_APP_TOKEN")
+        # The HTTP way in: the room's relay proves itself with this per-agent
+        # secret (kobo#304). Read once at construction, like the tokens.
+        self.relay_secret = relay_secret or os.environ.get(RELAY_SECRET_ENV)
         self.escalation_route = escalation_route
         self._api = api
         self._seen: OrderedDict[tuple, bool] = OrderedDict()
-        self._threads: dict[tuple, Task] = {}  # (channel, thread_ts) -> Task
+        # Envelope ids seen by EITHER way in, oldest first (kobo#304). Distinct
+        # from `_seen`: that one is keyed on (channel, ts) after the wake gate and
+        # catches the message/app_mention pair, which carries two event_ids.
+        self._event_ids: OrderedDict[str, bool] = OrderedDict()
+        # Set by serve() once the web client and identity are in place; an
+        # envelope that arrives over HTTP before then waits for it, not lost.
+        self._started = asyncio.Event()
+        # handle_event runs scheduled by receive(); references kept so the
+        # loop cannot garbage-collect a running one.
+        self._inflight: set[asyncio.Task] = set()
+        # (channel, thread_ts) -> Task, least recently used first. Bounded like
+        # `_seen` (#202): a busy agent kept every thread, images included, until
+        # the pod was OOM-killed. A thread dropped here starts a fresh Task.
+        self._threads: OrderedDict[tuple, Task] = OrderedDict()
         # Threads this agent was asked in AT THE TOP (the root message mentioned
         # it, or was a DM): in `thread` mode every reply in one of these reaches
         # the agent without a mention. A mention buried in a busy thread answers
@@ -795,17 +871,25 @@ class SlackTransport:
         # tagged-only gate then trusts only app_mention delivery in channels.
         self.user_id: str | None = None
 
-    async def serve(self, handler: Handler) -> None:
-        if not (self.bot_token and self.app_token):
-            raise RuntimeError(
-                "slack transport needs SLACK_BOT_TOKEN and SLACK_APP_TOKEN"
-            )
-        from slack_sdk.socket_mode.aiohttp import SocketModeClient
-        from slack_sdk.socket_mode.response import SocketModeResponse
-        from slack_sdk.web.async_client import AsyncWebClient
+    @property
+    def over_http(self) -> bool:
+        """True when events come by POST /slack/events instead of a socket: a bot
+        token without an app-level token (kobo#304). An agent that has the
+        app-level token keeps Socket Mode, whatever else is set."""
+        return bool(self.bot_token) and not self.app_token
 
+    async def serve(self, handler: Handler) -> None:
+        if not self.bot_token:
+            raise RuntimeError(
+                "slack transport needs SLACK_BOT_TOKEN "
+                "(and SLACK_APP_TOKEN for Socket Mode)"
+            )
         if self._api is None:
-            self._api = SlackApi(AsyncWebClient(token=self.bot_token))
+            from slack_sdk.web.async_client import AsyncWebClient
+
+            self._api = SlackApi(
+                AsyncWebClient(token=self.bot_token), icon_url=os.environ.get(ICON_URL_ENV)
+            )
         if self.team_id is None:
             self.team_id = (await self._api.team_id()) or None
         if self.user_id is None:
@@ -817,6 +901,25 @@ class SlackTransport:
                     "via app_mention delivery"
                 )
         self._wire_approver(handler)
+        self._started.set()
+        if self.over_http:
+            # No socket. The a2a app's POST /slack/events route hands each
+            # forwarded envelope to receive(); this coroutine only keeps the
+            # transport alive beside it.
+            print(self.listening_line(), flush=True)
+            print(self.way_in_line(), flush=True)
+            if not self.relay_secret:
+                log.warning(
+                    "slack: %s is unset; every POST %s is refused with 503 until it is",
+                    RELAY_SECRET_ENV,
+                    EVENTS_PATH,
+                )
+            await asyncio.Event().wait()
+            return
+
+        from slack_sdk.socket_mode.aiohttp import SocketModeClient
+        from slack_sdk.socket_mode.response import SocketModeResponse
+        from slack_sdk.web.async_client import AsyncWebClient
 
         socket = SocketModeClient(
             app_token=self.app_token,
@@ -828,16 +931,64 @@ class SlackTransport:
                 SocketModeResponse(envelope_id=request.envelope_id)
             )
             if request.type == "events_api":
-                event = request.payload.get("event", {})
-                await self.handle_event(event, handler)
+                event = self.admit(request.payload)
+                if event is not None:
+                    await self.handle_event(event, handler)
 
         socket.socket_mode_request_listeners.append(listener)
         await socket.connect()
         print(self.listening_line(), flush=True)
+        print(self.way_in_line(), flush=True)
         try:
             await asyncio.Event().wait()
         finally:
             await socket.disconnect()
+
+    def way_in_line(self) -> str:
+        """The one boot line that says which way in is active (kobo#304)."""
+        if self.over_http:
+            return f"(slack events arrive over HTTPS at POST {EVENTS_PATH}; no socket opened)"
+        return "(slack events arrive over Socket Mode)"
+
+    def admit(self, envelope: object) -> dict | None:
+        """Both ways in pass every envelope through here first. Returns the
+        inner event when the envelope is an `event_callback` whose `event_id`
+        has not been seen, None otherwise. An envelope without an event_id is
+        admitted unchecked, as before; the (channel, ts) dedupe in
+        handle_event still runs after this."""
+        if not isinstance(envelope, dict) or envelope.get("type") != "event_callback":
+            return None
+        event_id = envelope.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            if event_id in self._event_ids:
+                return None
+            self._event_ids[event_id] = True
+            while len(self._event_ids) > _EVENT_ID_CAP:
+                self._event_ids.popitem(last=False)
+        event = envelope.get("event")
+        return event if isinstance(event, dict) else {}
+
+    def receive(self, envelope: object, handler: Handler) -> bool:
+        """The HTTP way in: admit the envelope and schedule handle_event, so
+        the route answers before the agent starts on it. Returns False when
+        the envelope was dropped (not an event_callback, or a repeat). The
+        scheduled run waits for serve() when it lands first, and logs its own
+        failure, since nothing awaits it."""
+        event = self.admit(envelope)
+        if event is None:
+            return False
+        task = asyncio.create_task(self._handle_scheduled(event, handler))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        return True
+
+    async def _handle_scheduled(self, event: dict, handler: Handler) -> None:
+        if self._api is None:
+            await self._started.wait()
+        try:
+            await self.handle_event(event, handler)
+        except Exception:
+            log.exception("slack: an event that arrived over HTTP failed")
 
     def listening_line(self) -> str:
         """The one line boot prints about this transport's reach. It states
@@ -1033,7 +1184,7 @@ class SlackTransport:
         task = self._threads.get((channel, thread))
         if task is None:
             task = Task(context_id=f"slack:{channel}:{thread}")
-            self._threads[(channel, thread)] = task
+        self._remember_thread((channel, thread), task)
         task.metadata[SLACK_WAKE_KEY] = self.wake
         # Snapshotted so a handler exception below can roll the appended
         # turn back out -- otherwise a rejected/failing message (its image
@@ -1106,7 +1257,7 @@ class SlackTransport:
         )
         try:
             task = await handler.handle_task(task)
-            self._threads[(channel, thread)] = task
+            self._remember_thread((channel, thread), task)
             ok = task.state is TaskState.COMPLETED
             reply = task.agent_text() or "(no reply)"
         except Exception as exc:
@@ -1147,6 +1298,12 @@ class SlackTransport:
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, channel)
+
+    def _remember_thread(self, key: tuple, task: Task) -> None:
+        self._threads[key] = task
+        self._threads.move_to_end(key)
+        while len(self._threads) > _THREAD_CAP:
+            self._threads.popitem(last=False)
 
     def _addressed_to_us(self, event: dict) -> bool:
         """An app_mention, a DM, or a message whose text mentions this bot."""

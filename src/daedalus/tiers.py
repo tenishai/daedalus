@@ -14,15 +14,20 @@ DAEDALUS_TIERS, mapping tiers to models once per deployment:
         api_base: http://localhost:8000/v1
         api_key_env: LOCAL_API_KEY
         context_tokens: 45000      # this model on this hardware
+        request_timeout: 300       # seconds per model call; a slow local model
         max_repeats: 3
+        max_tokens: 16384          # the visible reply's ceiling (bundle default 8192)
+        thinking: {mode: off}      # or {mode: on, budget_tokens: 4096}; see daedalus.llm
       # a tier can alias another (balanced: best), or be null: not offered here
 
 Resolution rules (`daedalus.agent._resolve_model`):
 - A concrete `model.id` is only recorded.
 - A tier word is looked up in DAEDALUS_TIERS; a deployment that doesn't offer it
   refuses to load.
-- Limits that belong to a model (context_tokens, max_repeats, max_tokens) come from
-  the tier entry only where the bundle hasn't set them.
+- Limits that belong to a model (context_tokens, max_repeats, max_tokens,
+  request_timeout, thinking) come from the tier entry only where the bundle hasn't set
+  them. This is where a deployment raises the reply ceiling or sets the thinking budget
+  for every bundle on a tier (tenishai/daedalus#240): the bundle default stays 8192.
 - The resolved model is always recorded, because a tier floats the way an alias does:
   which tier, which engine, which id.
 """
@@ -36,6 +41,8 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from daedalus.bundle import ThinkingSpec
 
 TIER_NAMES: tuple[str, ...] = ("fast", "balanced", "best")  # lowest to highest
 Tier = Literal["fast", "balanced", "best"]
@@ -54,6 +61,8 @@ class TierEntry(BaseModel):
     api_base: str | None = None
     api_key_env: str | None = None  # env var holding the key; never the key itself
     max_tokens: int | None = Field(default=None, gt=0)
+    thinking: ThinkingSpec | None = None  # fills model.thinking when the bundle is silent
+    request_timeout: float | None = Field(default=None, gt=0)  # seconds per model call
     context_tokens: int | None = Field(default=None, gt=0)
     max_repeats: int | None = Field(default=None, ge=2)
 

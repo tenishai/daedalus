@@ -10,3 +10,5 @@ tiers:
     api_key_env: LOCAL_API_KEY
     context_tokens: 45000                 # this model on this hardware; measure yours
     max_repeats: 3
+    # max_tokens: 16384                   # the reply ceiling for every bundle on this tier
+    # thinking: {mode: off}               # a Qwen-style model behind vLLM: no think-trace

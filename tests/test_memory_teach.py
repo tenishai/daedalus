@@ -58,7 +58,7 @@ def _rows(db, source):
 
 
 def _teach_task(
-    text="The dog is named Tsuru.", *, sub="service:room", filename="chat-20260820-dog.md"
+    text="The dog is named Tsuru.", *, sub="service:kobo", filename="chat-20260820-dog.md"
 ):
     task = Task.from_text(text)
     task.metadata[SYSTEM_TASK_KEY] = TEACH_MARKER
@@ -77,8 +77,11 @@ def test_is_teach_task_only_on_exact_marker():
 
 
 def test_teach_authorized_rejects_agent_subs_and_absent_sub():
-    assert teach_authorized(_teach_task(sub="service:room"))
-    assert teach_authorized(_teach_task(sub="kobo-room"))
+    assert teach_authorized(_teach_task(sub="service:kobo"))
+    assert teach_authorized(_teach_task(sub="operator:richard"))
+    # An allowlist since #195: anything not listed is refused.
+    assert not teach_authorized(_teach_task(sub="kobo-room"))
+    assert not teach_authorized(_teach_task(sub="service:room"))
     assert not teach_authorized(_teach_task(sub="agent:ward"))
     # `persona:` is what cabal ACTUALLY mints for an agent; `agent:` is the
     # format this gate used to check and nothing has ever produced (#43). The

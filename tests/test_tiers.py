@@ -19,6 +19,8 @@ tiers:
     api_key_env: LOCAL_KEY
     context_tokens: 45000
     max_repeats: 3
+    max_tokens: 16384
+    thinking: {mode: off}
   fast: balanced
 """
 
@@ -186,3 +188,42 @@ def test_the_trace_line_says_pinned_for_a_pinned_id(tmp_path, tiers):
     event = next(e for e in agent.seen if e["type"] == "model_resolved")
     out = CliRunner().invoke(__import__("click").command()(lambda: _print_event(event)))
     assert "(pinned)" in out.output and "fell back" not in out.output
+
+
+# --- the reply ceiling and the thinking budget are per-tier settings (#240) ---------
+
+
+def test_a_tier_fills_max_tokens_and_thinking_when_the_bundle_is_silent(tmp_path, tiers):
+    s = load(bundle(tmp_path, "  id: balanced\n")).bundle.spec
+    assert s.model.max_tokens == 16384
+    assert s.model.thinking is not None
+    assert s.model.thinking.mode == "off"
+    assert s.model.thinking.budget_tokens is None
+
+
+def test_a_bundles_own_thinking_setting_wins_over_the_tier(tmp_path, tiers):
+    s = load(bundle(tmp_path, "  id: balanced\n  thinking:\n    mode: on\n")).bundle.spec
+    assert s.model.thinking.mode == "on"
+    assert s.model.max_tokens == 16384  # not set by the bundle, so the tier's
+
+
+def test_a_tier_with_no_thinking_entry_leaves_the_bundle_silent(tmp_path, monkeypatch):
+    path = tmp_path / "tiers.yaml"
+    path.write_text("tiers:\n  fast: {engine: litellm, id: openai/local}\n")
+    monkeypatch.setenv("DAEDALUS_TIERS", str(path))
+    monkeypatch.delenv("DAEDALUS_ENGINE", raising=False)
+    s = load(bundle(tmp_path, "  id: fast\n")).bundle.spec
+    assert s.model.thinking is None
+    assert s.model.max_tokens == 8192
+
+
+def test_a_bare_yaml_off_is_the_word_off(tmp_path):
+    # YAML 1.1 parses `off` as False; the fixture above writes it bare on purpose.
+    s = bundle(tmp_path, "  id: m\n  thinking:\n    mode: on\n").spec
+    assert s.model.thinking.mode == "on"
+
+
+def test_a_thinking_budget_below_the_providers_floor_is_refused(tmp_path):
+    # Bundle.load lets pydantic's error through (a ValueError), as for every field.
+    with pytest.raises(ValueError, match="budget_tokens"):
+        bundle(tmp_path, "  id: m\n  thinking:\n    budget_tokens: 512\n")

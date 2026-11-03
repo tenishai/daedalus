@@ -483,11 +483,59 @@ async def test_the_cooldown_sentinel_is_not_a_real_point_on_the_clock(key, monke
     assert claims["sub"] == "rook:1"
 
 
-def test_gets_stay_open_when_auth_is_configured(client):
-    """Auth gates dispatch. The card is a public document (cabal serves its
-    agents' cards openly too); the events door is the kaminos-auth item."""
+def test_card_and_health_gets_stay_open_when_auth_is_configured(client):
+    """The card is a public document (cabal serves its agents' cards openly
+    too) and healthz carries nothing. /events is gated: see below."""
     assert client.get("/healthz").status_code == 200
     assert client.get("/.well-known/agent-card.json").status_code == 200
+
+
+def _bus_with_a_secret():
+    from daedalus.events import EventBus
+
+    bus = EventBus()
+    bus.publish({"type": "tool_result", "name": "files.read", "content": "SECRET-BODY"})
+    return bus
+
+
+def test_events_without_a_token_is_401_when_auth_is_configured(key, monkeypatch):
+    """#196: the replay alone holds the last 100 events, tool results included.
+    A finite stream stands in so a regression fails instead of hanging."""
+    import daedalus.transports.a2a as a2a
+
+    async def finite(events, content=False):
+        yield "data: SECRET-BODY\n\n"
+
+    monkeypatch.setattr(a2a, "sse_stream", finite)
+    client = TestClient(
+        build_a2a_app(
+            EchoHandler(), events=_bus_with_a_secret(), verifier=verifier_with(CountingFetch(key))
+        )
+    )
+    for headers in ({}, auth_header("not-a-jwt"), auth_header(mint(key, aud="someone-else"))):
+        response = client.get("/events", headers=headers)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert "SECRET-BODY" not in response.text
+
+
+def test_events_with_a_valid_token_streams(key, monkeypatch):
+    """The authorised path still reaches the stream. The real stream never
+    ends, and TestClient buffers to completion, so a finite one stands in."""
+    import daedalus.transports.a2a as a2a
+
+    async def finite(events, content=False):
+        yield "data: {}\n\n"
+
+    monkeypatch.setattr(a2a, "sse_stream", finite)
+    client = TestClient(
+        build_a2a_app(
+            EchoHandler(), events=_bus_with_a_secret(), verifier=verifier_with(CountingFetch(key))
+        )
+    )
+    response = client.get("/events", headers=auth_header(mint(key)))
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
 
 
 def test_agent_wiring_validates_auth_config():
@@ -566,53 +614,44 @@ def test_peer_dispatch_overwrites_wire_supplied_sub_when_verified():
     assert handler.received.metadata[VERIFIED_SUB_KEY] == "agent:ward"
 
 
-def test_rpc_message_send_stamps_verified_sub():
-    """The continuation-turn (taskId) stamp MUST refresh, not persist from turn one.
-    This test proves the stamp is stamped per-request by using different verifier
-    claims on the second (taskId) request and asserting the metadata was updated."""
-    handler = RecordingHandler()
-    # Use claims_sequence to return different sub on the second call
-    verifier = FakeVerifier(
-        claims_sequence=[
-            {"sub": "service:room"},    # First request (fresh task)
-            {"sub": "service:other"},   # Second request (continuation)
-        ]
-    )
-    client = TestClient(build_a2a_app(handler, verifier=verifier))
+class ForgingHandler(RecordingHandler):
+    """Writes a forged sub into the task it returns, as a buggy or hostile
+    handler could. The next turn must not inherit it."""
 
-    # First request: create a new task
-    fresh = client.post(
+    async def handle_task(self, task: Task) -> Task:
+        self.received = task.model_copy(deep=True)
+        done = task.reply(f"echo: {task.user_text()}")
+        done.metadata[VERIFIED_SUB_KEY] = "operator:forged"
+        return done
+
+
+def _send(client, text, task_id=None, rpc_id=1):
+    message = {"role": "user", "parts": [{"kind": "text", "text": text}]}
+    if task_id is not None:
+        message["taskId"] = task_id
+    return client.post(
         "/",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "message/send",
-            "params": {"message": {"role": "user", "parts": [{"kind": "text", "text": "hi"}]}},
-        },
+        json={"jsonrpc": "2.0", "id": rpc_id, "method": "message/send",
+              "params": {"message": message}},
         headers=auth_header("unused"),
     ).json()
+
+
+def test_rpc_message_send_stamps_verified_sub():
+    """The continuation-turn (taskId) stamp MUST refresh per request, not
+    persist from the stored task. The handler writes a forged sub into the
+    task it returns; the continuation must arrive carrying the verified one."""
+    handler = ForgingHandler()
+    client = TestClient(
+        build_a2a_app(handler, verifier=FakeVerifier({"sub": "service:room"}))
+    )
+    fresh = _send(client, "hi")
     assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
     task_id = fresh["result"]["id"]
 
-    # Second request: continuation turn with different claims
-    client.post(
-        "/",
-        json={
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "message/send",
-            "params": {
-                "message": {
-                    "role": "user",
-                    "parts": [{"kind": "text", "text": "again"}],
-                    "taskId": task_id,
-                }
-            },
-        },
-        headers=auth_header("unused"),
-    )
-    # PROVE the stamp was refreshed: it should be the NEW sub, not the old one
-    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:other"
+    again = _send(client, "again", task_id=task_id, rpc_id=2)
+    assert "result" in again, again
+    assert handler.received.metadata[VERIFIED_SUB_KEY] == "service:room"
 
 
 def test_verifier_claims_without_sub_leave_key_absent():

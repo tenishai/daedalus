@@ -75,6 +75,41 @@ class BudgetSpec(_WarnExtra):
     per_task_tokens: int | None = None
 
 
+class ThinkingSpec(_WarnExtra):
+    """How much the model may think before it answers, kept apart from the visible
+    reply's `max_tokens` (tenishai/daedalus#240). Providers that count thinking against
+    `max_tokens` could spend the whole reply budget on it: a one-line answer came back
+    as `[reply truncated ...]` twice on the same day. The litellm engine only; the
+    provider table in daedalus.llm says what each route is sent."""
+
+    # auto: ask for thinking on models known to reason (Claude 3.7 and later), send
+    # nothing elsewhere. on: always ask. off: say so where the route has a way to.
+    mode: Literal["auto", "off", "on"] = Field(
+        default="auto",
+        description="auto asks known reasoning models to think; on always asks; off "
+        "turns it off where the route can.",
+    )
+    # Tokens of thinking the model may spend ON TOP of max_tokens: the request's
+    # max_tokens is raised by this much so the visible reply keeps its whole budget.
+    # Claude's floor is 1024. Unset: 4096 (daedalus.llm.DEFAULT_THINKING_BUDGET).
+    budget_tokens: int | None = Field(
+        default=None,
+        ge=1024,
+        description="Thinking tokens added on top of max_tokens (default 4096, floor 1024).",
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_booleans_are_words(cls, value):
+        # YAML 1.1 reads a bare `off`/`on` as a boolean, so `thinking: {mode: off}` in a
+        # tiers file or agent.yaml arrives here as False. Take it as the word it was.
+        if value is False:
+            return "off"
+        if value is True:
+            return "on"
+        return value
+
+
 class ModelSpec(_WarnExtra):
     # A concrete model id, or (after ${VAR} expansion) one of the tier words
     # fast/balanced/best, resolved through DAEDALUS_TIERS (daedalus.tiers,
@@ -83,7 +118,31 @@ class ModelSpec(_WarnExtra):
     # MY_MODEL set to an empty string expands to "" and fails to load ("model needs an
     # id"); it does not fall back to the tier.
     id: str | None = None
-    max_tokens: int = 8192
+    # The visible reply's ceiling in tokens, sent to the provider as max_tokens (every
+    # provider requires one). 8192 bounds cost and fits kobo's 180 s relay timeout; a
+    # tier entry may raise it per deployment. Thinking is budgeted separately
+    # (`thinking`, tenishai/daedalus#240), so this is the answer's budget alone.
+    max_tokens: int = Field(
+        default=8192,
+        gt=0,
+        description="The visible reply's ceiling in tokens; thinking is budgeted "
+        "separately under thinking.budget_tokens.",
+    )
+    # None: a tier entry may fill it; otherwise mode auto with the default budget.
+    thinking: ThinkingSpec | None = Field(
+        default=None,
+        description="Thinking budget, kept apart from max_tokens (litellm engine only).",
+    )
+    # Seconds one model call may take before it fails (#201), passed to litellm as
+    # `timeout`. Without it litellm waits 6000 s. 120 s fits a full max_tokens reply
+    # from a hosted model and stays under kobo's 180 s relay timeout. A tier entry
+    # fills it when the bundle doesn't set it. The litellm engine only: Claude Code
+    # manages its own model calls.
+    request_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description="Seconds one model call may take (litellm engine only).",
+    )
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
@@ -229,12 +288,28 @@ class CloudTrailSpec(_WarnExtra):
     pod's own workload identity federates into an AWS role scoped to one
     CloudTrail Lake event data store -- no stored credential anywhere, and
     the scoping lives in AWS IAM, not here. Stacks alongside the primary
-    provider exactly like `github`. Absent role_arn = the block is off."""
+    provider exactly like `github`.
+
+    Two ways to a credential. `role_arn`: the pod assumes the role itself
+    with its own cloud identity. `bab_url` + `bab_integration`: the pod asks
+    the room's permission service for a one-hour lease, proving itself with
+    the service account token projected at `bab_token_file` (audience
+    `bab`); the service holds the role, checks what this agent was granted
+    and names the agent in the session. With both set the lease wins. With
+    neither, the block is off."""
 
     role_arn: str | None = None  # AWS role trusting this workload's identity
     event_data_store: str | None = None  # Lake event data store id
     region: str = "us-east-2"  # where the lake lives
     group_prefix: str = "engineering_"  # directory-group filter for the query
+    bab_url: str | None = None  # the room's permission service; leases replace role_arn
+    bab_integration: str | None = None  # which connected account to lease, as bab names it
+    bab_token_file: str = "/var/run/secrets/bab/token"  # projected SA token, audience bab
+
+    @property
+    def on(self) -> bool:
+        leased = bool(self.bab_url and self.bab_integration)
+        return bool(self.event_data_store) and bool(self.role_arn or leased)
 
 
 class SlackReadSpec(_WarnExtra):
@@ -272,6 +347,20 @@ class JiraSpec(_WarnExtra):
     self: str | None = None  # this agent's own name, for the broker route
 
 
+class WorkspaceSpec(_WarnExtra):
+    """Per-task workspaces (#247): a task's metadata names one folder under `parent`."""
+
+    parent: str | None = Field(
+        default=None,
+        description=(
+            "Directory holding the per-task workspaces. A builtin root written as "
+            "{workspace} or {workspace}/sub is filled per task from the folder that "
+            "task metadata daedalus_workspace names: one directory name, never a path. "
+            "A task with no valid workspace fails."
+        ),
+    )
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
@@ -281,8 +370,30 @@ class ToolsSpec(_WarnExtra):
     cloudtrail: CloudTrailSpec = Field(default_factory=CloudTrailSpec)
     slack_read: SlackReadSpec = Field(default_factory=SlackReadSpec)
     jira: JiraSpec = Field(default_factory=JiraSpec)
-    builtin: dict[str, dict] = Field(default_factory=dict)  # e.g. files: {roots: [...]}
+    # Left an untyped dict on purpose: agent.py dispatches on the group name and passes
+    # the block to the provider as keyword args. The description is where a schema
+    # reader learns the files-root refusal (tools/builtin.py _refused_root, #199).
+    builtin: dict[str, dict] = Field(
+        default_factory=dict,
+        description=(
+            "Built-in tool groups. files: {roots: [...], max_bytes} for files.read, "
+            "files.list and files.search; exec: {roots: [...], commands, env, timeout, "
+            "max_output} for exec.run, which needs approvals.ceiling.exec: true. "
+            "A files root fails the bundle at load when it is /, at or under /proc, "
+            "/sys, /dev, /run or /etc, $HOME or a directory above it, or at or under "
+            "$TECHNE_HOME. Symlinks are resolved before the check."
+        ),
+    )
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
+    workspace: WorkspaceSpec = Field(default_factory=WorkspaceSpec)
+    bind: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Tool arguments filled from task metadata on every call (#247), as "
+            "{tool: {argument: dotted.metadata.path}}. The model is not shown bound "
+            "arguments, and a call whose bound value is missing fails."
+        ),
+    )
     max_steps: int = 10
     # When the loop runs out of steps or context (#98): "stop" replies with the
     # step/context message; "wrap_up" makes one last call, with no tools offered,
@@ -300,6 +411,18 @@ class ToolsSpec(_WarnExtra):
     # a note on its result. The stop is handled like running out of steps, so
     # on_exhausted applies. None = no limit.
     max_repeats: int | None = Field(default=None, ge=2)
+    # Run tool calls the model wrote as text inside <tool_call> or <tools> tags,
+    # for models served without native tool calling (Qwen on vLLM). None = on only
+    # when model.api_base is set (a self-hosted endpoint). Text salvage skips the
+    # model's own decision to call, so a reply quoting a caller's tagged JSON runs
+    # it (#200); turn it off for a self-hosted model that calls tools natively.
+    salvage_text_calls: bool | None = Field(
+        default=None,
+        description=(
+            "Run tool calls written as <tool_call>/<tools> text. "
+            "null = on only when model.api_base is set."
+        ),
+    )
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only
@@ -399,6 +522,12 @@ class ClaudeCodeSpec(_WarnExtra):
     on_denied: Literal["continue", "stop"] = "continue"
     # CLAUDE_CONFIG_DIR for the child. None = inherit the operator's environment.
     config_dir: str | None = None
+    # The directory Claude Code works in (tenishai/daedalus#242). None = wherever
+    # `daedalus run` started. `~` is expanded; a path that isn't a directory fails the
+    # load when this engine runs the bundle. Claude Code auto-approves read-only tools
+    # inside it, so it widens what runs without reaching the gates; the workspace's own
+    # .claude settings and .mcp.json still never load (setting_sources=["user"]).
+    cwd: str | None = None
 
 
 class EngineSpec(_WarnExtra):
@@ -421,6 +550,15 @@ class AgentSpec(_WarnExtra):
     # run time (daedalus run --engine), not the bundle's: the same bundle must run for
     # someone with Claude Code and someone without.
     engine: EngineSpec = Field(default_factory=EngineSpec)
+    # Seconds a task's engine run may take, model calls and tool calls together
+    # (#201). Past it the run is cancelled, tool calls included, and the task fails
+    # with reason 704. Default 600 s: ten tool steps of ordinary model and tool
+    # latency fit, and a stalled one still ends in minutes, not hours.
+    task_timeout: float = Field(
+        default=600.0,
+        gt=0,
+        description="Seconds a task's engine run may take; past it the task fails 704.",
+    )
 
 
 #: The placeholder syntax `interpolate()` (above) expands, anchored to match a whole

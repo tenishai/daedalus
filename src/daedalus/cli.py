@@ -43,6 +43,26 @@ def schema(out: str | None) -> None:
 
 
 @main.command()
+@click.argument("name", required=False)
+def guide(name: str | None) -> None:
+    """List the bundled guides, or print one as markdown (start with: guide welcome)."""
+    from daedalus.docs import MANIFEST, read_guide
+
+    if not name:
+        click.echo("Bundled guides (daedalus guide <name>):\n")
+        width = max(len(n) for n in MANIFEST)
+        for n, line in MANIFEST.items():
+            click.echo(f"  {n:<{width}}  {line}")
+        return
+    try:
+        click.echo(read_guide(name), nl=False)
+    except KeyError:
+        raise click.ClickException(
+            f"no bundled guide named {name!r}; choose one of: {', '.join(MANIFEST)}"
+        ) from None
+
+
+@main.command()
 @click.argument("name")
 @click.option("--dir", "parent", default=".", help="Parent directory for the new bundle.")
 def create(name: str, parent: str) -> None:
@@ -109,6 +129,8 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [think] {_short(event['text'])}")
     elif kind == "salvage":
         click.echo(f"  [salvage] recovered {event['count']} text-leaked tool call(s)")
+    elif kind == "bare_tool_name":
+        click.echo(f"  [tools] model sent {event['given']!r}; matched to {event['resolved']}")
     elif kind == "model_resolved":
         if event.get("source") != "id":
             fell = f", fell back from {event['tier']}" if event.get("fell_back") else ""
@@ -184,6 +206,21 @@ def _print_usage(event: dict) -> None:
         click.echo(line, err=True)
 
 
+def _metadata_option(raw: str | None, message: str | None) -> dict | None:
+    """--metadata as a dict, refused before the bundle loads when it isn't a JSON object."""
+    if raw is None:
+        return None
+    if message is None:
+        raise click.UsageError("--metadata applies to a one-shot run; pass -m too.")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"--metadata is not JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise click.UsageError("--metadata must be a JSON object")
+    return value
+
+
 @main.command()
 @click.argument("bundle_path")
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
@@ -194,12 +231,24 @@ def _print_usage(event: dict) -> None:
     default=None,
     help="With -m: recall personal memory on this text instead of MESSAGE.",
 )
+@click.option(
+    "--metadata",
+    default=None,
+    help="With -m: a JSON object merged into the task's metadata, e.g. "
+    '\'{"daedalus_workspace": "src"}\' for a bundle with tools.workspace (#247).',
+)
 def run(
-    bundle_path: str, message: str | None, verbose: bool, engine: str | None, recall: str | None
+    bundle_path: str,
+    message: str | None,
+    verbose: bool,
+    engine: str | None,
+    recall: str | None,
+    metadata: str | None,
 ) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
     if recall is not None and message is None:
         raise click.UsageError("--recall applies to a one-shot run; pass -m too.")
+    extra = _metadata_option(metadata, message)
 
     def on_event(event: dict) -> None:
         if verbose:
@@ -211,7 +260,7 @@ def run(
 
         async def one_shot():
             try:
-                return await run_once(agent, message, recall=recall)
+                return await run_once(agent, message, recall=recall, metadata=extra)
             finally:
                 await agent.aclose()
 

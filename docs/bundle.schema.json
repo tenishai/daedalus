@@ -179,6 +179,18 @@
           ],
           "default": null,
           "title": "Config Dir"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
         }
       },
       "title": "ClaudeCodeSpec",
@@ -186,7 +198,7 @@
     },
     "CloudTrailSpec": {
       "additionalProperties": true,
-      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`. Absent role_arn = the block is off.",
+      "description": "A cloud-lane SIDECAR block (2026-09-03 cloud-access ruling): the\npod's own workload identity federates into an AWS role scoped to one\nCloudTrail Lake event data store -- no stored credential anywhere, and\nthe scoping lives in AWS IAM, not here. Stacks alongside the primary\nprovider exactly like `github`.\n\nTwo ways to a credential. `role_arn`: the pod assumes the role itself\nwith its own cloud identity. `bab_url` + `bab_integration`: the pod asks\nthe room's permission service for a one-hour lease, proving itself with\nthe service account token projected at `bab_token_file` (audience\n`bab`); the service holds the role, checks what this agent was granted\nand names the agent in the session. With both set the lease wins. With\nneither, the block is off.",
       "properties": {
         "role_arn": {
           "anyOf": [
@@ -220,6 +232,35 @@
         "group_prefix": {
           "default": "engineering_",
           "title": "Group Prefix",
+          "type": "string"
+        },
+        "bab_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bab Url"
+        },
+        "bab_integration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bab Integration"
+        },
+        "bab_token_file": {
+          "default": "/var/run/secrets/bab/token",
+          "title": "Bab Token File",
           "type": "string"
         }
       },
@@ -518,6 +559,7 @@
         "max_tokens": {
           "anyOf": [
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             },
             {
@@ -526,7 +568,35 @@
             }
           ],
           "title": "Max Tokens",
+          "description": "The visible reply's ceiling in tokens; thinking is budgeted separately under thinking.budget_tokens.",
           "default": 8192
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThinkingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Thinking budget, kept apart from max_tokens (litellm engine only)."
+        },
+        "request_timeout": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Request Timeout",
+          "description": "Seconds one model call may take (litellm engine only).",
+          "default": 120.0
         },
         "api_base": {
           "anyOf": [
@@ -614,6 +684,51 @@
       "title": "SlackReadSpec",
       "type": "object"
     },
+    "ThinkingSpec": {
+      "additionalProperties": true,
+      "description": "How much the model may think before it answers, kept apart from the visible\nreply's `max_tokens` (tenishai/daedalus#240). Providers that count thinking against\n`max_tokens` could spend the whole reply budget on it: a one-line answer came back\nas `[reply truncated ...]` twice on the same day. The litellm engine only; the\nprovider table in daedalus.llm says what each route is sent.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "off",
+                "on"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Mode",
+          "description": "auto asks known reasoning models to think; on always asks; off turns it off where the route can.",
+          "default": "auto"
+        },
+        "budget_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1024,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "description": "Thinking tokens added on top of max_tokens (default 4096, floor 1024).",
+          "title": "Budget Tokens"
+        }
+      },
+      "title": "ThinkingSpec",
+      "type": "object"
+    },
     "ToolsSpec": {
       "additionalProperties": true,
       "properties": {
@@ -667,6 +782,7 @@
             "additionalProperties": true,
             "type": "object"
           },
+          "description": "Built-in tool groups. files: {roots: [...], max_bytes} for files.read, files.list and files.search; exec: {roots: [...], commands, env, timeout, max_output} for exec.run, which needs approvals.ceiling.exec: true. A files root fails the bundle at load when it is /, at or under /proc, /sys, /dev, /run or /etc, $HOME or a directory above it, or at or under $TECHNE_HOME. Symlinks are resolved before the check.",
           "title": "Builtin",
           "type": "object"
         },
@@ -676,6 +792,20 @@
           },
           "title": "Allow",
           "type": "array"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceSpec"
+        },
+        "bind": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "description": "Tool arguments filled from task metadata on every call (#247), as {tool: {argument: dotted.metadata.path}}. The model is not shown bound arguments, and a call whose bound value is missing fails.",
+          "title": "Bind",
+          "type": "object"
         },
         "max_steps": {
           "anyOf": [
@@ -740,6 +870,23 @@
           ],
           "default": null,
           "title": "Max Repeats"
+        },
+        "salvage_text_calls": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "description": "Run tool calls written as <tool_call>/<tools> text. null = on only when model.api_base is set.",
+          "title": "Salvage Text Calls"
         }
       },
       "title": "ToolsSpec",
@@ -758,6 +905,27 @@
         "kind"
       ],
       "title": "TransportSpec",
+      "type": "object"
+    },
+    "WorkspaceSpec": {
+      "additionalProperties": true,
+      "description": "Per-task workspaces (#247): a task's metadata names one folder under `parent`.",
+      "properties": {
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Directory holding the per-task workspaces. A builtin root written as {workspace} or {workspace}/sub is filled per task from the folder that task metadata daedalus_workspace names: one directory name, never a path. A task with no valid workspace fails.",
+          "title": "Parent"
+        }
+      },
+      "title": "WorkspaceSpec",
       "type": "object"
     }
   },
@@ -816,6 +984,21 @@
     },
     "engine": {
       "$ref": "#/$defs/EngineSpec"
+    },
+    "task_timeout": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+        }
+      ],
+      "title": "Task Timeout",
+      "description": "Seconds a task's engine run may take; past it the task fails 704.",
+      "default": 600.0
     }
   },
   "required": [
@@ -826,5 +1009,5 @@
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/tenishai/daedalus/blob/main/docs/bundle.schema.json",
-  "version": "0.5.5"
+  "version": "0.7.0"
 }

@@ -1,7 +1,7 @@
 # Daedalus — design
 
 **Status: IMPLEMENTED AND RELEASED.** This began as a pre-implementation design
-doc and is kept as the architectural rationale, not as a plan. daedalus 0.5.5 has
+doc and is kept as the architectural rationale, not as a plan. daedalus 0.7.0 has
 shipped; §8 was written against live behaviour. Where this document and the code
 disagree, the code is right — `src/daedalus/protocols.py` is the authority on the
 Protocol seams.
@@ -63,12 +63,18 @@ prudence/
 name: prudence
 card: agent-card.json
 persona: persona.md
+task_timeout: 600                      # seconds per task, tool calls included;
+                                        # past it the task fails with reason 704
 
 model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string, or a tier word
                                         # (fast | balanced | best, §1.2a)
   # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
-  max_tokens: 8192
+  max_tokens: 8192                     # the visible reply's ceiling (§2.3)
+  thinking:                            # apart from max_tokens (#240); litellm engine
+    mode: auto                         # auto | off | on
+    budget_tokens: 4096                # added on top of max_tokens; floor 1024
+  request_timeout: 120                 # seconds per model call (default 120)
   budget:
     per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
 
@@ -81,7 +87,12 @@ transports:
                                         # `approvers: [U012ABC]`; without them
                                         # every tier-2 action is denied
   - kind: a2a
-    port: 9200
+    port: 9200                          # no `auth` block = NO AUTH; boot warns off loopback
+    # auth:                             # cabal-minted JWTs; see docs/arch/a2a-wire.md
+    #   jwks_url: http://127.0.0.1:7400/.well-known/jwks.json
+    #   issuer: cabal-core
+    #   audience: scout-svc
+    #   operator_subs: ["operator:*", "service:kobo"]  # the default; who may use operator lanes
   - kind: cli                           # always available for `daedalus chat`
 
 tools:
@@ -92,7 +103,9 @@ tools:
     url: http://cabal:8300              # list_colleagues + ask_colleague over A2A
     token_env: CABAL_AGENT_TOKEN        # unset/empty = degraded, never a boot failure
   builtin:                              # in-process tool groups
-    files: {roots: ["."]}               # files.read/list/search, read-only, rooted
+    files: {roots: ["."]}               # files.read/list/search, read-only, rooted;
+                                        # refused at load: /, /proc /sys /dev /run /etc,
+                                        # $HOME or above it, $TECHNE_HOME
     exec:                               # exec.run: a command in the agent's own workspace;
       roots: ["."]                      # needs approvals.ceiling.exec: true (below).
       commands: [python, pytest, git]   # optional allowlist of bare program names
@@ -101,6 +114,9 @@ tools:
   github:
     branch_prefix: daedalus             # open_pr branches: <prefix>/<agent>/<slug>
   max_steps: 10
+  # salvage_text_calls: true            # run tool calls a model writes as text inside
+                                        # <tool_call>/<tools> tags; unset = on only
+                                        # when model.api_base is set
   on_exhausted: stop                    # stop | wrap_up: one last tool-free call for
                                         # a partial answer when steps or context run out
   context_tokens: 45000                 # optional: exhausted once a prompt reaches this
@@ -123,8 +139,9 @@ engine:                                 # used with --engine claude-code (§2.3b
     builtin_tools: [Read, Grep]         # Claude Code built-ins allowed; default none
     permission_mode: default            # default | dontAsk | acceptEdits | plan
     on_denied: continue                 # continue | stop, when a gate denies a built-in
-    # binary, model, config_dir: optional; unset = the SDK's bundled CLI,
-    # the config dir's model, the operator's CLAUDE_CONFIG_DIR
+    # binary, model, config_dir, cwd: optional; unset = the SDK's bundled CLI,
+    # the config dir's model, the operator's CLAUDE_CONFIG_DIR, and the directory
+    # daedalus started in (#242)
 
 approvals:
   ceiling:                              # tier 1 — hard capability ceiling
@@ -133,11 +150,11 @@ approvals:
     exec: true                          # required when tools.builtin.exec is set, or the
                                         # bundle won't load; commands run as the agent in
                                         # its container (not a security boundary)
-  gates:                                # tier 2 — plan/diff/apply
+  gates:                                # tier 2 — approval before the call
     - match: "github.pr_merge"
       require: plan_approval
   escalation:                           # tier 3 — human in the loop
-    route: slack:#pr-reviews            # or: cli (only slack: routes are delivered today)
+    route: slack:#pr-reviews            # only slack: routes are acted on
 ```
 
 Loaded into Pydantic models with `extra="allow"` on unknown sections (warn,
@@ -164,6 +181,8 @@ tiers:
     api_key_env: LOCAL_API_KEY
     context_tokens: 45000              # this model on this hardware
     max_repeats: 3
+    max_tokens: 16384                  # the reply ceiling for every bundle on this tier
+    thinking: {mode: off}              # or {mode: on, budget_tokens: 4096}
   # a tier can alias another (balanced: best), or be null: not offered here
 ```
 
@@ -173,8 +192,11 @@ The rules (`src/daedalus/tiers.py`, `daedalus.agent._resolve_model`):
 - **The tier's engine is the default.** An explicit `--engine` or `DAEDALUS_ENGINE` that
   disagrees is refused at load, not silently obeyed.
 - **The entry fills what the bundle left unset**: `id`, `api_base`, `api_key_env`,
-  `max_tokens`, `tools.context_tokens`, `tools.max_repeats`, and the Claude Code model.
-  A value the bundle set wins.
+  `max_tokens`, `thinking`, `request_timeout`, `tools.context_tokens`, `tools.max_repeats`,
+  and the Claude Code model.
+  A value the bundle set wins. The bundle default for `max_tokens` stays 8192; a
+  deployment that runs reasoning models raises it on the tier (#240), which is the one
+  place the room's org config has to say so.
 - **A tier word never reaches LiteLLM as a model name.** With no tiers file named, load
   refuses naming the tier and `DAEDALUS_TIERS`; with a tiers file that doesn't offer the
   tier, load refuses naming the tier and the tiers the file does offer.
@@ -255,10 +277,14 @@ class Approver(Protocol):            # tier 2/3 decisions (see §3)
 class Transport(Protocol):           # start/stop; delivers Tasks to the handler
 ```
 
-Default implementations ship in-tree (in-memory/no-op/SQLite). Real backends
-arrive via extras and entry points (`daedalus.memory`, `daedalus.tools`,
-`daedalus.transports`): `tenish-daedalus[techne]`, `tenish-daedalus[liminal]`,
-`tenish-daedalus[slack]`. Third parties add backends without touching core.
+Default implementations ship in-tree (in-memory/no-op/SQLite). The real backends
+ship in-tree too, and agent.yaml picks them; an extra only installs what a backend
+imports: `tenish-daedalus[techne]` for `memory.personal: techne`,
+`tenish-daedalus[slack]` for the slack transport. There is no liminal extra:
+`tools.provider: liminal` (or `tools.liminal.url`, which adds the gateway beside
+another provider) needs the `tenish-liminal` package installed on its own, and the
+bundle fails to load without it. There are no entry points, so a new backend is a
+change to daedalus itself.
 
 ### 2.3 LLM invocation
 
@@ -269,6 +295,28 @@ provider degrades all loops together rather than thundering.
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
 DeepSeek R1 on vLLM). They will feed the visual builder's trace pane over SSE.
+
+**The reply ceiling and the thinking budget (#240).** `model.max_tokens` (default 8192)
+is the visible reply's ceiling: every provider requires an output cap, and this one bounds
+cost and keeps a full reply inside `request_timeout` and the room's 180 s relay. Providers
+count thinking against the same cap, so a reasoning-heavy turn could spend the whole
+budget before the answer started: a one-line reply came back as `[reply truncated ...]`
+twice on one day. `model.thinking` keeps the two apart. `LiteLLMClient` asks
+`daedalus.llm.thinking_kwargs` once, at construction, for the kwargs to send and the
+ceiling to send with them; every provider fact lives in the `_THINKING_ROUTES` table
+above it and nowhere else. For Claude routes (`anthropic/`, `vertex_ai/claude*`,
+`bedrock/anthropic*`), `on`, and `auto` on a 3.7-or-later id, send litellm's
+`thinking={"type": "enabled", "budget_tokens": N}` with `max_tokens + N`; the pinned
+litellm translates that for the models that take an effort level instead of a budget.
+`off` sends nothing: it is "no thinking" where thinking is opt-in, and the model's default
+where it always thinks (`disabled` is refused there). For OpenAI-compatible routes
+(`openai/`, `hosted_vllm/`) `off` and `on` send `chat_template_kwargs.enable_thinking`
+in `extra_body`, `on` with the raised ceiling; `auto` sends nothing. Routes the table does
+not know are sent nothing. When a response finishes with reason `length`, the client logs
+one INFO line (`reply truncated: model= max_tokens_sent= completion_tokens=
+reasoning_tokens= thinking=`) so the cause is readable from the agent's log; the engine
+still appends the truncated sentence to the reply, since a cut answer must not read as
+complete. A tier entry carries both settings, so the ceiling is per deployment per tier.
 
 ### 2.3a What the model sees each task
 
@@ -295,8 +343,12 @@ prompt, which names the day it summarises instead of a clock line.
    the task came from Slack (#147).
 
 The loop may add one note each when it withholds or drops tools: gated tools nobody can
-approve (#105), a tool provider that refused by policy (#156), and `ask_colleague` when
-this task is itself an answer to a colleague (#149).
+approve (#105), a tool provider that refused by policy (#156), and every credentialed tool
+when this task is itself an answer to a colleague (#149, tenishai/kobo#310): a consulted
+agent answers from what it knows and what its skills say, keeps only tools whose provider
+declares `knowledge_only`, and is told to name the tool it lacked and that the asker's
+owner can request it. The lanes that fetch a credential on demand (cloudtrail, the github
+broker, a liminal gateway call) refuse such a task as a second wall.
 
 ### 2.3b Engines
 
@@ -434,15 +486,22 @@ FastAPI stays at the edge: nothing below a transport imports it.
    `approvals.ceiling.exec` is checked once, at load: without `true`, a bundle
    that configures `tools.builtin.exec` fails to load. `approvals.ceiling.write`
    and `approvals.ceiling.hosts` are parsed but not yet enforced anywhere.
-2. **Gates** (plan/diff/apply, tier 2): matched operations must first render
-   a value-free plan (the intended action as reviewable data). The `Approver`
-   presents it (CLI prompt, Slack message, or PR when the effect targets a
-   repo — "the PR is the approval") and only then executes. Dry-run is the
-   default posture for anything matched.
-3. **Escalation** (tier 3): the agent itself, or a tripped gate/budget, emits
-   700/704 and the configured route carries it to a human; the task parks in
-   `input-required` until answered. (Not built yet: only `slack:` routes are
-   delivered, and no code sets a task to `input-required`.)
+2. **Gates** (tier 2): a matched operation is first turned into a plan,
+   `{tool, arguments, require}` with the call's full arguments (agent.py),
+   and nothing is masked: the Slack approver posts the arguments verbatim,
+   so a gate on a tool that takes a secret shows it to the approval channel.
+   The `Approver` decides: `CliApprover` asks at the terminal,
+   `SlackReactionApprover` waits for a reaction from a listed approver, and
+   the default `DenyAll` refuses, so with it a matched tool is withheld from
+   the model altogether (`_unapprovable`, #105). On a yes the tool runs for
+   real. Nothing runs in dry-run, no diff is rendered, and no approver defers
+   to a pull request; `require` travels in the plan but nothing reads it.
+3. **Escalation** (tier 3): a task the runtime can't finish (a deadline, a
+   down tool provider, an engine error) ends `failed` with reason 704 in its
+   metadata, and the transport carries it to a human: Slack replies with the
+   escalation, cabal reads the reason code. Nothing parks a task: no code sets
+   `input-required`, and nothing emits 700 today, so an answer arrives as a
+   new message on the task, not as a resumption.
 
 **Approver routing is process-wide, by design.** The approver is an agent
 collaborator, not a transport property: when a Slack transport is serving
@@ -456,8 +515,11 @@ DenyAll and fail closed. (Decided 2026-07-06 after the visual builder's canvas
 surfaced the interplay; documented rather than "fixed" — it is the correct
 behavior, arrived at by accident.)
 
-Secrets hygiene primitives (mask, placeholder-refusal) ship in core and are
-applied to anything approval-bound or logged.
+There are no secrets-hygiene primitives in core: nothing masks values in a
+plan, an approval message or a log line, and nothing refuses a placeholder.
+The one redaction is the a2a `/events` trace, which replaces tool arguments,
+results and reasoning text with their length unless `DAEDALUS_TRACE_CONTENT=1`
+(transports/a2a.py).
 
 ## 4. The visual builder (companion project)
 

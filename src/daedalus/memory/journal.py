@@ -2,7 +2,7 @@
 reads. Checkpoints cannot serve this purpose -- a task's checkpoint row is
 dropped the moment the task completes (engines/litellm.py, LiteLLMEngine.run),
 and checkpoints carry neither timestamps in their payload nor a list API. This journal is
-the opposite trade: one row per context_id, upserted AT completion, kept
+the opposite trade: one row per (context_id, owner), upserted AT completion, kept
 for RETENTION_DAYS, pruned on every write.
 
 It lives in journal.db beside the techne db on the agent's persistent
@@ -45,6 +45,11 @@ def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute(_SCHEMA)
+    # The verified sub that wrote the row (#212); NULL without auth. Added in
+    # place on a journal from before it, since rows live only RETENTION_DAYS.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}
+    if "owner" not in columns:
+        conn.execute("ALTER TABLE conversations ADD COLUMN owner TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_conversations_created_at "
         "ON conversations(created_at)"
@@ -57,6 +62,7 @@ def record(
     context_id: str,
     history: list[dict],
     *,
+    owner: str | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record one completed conversation, upserted per context_id.
@@ -68,18 +74,26 @@ def record(
     the upsert an N-turn thread would leave N rows, each holding a bigger
     copy of the same conversation (quadratic growth); the prior row for
     this context_id is deleted before the new one is inserted, in the same
-    transaction, so exactly one row per context_id ever survives. Rows
+    transaction, so exactly one row per (context_id, owner) ever survives. Rows
     older than RETENTION_DAYS are pruned in the same write, so the journal
-    is self-limiting without any separate sweeper."""
+    is self-limiting without any separate sweeper.
+
+    `owner` is the task's verified sub under auth (#212). The upsert replaces
+    only the row with the same context_id AND owner: the contextId is the
+    caller's choice, so without this another sub could reuse it and replace
+    this caller's row. Without auth every row's owner is NULL, as before."""
     moment = now or datetime.now(UTC)
     cutoff = (moment - timedelta(days=RETENTION_DAYS)).isoformat()
     conn = _connect(Path(path))
     try:
-        conn.execute("DELETE FROM conversations WHERE context_id = ?", (context_id,))
         conn.execute(
-            "INSERT INTO conversations (context_id, history, created_at) "
-            "VALUES (?, ?, ?)",
-            (context_id, json.dumps(history), moment.isoformat()),
+            "DELETE FROM conversations WHERE context_id = ? AND owner IS ?",
+            (context_id, owner),
+        )
+        conn.execute(
+            "INSERT INTO conversations (context_id, history, created_at, owner) "
+            "VALUES (?, ?, ?, ?)",
+            (context_id, json.dumps(history), moment.isoformat(), owner),
         )
         conn.execute("DELETE FROM conversations WHERE created_at < ?", (cutoff,))
         conn.commit()

@@ -110,3 +110,17 @@ async def test_the_litellm_engine_runs_a_turn_on_its_own(tmp_path):
     assert task.agent_text() == "done"
     assert seen == ["files.read"]
     assert events == ["tool_call", "tool_result"]
+
+
+async def test_the_bridge_refuses_mcp_1x_naming_its_extra(monkeypatch):
+    """tenishai/ergon#34: the claude-code extra may now bring mcp 1.x, which the bridge's
+    2.x server API can't run on, so it says which extra it needs instead of a TypeError."""
+    import importlib.metadata
+
+    import pytest
+
+    from daedalus.engines.bridge import ToolBridge
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.30.0")
+    with pytest.raises(RuntimeError, match=r"tenish-daedalus\[bridge\]"):
+        await ToolBridge.__aenter__(object.__new__(ToolBridge))

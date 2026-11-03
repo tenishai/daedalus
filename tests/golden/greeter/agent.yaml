@@ -4,7 +4,11 @@ persona: persona.md
 
 model:
   id: ${GREETER_MODEL:-anthropic/claude-sonnet-4-5}
-  max_tokens: 1024
+  max_tokens: 1024        # the visible reply's ceiling; thinking is budgeted below
+  thinking:               # (#240) auto: known reasoning models think, within budget_tokens
+    mode: auto            # on top of max_tokens; off: ask the route not to think
+    budget_tokens: 2048
+  request_timeout: 60     # seconds per model call (#201; default 120)
   budget:
     per_task_tokens: 50000
 
@@ -18,6 +22,8 @@ tools:
 memory:
   personal: none
   team: none
+
+task_timeout: 300         # seconds per task, model and tool calls together (#201; default 600)
 
 approvals:
   ceiling:

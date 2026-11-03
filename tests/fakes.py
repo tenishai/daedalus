@@ -30,10 +30,20 @@ class ScriptedLLM:
 class FakeTools:
     """A ToolProvider with fixed specs; records calls, returns canned results."""
 
-    def __init__(self, specs: list[dict], results: dict[str, str] | None = None):
+    def __init__(
+        self,
+        specs: list[dict],
+        results: dict[str, str] | None = None,
+        *,
+        knowledge_only: bool = False,
+    ):
         self.specs = specs
         self.results = results or {}
         self.calls: list[tuple[str, dict]] = []
+        # The default is the real one: a provider is credentialed unless it
+        # opts in (kobo#310), so a test must say so to keep its tools offered
+        # on a colleague's task.
+        self.knowledge_only = knowledge_only
 
     async def tools(self) -> list[dict]:
         return self.specs
@@ -65,5 +75,5 @@ class CannedMemory:
     async def recall(self, query: str, k: int = 5) -> list[str]:
         return self.items[:k]
 
-    async def commit(self, content: str, kind: str = "fact") -> None:
-        self.committed.append((content, kind))
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
+        self.committed.append((content, kind, tags) if tags else (content, kind))

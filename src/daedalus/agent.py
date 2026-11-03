@@ -23,6 +23,7 @@ from daedalus.engines.litellm import (
 from daedalus.events import current_context as event_context
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
+    DEFAULT_OPERATOR_SUBS,
     DELETE_KEY,
     FILENAME_KEY,
     KNOWLEDGE_MARKER,
@@ -32,6 +33,7 @@ from daedalus.memory.teach import (
     apply_knowledge,
     apply_knowledge_delete,
     apply_teach,
+    operator_subs_from,
     teach_authorized,
 )
 from daedalus.memory.tooling import apply_tool
@@ -57,6 +59,7 @@ from daedalus.tiers import (
     pick,
     tiers_path,
 )
+from daedalus.tools import workspace
 
 log = logging.getLogger(__name__)
 
@@ -141,22 +144,49 @@ def _inbound_depth(task: Task, key: str) -> int:
         return 0
 
 
-def _with_inbound_note(messages: list[dict]) -> list[dict]:
-    """Tell an agent answering a colleague that it can't forward the question
-    (#149), once -- a resumed task's checkpointed prompt already has it."""
+#: Longest asker name carried into a prompt or a refusal; the key rides in
+#: from the wire unvalidated, so it is bounded and flattened before use.
+_ASKER_MAX = 64
+
+
+def _inbound_asker(task: Task, key: str) -> str | None:
+    """The asking agent's name from task metadata (kobo#310), or None when
+    absent or not a non-blank string. Whitespace is collapsed and the value
+    bounded: it is quoted back to the model, never used as an identity."""
+    raw = task.metadata.get(key)
+    if not isinstance(raw, str):
+        return None
+    name = " ".join(raw.split())
+    return name[:_ASKER_MAX] or None
+
+
+def _with_inbound_note(messages: list[dict], asker: str | None) -> list[dict]:
+    """Tell an agent answering a colleague that it has no outside tools and
+    can't forward the question (#149, kobo#310), once -- a resumed task's
+    checkpointed prompt already has it."""
     system = messages[0]
     if system.get("role") != "system" or _INBOUND_HEADING in str(system.get("content")):
         return messages
+    who = asker or "the asking agent"
     note = (
         f"\n\n{_INBOUND_HEADING}\n"
-        "Another agent asked you this. Answer from your own tools, or say in one "
-        "line that you can't. You can't ask other colleagues while answering one."
+        "Another agent asked you this. Answer from what you know and what your "
+        "skills say. You have no outside tools while answering a colleague; if the "
+        f"answer needs one, say which and that {who}'s owner can request it. "
+        "You can't ask other colleagues while answering one."
     )
     return [{**system, "content": system["content"] + note}, *messages[1:]]
 
 
 #: Engines an operator can choose with --engine / DAEDALUS_ENGINE (tenishai/agents#51).
 ENGINES = ("litellm", "claude-code")
+
+
+def engines() -> tuple[str, ...]:
+    """ENGINES, plus the model-free `scripted` when DAEDALUS_SCRIPTED_ENGINE=1 (#227)."""
+    from daedalus.engines.scripted import ENV
+
+    return (*ENGINES, "scripted") if os.environ.get(ENV) == "1" else ENGINES
 
 
 class Agent:
@@ -194,9 +224,13 @@ class Agent:
         # engine is the default, and an explicit engine that disagrees is refused.
         self.model_resolution = self._resolve_model(explicit_engine)
         self.engine_name = explicit_engine or self.model_resolution.engine
-        if self.engine_name not in ENGINES:
+        choices = engines()
+        if self.engine_name not in choices:
+            hint = (
+                " (it needs DAEDALUS_SCRIPTED_ENGINE=1)" if self.engine_name == "scripted" else ""
+            )
             raise BundleError(
-                f"unknown engine {self.engine_name!r}; choose one of {', '.join(ENGINES)}"
+                f"unknown engine {self.engine_name!r}{hint}; choose one of {', '.join(choices)}"
             )
         if self.engine_name == "claude-code" and bundle.spec.model.budget.per_task_tokens:
             # Declare the gap and refuse, never degrade silently (#51): Claude Code runs
@@ -206,6 +240,12 @@ class Agent:
                 "enforce it; remove it, or run with --engine litellm (and, if the model "
                 "comes from a tier that runs on claude-code, pin model.id)"
             )
+        cwd = bundle.spec.engine.claude_code.cwd
+        if self.engine_name == "claude-code" and cwd and not Path(cwd).expanduser().is_dir():
+            # At load, not on the first task (#242): a typo'd workspace would otherwise
+            # run Claude Code in whatever directory daedalus started from.
+            raise BundleError(f"engine.claude_code.cwd {cwd!r} is not a directory")
+        self.operator_subs = self._operator_subs_from_spec()
         self.enforcement = Enforcement.load(bundle.path / "tools", self._tool_overlay_dir())
         if llm is None:
             import os
@@ -219,10 +259,15 @@ class Agent:
                 max_tokens=model_spec.max_tokens,
                 api_base=model_spec.api_base,
                 api_key=api_key,
+                timeout=model_spec.request_timeout,
+                thinking=model_spec.thinking,
             )
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
         self.tools = tools if tools is not None else self._tools_from_spec()
+        # At load whenever it is set, not only when a root uses {workspace}: the Claude
+        # Code engine runs in the workspace too (Prudence on PR 248).
+        self._workspace_parent()
         self.checkpoints = (
             checkpoints if checkpoints is not None else self._checkpoints_from_spec()
         )
@@ -247,24 +292,36 @@ class Agent:
         # simply never uses it.
         self._warn_on_unusable_skills()
 
+    def _operator_subs_from_spec(self) -> tuple[str, ...]:
+        """Who may drive the operator lanes: every a2a transport's
+        `auth.operator_subs`, unioned, or DEFAULT_OPERATOR_SUBS when none
+        names any (#195). A malformed list fails the bundle at load."""
+        listed: list[str] = []
+        named = False
+        for spec in self.bundle.spec.transports:
+            auth = spec.options().get("auth") if spec.kind == "a2a" else None
+            if not isinstance(auth, dict) or "operator_subs" not in auth:
+                continue
+            named = True
+            try:
+                listed.extend(operator_subs_from(auth["operator_subs"]))
+            except ValueError as exc:
+                raise BundleError(f"a2a transport auth: {exc}") from exc
+        return tuple(dict.fromkeys(listed)) if named else DEFAULT_OPERATOR_SUBS
+
     def _operator_gate(self, task: Task, lane: str) -> bool:
-        """The shared gate on the three operator-only lanes, and the ONE place
+        """The shared gate on the operator-only lanes, and the ONE place
         that records which sub reached them.
 
-        EMITS ON BOTH OUTCOMES, and the allow event is the point (#47). The
-        refusal events already existed; refusals alone cannot tell you what
-        your LEGITIMATE callers present, and that is exactly the question
-        blocking the inversion of this gate from a blocklist to an
-        `operator:` allowlist. kobo's sub is a property of one env var in one
-        cluster (`CABAL_OPERATOR_TOKEN`, propagated through cabal's re-mint),
-        so no amount of reading either repo settles it -- it has to be read
-        off a running agent. `<lane>_allowed` is how.
+        EMITS ON BOTH OUTCOMES. `<lane>_allowed` and `<lane>_refused` carry
+        the sub, so a deployment whose kobo token uses a sub outside the
+        allowlist sees exactly what to add to `auth.operator_subs` (#195).
 
         The refusal event names are unchanged on purpose: the kaminos trace
         pane consumes this stream, and renaming a signal to add a sibling is
         how you break a consumer for no reason."""
         sub = task.metadata.get(VERIFIED_SUB_KEY)
-        allowed = teach_authorized(task)
+        allowed = teach_authorized(task, self.operator_subs)
         self._emit(f"{lane}_allowed" if allowed else f"{lane}_refused", sub=sub)
         return allowed
 
@@ -287,6 +344,9 @@ class Agent:
         set itself."""
         model = self.bundle.spec.model
         cc = self.bundle.spec.engine.claude_code
+        if explicit_engine == "scripted":
+            # Never calls a model, so a tier needs no tiers file (#227).
+            return Resolution(tier=None, used=None, engine="scripted", id=model.id, source="id")
         if model.id not in TIER_NAMES:
             engine = explicit_engine or "litellm"
             shown = model.id
@@ -310,7 +370,7 @@ class Agent:
                 "engine was asked for; drop the engine choice, or pin model.id to a model"
             )
         model.id = entry.id
-        for field in ("api_base", "api_key_env", "max_tokens"):
+        for field in ("api_base", "api_key_env", "max_tokens", "request_timeout", "thinking"):
             value = getattr(entry, field)
             if value is not None and field not in model.model_fields_set:
                 setattr(model, field, value)
@@ -340,17 +400,29 @@ class Agent:
         spec = self.bundle.spec.memory
         if spec.personal == "techne":
             try:
-                import techne  # noqa: F401  — fail at load time, not mid-conversation
+                import techne.api  # noqa: F401  — fail at load time, not mid-conversation
             except ImportError as exc:
                 raise BundleError(
-                    "memory.personal is 'techne' but techne is not installed — "
-                    "pip install -e path/to/techne (github.com/tenishai/techne)"
+                    "memory.personal is 'techne' but techne 0.19.1 or later is not "
+                    "installed — pip install 'tenish-daedalus[techne]'"
                 ) from exc
             from daedalus.memory.techne import TechneMemoryStore
 
-            db_path = Path(spec.home).expanduser() / "techne.db" if spec.home else None
-            return TechneMemoryStore(db_path=db_path)
+            return TechneMemoryStore(home=spec.home)
         return NoMemory()
+
+    async def _publish_memory(self) -> None:
+        """Send this task's tagged facts to the team pool, once, at task end (#228).
+        A store without publish() (NoMemory, a test fake) has nothing to send."""
+        publish = getattr(self.memory, "publish", None)
+        if publish is None:
+            return
+        try:
+            result = await publish()
+        except Exception as exc:  # a store's publish never fails the task
+            result = {"error": str(exc)}
+        if result.get("enqueued") or result.get("synced") or result.get("error"):
+            self._emit("memory_published", **result)
 
     def _checkpoints_from_spec(self) -> CheckpointStore:
         if self.bundle.spec.checkpoints == "sqlite":
@@ -369,6 +441,28 @@ class Agent:
         from daedalus.protocols import NoBudget
 
         return NoBudget()
+
+    def _workspace_parent(self) -> Path | None:
+        """tools.workspace.parent as a directory, or None when unset (#247). Checked at
+        load: a typo'd parent would otherwise fail every task."""
+        raw = self.bundle.spec.tools.workspace.parent
+        if not raw:
+            return None
+        parent = Path(raw).expanduser()
+        if not parent.is_dir():
+            raise BundleError(f"tools.workspace.parent {raw!r} is not a directory")
+        return parent.resolve()
+
+    def _task_workspace(self, task: Task) -> Path | None:
+        """This task's workspace, None when the bundle has none; WorkspaceError when the
+        bundle has one and the task's metadata doesn't name a valid folder."""
+        raw = self.bundle.spec.tools.workspace.parent
+        if not raw:
+            return None
+        parent = Path(raw).expanduser()
+        if not parent.is_dir():  # checked at load; gone since, so this task fails (701)
+            raise workspace.WorkspaceError(f"tools.workspace.parent {raw!r} is not a directory")
+        return workspace.resolve(parent, task.metadata.get(workspace.WORKSPACE_KEY))
 
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
@@ -395,6 +489,15 @@ class Agent:
             else:
                 raise BundleError(f"unknown builtin tool group {key!r} (available: files, exec)")
             try:
+                if workspace.uses_token(config.get("roots")):
+                    parent = self._workspace_parent()
+                    if parent is None:
+                        raise BundleError(
+                            f"tools.builtin.{key} uses {workspace.TOKEN}, which needs "
+                            "tools.workspace.parent"
+                        )
+                    providers.append(workspace.WorkspaceToolProvider(group, config, parent))
+                    continue
                 providers.append(group(**config))
             except (TypeError, ValueError) as exc:
                 raise BundleError(f"tools.builtin.{key}: {exc}") from exc
@@ -460,7 +563,7 @@ class Agent:
         # The cloudtrail sidecar (cloud-access integration path, 2026-09-03):
         # same stacking rule as github -- a sidecar block, not a provider
         # value. Identity is the pod's own; there is no token to wire.
-        if spec.cloudtrail.role_arn and spec.cloudtrail.event_data_store:
+        if spec.cloudtrail.on:
             from daedalus.tools.cloudtrail import CloudTrailToolProvider
 
             try:
@@ -471,6 +574,9 @@ class Agent:
                         region=spec.cloudtrail.region,
                         group_prefix=spec.cloudtrail.group_prefix,
                         agent_name=self.bundle.spec.name,
+                        bab_url=spec.cloudtrail.bab_url,
+                        bab_integration=spec.cloudtrail.bab_integration,
+                        bab_token_file=spec.cloudtrail.bab_token_file,
                     )
                 )
             except ValueError as exc:
@@ -558,10 +664,12 @@ class Agent:
         # the tools_from_spec provider branches above), not a real cycle --
         # colleagues.py imports nothing from daedalus.agent.
         from daedalus.tools.colleagues import (
+            ASKED_BY_KEY,
             DEPTH_KEY,
             AskLedger,
             ask_ledger,
             consulted_colleagues,
+            current_consult_asker,
             current_context_id,
             current_delegation_depth,
         )
@@ -585,6 +693,7 @@ class Agent:
         # (`nan` lands on ValueError and always worked.) cabal's own parser had
         # the identical gap; both ends are fixed.
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
+        current_consult_asker.set(_inbound_asker(task, ASKED_BY_KEY))
         # A BACKGROUND TASK SPAWNED BELOW THIS LINE INHERITS THE DEPTH, because
         # asyncio.create_task copies the current context (#40 r1 Nit, filed as
         # daedalus#42). _start_revision_pass does exactly that, and its own ask
@@ -592,7 +701,7 @@ class Agent:
         # the parent's depth. Left as-is: current_context_id inherits the same
         # way, and the two call sites reachable from HERE -- _handle_teach and
         # _handle_knowledge -- both sit behind teach_authorized, which requires
-        # a verified human subject. (There is a third, in serve(), and it is the
+        # a verified sub on the operator allowlist. (There is a third, in serve(), and it is the
         # safe one: it runs at startup outside any handle_task, so it inherits
         # the contextvar's default rather than a chain's depth. Naming two of
         # three was an incomplete enumeration in a comment about which sites are
@@ -630,6 +739,7 @@ class Agent:
         # and asks unguarded, which its corroboration logic relies on.
         ask_ledger.set(AskLedger())
         result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        await self._publish_memory()
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text())
             if post.blocked:
@@ -705,6 +815,7 @@ class Agent:
                 journal.journal_path(Path(db_path)),
                 task.context_id or task.id,
                 entries,
+                owner=task.metadata.get(VERIFIED_SUB_KEY),
             )
         except Exception as exc:
             return str(exc)
@@ -902,14 +1013,17 @@ class Agent:
         return task.reply("Learned. I will remember that.")
 
     async def _handle_tool(self, task: Task) -> Task:
-        """The operator tool lane (arc3d Task 5): a fast-delivered tool
-        file, re-validated by THIS runtime against the exact same
-        mechanical contract kobo's room applies (the fast lane skips CI by
-        definition, so kobo's own validation is never trusted alone) and,
-        only once it passes, written into the overlay directory on the
-        agent's persistent volume -- never the image bundle, which resets
-        to its baked-in contents on every restart. Same authorization gate
-        as teach/knowledge: tool writes are exactly as operator-grade.
+        """The operator tool lane (arc3d Task 5): a fast-delivered Python
+        file, linted by THIS runtime with the same checks kobo's room runs
+        and written into the overlay directory on the agent's persistent
+        volume -- never the image bundle, which resets to its baked-in
+        contents on every restart.
+
+        THIS IS A CODE-DEPLOY PATH (#195). The next boot imports the file
+        and runs its module-level code as the agent, with the agent's
+        environment and volumes. The lint (memory/tooling.py) does not
+        contain that code: `__import__("os")` passes it. The only control
+        is the operator gate below, the same allowlist as teach/knowledge.
 
         No hot reload: the enforcement loader (daedalus.enforcement.
         Enforcement.load) only re-runs at process boot, so a tool delivered
@@ -960,17 +1074,72 @@ class Agent:
         # onward. The ask ledger is not checkpointed; a resumed run starts a
         # fresh one, so the per-answer cap restarts at a resume.
         from daedalus.tools.colleagues import (
+            ASKED_BY_KEY,
             DEPTH_KEY,
             AskLedger,
             ask_ledger,
+            current_consult_asker,
             current_delegation_depth,
         )
 
         current_delegation_depth.set(_inbound_depth(task, DEPTH_KEY))
+        current_consult_asker.set(_inbound_asker(task, ASKED_BY_KEY))
         ask_ledger.set(AskLedger())
-        return await self._loop(task, state["messages"])
+        result = await self._loop(task, state["messages"])
+        await self._publish_memory()
+        return result
 
     async def _loop(self, task: Task, messages: list[dict]) -> Task:
+        """The engine run, under the bundle's task deadline (#201).
+
+        Past `task_timeout` the run is cancelled where it stands: a model call
+        or a tool call awaiting inside it gets CancelledError, which nothing on
+        the call path catches (Agent._call_tool catches Exception only), so the
+        exec builtin kills its process group and the claude-code engine closes
+        its SDK stream. The task then fails with reason 704, so every transport
+        ends it like any other failed task instead of leaving it WORKING.
+        """
+        seconds = self.bundle.spec.task_timeout
+        deadline = asyncio.timeout(seconds)
+        try:
+            async with deadline:
+                return await self._run_engine(task, messages)
+        except TimeoutError:
+            if not deadline.expired():
+                raise  # some other timeout escaped the run: not ours to relabel
+        self._emit("task_timeout", seconds=seconds)
+        return task.reply(
+            f"I had to stop: this task ran past its {seconds:g}-second time limit "
+            "before I finished. A narrower ask may fit; my operator can raise the "
+            "limit (task_timeout).",
+            state=TaskState.FAILED,
+            reason=ReasonCode.ESCALATION,
+        )
+
+    async def _run_engine(self, task: Task, messages: list[dict]) -> Task:
+        # The task's workspace (#247), resolved before any tool is listed: a bundle with
+        # tools.workspace fails a task that doesn't name a valid folder, rather than
+        # letting its tools fall back to anywhere.
+        try:
+            task_workspace = self._task_workspace(task)
+        except workspace.WorkspaceError as exc:
+            self._emit("workspace_refused", error=str(exc))
+            return task.reply(
+                f"workspace refused: {exc}",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        if task_workspace is not None:
+            self._emit("workspace", path=str(task_workspace))
+        token = workspace.current_workspace.set(task_workspace)
+        try:
+            return await self._run_engine_turn(task, messages, task_workspace)
+        finally:
+            workspace.current_workspace.reset(token)
+
+    async def _run_engine_turn(
+        self, task: Task, messages: list[dict], task_workspace: Path | None
+    ) -> Task:
         try:
             allowed = await self._allowed_tools()
         except Exception as exc:
@@ -993,29 +1162,67 @@ class Agent:
             allowed = [spec for spec in allowed if spec["name"] not in withheld]
             self._emit("tools_withheld", names=sorted(withheld))
             messages = _with_withheld_note(messages, withheld)
-        from daedalus.tools.colleagues import current_delegation_depth
+        from daedalus.tools.colleagues import answering_colleague, current_consult_asker
 
-        if current_delegation_depth.get() >= 1 and any(s["name"] == _ASK_TOOL for s in allowed):
-            # ANSWERING A COLLEAGUE, SO NO ONWARD ASKS (#149). Without this, A asks
-            # B, B asks A, and only cabal's depth bound ends it; withholding the
-            # tool makes the bounce impossible. Keyed on depth, not transport: a
-            # caller that sends no depth (a person via the switchboard) arrives at
-            # 0 and can still be answered with help from colleagues. _call_tool
-            # refuses the name if the model calls it anyway.
-            allowed = [spec for spec in allowed if spec["name"] != _ASK_TOOL]
-            self._emit("colleague_ask_withheld_inbound")
-            messages = _with_inbound_note(messages)
+        if answering_colleague():
+            # ANSWERING A COLLEAGUE, SO KNOWLEDGE-ONLY TOOLS (kobo#310, the strict
+            # model): a consulted agent answers another agent's task from what it
+            # already knows, and never borrows a credential for it. Only providers
+            # that declare `knowledge_only = True` (skills.load) keep their tools;
+            # everything else -- gateway tools, sidecars, colleague asks -- is
+            # withheld for this task, and _call_tool refuses the name if the model
+            # calls it anyway. Keyed on depth, not transport: a caller that sends no
+            # depth (a person via the switchboard) arrives at 0 and keeps every tool.
+            # The ask tool is named separately (#149): without that, A asks B, B
+            # asks A, and only cabal's depth bound ends it.
+            if any(s["name"] == _ASK_TOOL for s in allowed):
+                self._emit("colleague_ask_withheld_inbound")
+            kept = [spec for spec in allowed if self._knowledge_only(spec["name"])]
+            kept_names = {spec["name"] for spec in kept}
+            withheld_for_colleague = sorted(
+                spec["name"] for spec in allowed if spec["name"] not in kept_names
+            )
+            if withheld_for_colleague:
+                self._emit("tools_withheld_for_colleague", names=withheld_for_colleague)
+            allowed = kept
+            messages = _with_inbound_note(messages, current_consult_asker.get())
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
+        binds = self.bundle.spec.tools.bind
+        unmatched = sorted(set(binds) - allowed_names)
+        if unmatched:
+            # A typo'd bind key binds nothing, and the model would choose that argument.
+            self._emit("bind_unmatched", tools=unmatched)
+        # The model is never shown a bound argument, so it can't try to set one (#247).
+        allowed = [
+            workspace.hide_bound(spec, binds[spec["name"]]) if spec["name"] in binds else spec
+            for spec in allowed
+        ]
 
         async def call_tool(name: str, arguments: dict) -> str:
-            return await self._call_tool(name, arguments, allowed_names)
+            if name in binds and name in allowed_names:
+                # Before the gates, so an approver sees the real target. Whatever the
+                # model sent for a bound argument is overwritten, never merged.
+                try:
+                    arguments = workspace.bind_arguments(arguments, binds[name], task.metadata)
+                except workspace.BindError as exc:
+                    self._emit("bind_refused", tool=name, error=str(exc))
+                    return f"error: {name} can't run: {exc}"
+            # Set again on every call, from this closure: an engine may dispatch tool calls
+            # on a task whose context it created before _run_engine set the workspace (the
+            # Claude Code SDK's in-process MCP server), and this must not depend on that.
+            token = workspace.current_workspace.set(task_workspace)
+            try:
+                return await self._call_tool(name, arguments, allowed_names)
+            finally:
+                workspace.current_workspace.reset(token)
 
         return await self._engine().run(
             EngineTurn(
                 task=task,
                 messages=messages,
                 tools=allowed,
+                workspace=task_workspace,
                 call_tool=call_tool,
                 emit=self._emit,
                 budget=self._budget(),
@@ -1023,6 +1230,7 @@ class Agent:
                 spec=self.bundle.spec,
                 approve=self._approve_native,
                 withheld=self._withheld_native,
+                memory=self.memory,
             )
         )
 
@@ -1032,6 +1240,10 @@ class Agent:
             from daedalus.engines.claude_code import ClaudeCodeEngine
 
             return ClaudeCodeEngine(self.bundle.spec.engine.claude_code)
+        if self.engine_name == "scripted":
+            from daedalus.engines.scripted import ScriptedEngine
+
+            return ScriptedEngine()
         return LiteLLMEngine(self.llm)
 
     def _unapprovable(self, tools: list[dict]) -> set[str]:
@@ -1048,6 +1260,21 @@ class Agent:
             for spec in tools
             if any(fnmatch(spec["name"], g.match) for g in gates)
         }
+
+    def _knowledge_only(self, name: str) -> bool:
+        """Does the provider that listed `name` answer from what the agent
+        already has, with no credential (kobo#310)? A provider opts IN with a
+        `knowledge_only = True` attribute; the default is credentialed, so a
+        new provider is withheld from a colleague's task until it says
+        otherwise. Behind MultiToolProvider the owner of the name is asked;
+        the ask tool never counts, whatever its provider says (#149)."""
+        if name == _ASK_TOOL:
+            return False
+        provider = self.tools
+        owner_of = getattr(provider, "provider_of", None)
+        if owner_of is not None:
+            provider = owner_of(name)
+        return getattr(provider, "knowledge_only", False) is True
 
     async def _allowed_tools(self) -> list[dict]:
         """Tier-1 ceiling, enforced at listing: the model never sees a tool it
@@ -1233,6 +1460,7 @@ class Agent:
         from daedalus.transports.cli import CliTransport
 
         built: list[Transport] = []
+        a2a_transport = None  # the HTTP app a Slack-over-HTTP transport attaches to
         slack_channels: list[str] = []
         slack_asked = False  # any slack block at all
         slack_open = False  # a block that named no channel
@@ -1259,15 +1487,15 @@ class Agent:
                     # A new dict -- the on-disk card / bundle.card in memory
                     # is never mutated to carry the stamp.
                     card = {**card, "enforcement": self.enforcement.card_stamp()}
-                built.append(
-                    A2aTransport(
-                        card=card,
-                        host=str(options.get("host", "127.0.0.1")),
-                        port=int(options.get("port", 9200)),
-                        events=self.events,
-                        verifier=self._a2a_verifier(options.get("auth")),
-                    )
+                a2a_transport = A2aTransport(
+                    card=card,
+                    host=str(options.get("host", "127.0.0.1")),
+                    port=int(options.get("port", 9200)),
+                    events=self.events,
+                    verifier=self._a2a_verifier(options.get("auth")),
+                    name=self.bundle.spec.name,
                 )
+                built.append(a2a_transport)
             elif spec.kind == "slack":
                 try:
                     import slack_sdk  # noqa: F401
@@ -1331,17 +1559,24 @@ class Agent:
                     f"({', '.join(sorted(slack_wakes))}); one transport serves every "
                     "block, so they must name the same mode"
                 )
-            built.append(
-                SlackTransport(
-                    slack_channels[0] if slack_channels else "",
-                    channels=[] if slack_open else slack_channels,
-                    escalation_route=self.bundle.spec.approvals.escalation.route,
-                    approvers=slack_approvers,
-                    # The bundle's word, unless the deployment overrides it in the
-                    # environment (the room sets SLACK_WAKE_MODE per agent).
-                    wake=os.environ.get("SLACK_WAKE_MODE") or next(iter(slack_wakes), None),
-                )
+            slack = SlackTransport(
+                slack_channels[0] if slack_channels else "",
+                channels=[] if slack_open else slack_channels,
+                escalation_route=self.bundle.spec.approvals.escalation.route,
+                approvers=slack_approvers,
+                # The bundle's word, unless the deployment overrides it in the
+                # environment (the room sets SLACK_WAKE_MODE per agent).
+                wake=os.environ.get("SLACK_WAKE_MODE") or next(iter(slack_wakes), None),
             )
+            built.append(slack)
+            if slack.over_http and a2a_transport is not None:
+                # No app-level token: Slack's envelopes come by POST /slack/events
+                # on the a2a app (kobo#304). Both transports serve the same
+                # handler (this Agent), so the route reaches the Slack transport
+                # through the a2a transport and hands it the handler it already
+                # holds. With the app-level token present nothing is attached
+                # and the route answers 404: Socket Mode, exactly as before.
+                a2a_transport.slack = slack
         return built
 
     async def aclose(self) -> None:

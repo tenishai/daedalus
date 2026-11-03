@@ -79,7 +79,7 @@ def _techne_agent(tmp_path: Path, db_path: Path, **overrides) -> Agent:
 
 
 def _teach_task(
-    text="The dog is named Tsuru.", *, sub="service:room", filename="chat-20260820-dog.md"
+    text="The dog is named Tsuru.", *, sub="service:kobo", filename="chat-20260820-dog.md"
 ):
     task = Task.from_text(text)
     task.metadata[SYSTEM_TASK_KEY] = TEACH_MARKER
@@ -199,24 +199,20 @@ async def test_an_operator_prefixed_sub_still_teaches(tmp_path, techne_db):
 async def test_the_gate_records_the_sub_it_ADMITTED_not_only_the_ones_it_refused(
     tmp_path, techne_db
 ):
-    """#47 cannot be answered from refusals.
+    """The allow event carries the sub it admitted (#47, #195).
 
-    Inverting this gate to an `operator:` allowlist needs to know what
-    LEGITIMATE callers present -- kobo above all, whose sub is DEPLOYMENT-
-    CHOSEN: it relays through cabal carrying whatever token the environment
-    put in `CABAL_OPERATOR_TOKEN`, and cabal propagates that token's sub to
-    us. So it is a property of one env var in one cluster and no amount of
-    reading either repo settles it. Refusal events say nothing about
-    legitimate callers. The allow event is the only way that question gets an
-    answer off a running agent, so it is pinned here rather than left as a
-    convenience."""
+    kobo's sub is deployment-chosen (`CABAL_OPERATOR_TOKEN`, propagated by
+    cabal's re-mint). The default allowlist names what kobo's docs mint,
+    `service:kobo`; a deployment that differs reads the sub off
+    `<lane>_refused` and lists it in `auth.operator_subs`. Both events are
+    pinned rather than left as a convenience."""
     seen: list[dict] = []
     agent = _techne_agent(tmp_path, techne_db, on_event=seen.append)
 
-    await agent.handle_task(_teach_task(sub="service:room"))
+    await agent.handle_task(_teach_task(sub="service:kobo"))
 
     allowed = [e for e in seen if e["type"] == "teach_allowed"]
-    assert allowed == [{"type": "teach_allowed", "sub": "service:room"}]
+    assert allowed == [{"type": "teach_allowed", "sub": "service:kobo"}]
 
 
 async def test_teach_refused_without_verified_sub(tmp_path, techne_db):
@@ -313,7 +309,7 @@ async def test_teach_invalid_filename_replies_error(tmp_path, techne_db):
 def _knowledge_task(
     text="The dog is named Tsuru.",
     *,
-    sub="service:room",
+    sub="service:kobo",
     filename="chat-20260820-dog.md",
     delete=False,
 ):
@@ -434,9 +430,9 @@ async def test_the_operator_gate_event_NAMES_are_pinned(tmp_path, techne_db, mar
 
     assert {"type": f"{lane}_refused", "sub": "persona:scout"} in seen
 
-    allowed = _teach_task(sub="service:room")
+    allowed = _teach_task(sub="service:kobo")
     allowed.metadata[SYSTEM_TASK_KEY] = marker
     await agent.handle_task(allowed)
 
-    assert {"type": f"{lane}_allowed", "sub": "service:room"} in seen
+    assert {"type": f"{lane}_allowed", "sub": "service:kobo"} in seen
 

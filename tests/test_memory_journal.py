@@ -81,3 +81,51 @@ def test_record_upserts_per_context_id(tmp_path):
     assert len(rows) == 1
     assert rows[0]["context_id"] == "slack:C1:171"
     assert rows[0]["history"] == long
+
+
+# ---- #212: under auth, a reused contextId cannot replace another sub's row ----
+
+
+def test_another_owner_reusing_a_context_id_does_not_replace_the_row(tmp_path):
+    from daedalus.memory import journal
+
+    path = tmp_path / "journal.db"
+    journal.record(path, "ctx-1", [{"role": "user", "text": "alice's question"}], owner="alice")
+    journal.record(path, "ctx-1", [{"role": "user", "text": "bob's overwrite"}], owner="bob")
+    texts = sorted(r["history"][0]["text"] for r in journal.recent(path))
+    assert texts == ["alice's question", "bob's overwrite"]
+
+
+def test_the_same_owner_still_upserts(tmp_path):
+    from daedalus.memory import journal
+
+    path = tmp_path / "journal.db"
+    journal.record(path, "ctx-1", [{"role": "user", "text": "turn 1"}], owner="alice")
+    journal.record(path, "ctx-1", [{"role": "user", "text": "turn 1 and 2"}], owner="alice")
+    assert [r["history"][0]["text"] for r in journal.recent(path)] == ["turn 1 and 2"]
+
+
+def test_without_auth_it_upserts_as_before(tmp_path):
+    from daedalus.memory import journal
+
+    path = tmp_path / "journal.db"
+    journal.record(path, "ctx-1", [{"role": "user", "text": "a"}])
+    journal.record(path, "ctx-1", [{"role": "user", "text": "b"}])
+    assert [r["history"][0]["text"] for r in journal.recent(path)] == ["b"]
+
+
+def test_a_journal_from_before_the_owner_column_is_upgraded(tmp_path):
+    import sqlite3
+
+    from daedalus.memory import journal
+
+    path = tmp_path / "journal.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "context_id TEXT NOT NULL, history TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    old.commit()
+    old.close()
+    journal.record(path, "ctx-1", [{"role": "user", "text": "x"}], owner="alice")
+    assert [r["context_id"] for r in journal.recent(path)] == ["ctx-1"]
