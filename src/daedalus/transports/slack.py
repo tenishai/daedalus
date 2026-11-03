@@ -433,11 +433,34 @@ def _chunk_message(text: str, budget: int = _POST_BUDGET) -> list[str]:
     return _stitch_fences(_pack(text, budget - _STITCH_OVERHEAD, ("\n\n", "\n", None)))
 
 
-class SlackApi:
-    """The four Slack operations the transport needs, behind a seam tests fake."""
+ICON_URL_ENV = "SLACK_ICON_URL"
 
-    def __init__(self, web_client):
+
+class SlackApi:
+    """The four Slack operations the transport needs, behind a seam tests fake.
+
+    `icon_url` (the room's `SLACK_ICON_URL`, 2026-11-03): the picture every
+    message this agent posts carries, Slack's per-message `icon_url` under the
+    `chat:write.customize` scope. The room serves the agent's own face there, so
+    an owner changes it in the room and Slack follows on the next message, and
+    nobody has to reach the app's settings page. An app whose install predates
+    the scope refuses the field; the first refusal drops the icon for the life
+    of the process and the post goes out plain, never lost."""
+
+    def __init__(self, web_client, icon_url: str | None = None):
         self._web = web_client
+        self.icon_url = (icon_url or "").strip() or None
+
+    async def _post(self, **kwargs):
+        if self.icon_url:
+            try:
+                return await self._web.chat_postMessage(icon_url=self.icon_url, **kwargs)
+            except Exception as exc:  # noqa: BLE001 -- the icon is decoration, the message is the point
+                logger.warning(
+                    "slack: posting with the room's icon failed (%s); posting plain from now on", exc
+                )
+                self.icon_url = None
+        return await self._web.chat_postMessage(**kwargs)
 
     async def post(self, channel: str, text: str, thread_ts: str | None = None) -> str:
         """Post text, chunked to stay under Slack's render budget so long
@@ -452,11 +475,9 @@ class SlackApi:
         became one message or several.
         """
         chunks = _chunk_message(text)
-        first = await self._web.chat_postMessage(
-            channel=channel, text=chunks[0], thread_ts=thread_ts
-        )
+        first = await self._post(channel=channel, text=chunks[0], thread_ts=thread_ts)
         for chunk in chunks[1:]:
-            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+            await self._post(channel=channel, text=chunk, thread_ts=thread_ts)
         return first["ts"]
 
     async def update(
@@ -471,7 +492,7 @@ class SlackApi:
         chunks = _chunk_message(text)
         await self._web.chat_update(channel=channel, ts=ts, text=chunks[0])
         for chunk in chunks[1:]:
-            await self._web.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+            await self._post(channel=channel, text=chunk, thread_ts=thread_ts)
 
     async def react(self, channel: str, ts: str, name: str) -> None:
         try:
@@ -852,7 +873,9 @@ class SlackTransport:
         if self._api is None:
             from slack_sdk.web.async_client import AsyncWebClient
 
-            self._api = SlackApi(AsyncWebClient(token=self.bot_token))
+            self._api = SlackApi(
+                AsyncWebClient(token=self.bot_token), icon_url=os.environ.get(ICON_URL_ENV)
+            )
         if self.team_id is None:
             self.team_id = (await self._api.team_id()) or None
         if self.user_id is None:
