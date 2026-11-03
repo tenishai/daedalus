@@ -6,6 +6,18 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-03
+
+### Upgrading
+
+- **A custom `ToolProvider` is withheld on a colleague's task unless it says otherwise.**
+  An agent answering another agent (`cabal_delegation_depth` ≥ 1) is now offered only
+  tools whose provider sets `knowledge_only = True` (see Changed). A provider that only
+  reads the agent's own material should set it to stay offered there.
+- **Bundles that use `tools.workspace` or `tools.bind` need this release.** kobo validates
+  bundles against its vendored copy of `docs/bundle.schema.json`, so refresh that copy
+  before kobo builds one.
+
 ### Added
 
 - **The agent's face on every Slack message.** With `SLACK_ICON_URL` set (the room
@@ -19,20 +31,21 @@ Issue and pull request numbers all refer to this repository, written in full.
   for tenishai/agents#171). `tools.workspace.parent` names a directory of prepared
   per-task folders, and a builtin `files` or `exec` root written as the literal
   `{workspace}` (or `{workspace}/sub`) is filled per task. Task metadata
-  `daedalus_workspace` holds one folder name, never a path. A name that isn't one
-  plain folder, a symlink out of the parent or a missing folder fails the task with 701
-  before any tool is listed, so a caller can choose which folder a task uses but never
-  widen the roots. The token without a parent, a parent that isn't a directory (checked whenever it is
-  set), or a sub-root with `..` fail at load; a parent removed after load fails the task
-  with 701. A `tools.bind` key that matches no offered tool emits `bind_unmatched`. The Claude Code engine runs in the task's workspace,
-  ahead of `engine.claude_code.cwd`. `tools.bind` (`{tool: {argument:
-  dotted.metadata.path}}`) fills a tool's arguments from task metadata on every call,
-  before the approval gates. Bound arguments are removed from the listing the model
-  sees, whatever the model sends for them is overwritten, and a missing value fails the
-  call. `daedalus run -m … --metadata '<json object>'` merges into the one-shot task's
-  metadata, so a launcher can name the workspace and bound values. A bundle with neither
-  field behaves as before. `docs/bundle.schema.json`
+  `daedalus_workspace` holds one folder name, never a path. A name that isn't one plain
+  folder, a symlink out of the parent or a missing folder fails the task with 701 before
+  any tool is listed, so a caller can choose which folder a task uses but never widen the
+  roots. The token without a parent, a parent that isn't a directory (checked whenever it
+  is set), or a sub-root with `..` fail at load; a parent removed after load fails the task
+  with 701. The Claude Code engine runs in the task's workspace, ahead of
+  `engine.claude_code.cwd`. `tools.bind` (`{tool: {argument: dotted.metadata.path}}`)
+  fills a tool's arguments from task metadata on every call, before the approval gates.
+  Bound arguments are removed from the listing the model sees, whatever the model sends
+  for them is overwritten, and a missing value fails the call; a bind key that matches no
+  offered tool emits `bind_unmatched`. `daedalus run -m … --metadata '<json object>'`
+  merges into the one-shot task's metadata, so a launcher can name the workspace and
+  bound values. A bundle with neither field behaves as before. `docs/bundle.schema.json`
   regenerated, so kobo's vendored copy needs refreshing for bundles that use them.
+
 - **The thinking budget is kept apart from the visible reply's, and a cut reply says why
   in the log** (tenishai/daedalus#240). A one-line answer hit the 8192 `max_tokens` cap
   twice on one day because the provider counted the model's thinking against it.
@@ -65,19 +78,10 @@ Issue and pull request numbers all refer to this repository, written in full.
   in pass through `SlackTransport.admit`, which drops a repeated `event_id` (the last
   2000 remembered) before the existing `(channel, ts)` dedupe. Existing agents, which
   all have the app-level token, change nothing.
-- **Slack events can arrive over HTTP, with no app-level token** (tenishai/kobo#304,
-  tenishai/kobo#371). The a2a app gains `POST /slack/events`: the room's relay
-  forwards Slack's event envelope exactly as Slack posted it, with the header
-  `X-Kobo-Relay-Secret` equal to the agent's `SLACK_RELAY_SECRET` (503 while that env
-  is unset, 403 when it differs). The route answers `200 {"accepted": true}` at once
-  and schedules the same `handle_event` Socket Mode calls, so threads, wake modes,
-  streaming, approvals and images are untouched; a `url_verification` body gets its
-  challenge back. Transport choice at start: `SLACK_APP_TOKEN` present means Socket
-  Mode exactly as before and the route answers 404; absent, with `SLACK_BOT_TOKEN`,
-  means the HTTP way in and no socket is opened. One boot line says which. Both ways
-  in pass through `SlackTransport.admit`, which drops a repeated `event_id` (the last
-  2000 remembered) before the existing `(channel, ts)` dedupe. Existing agents, which
-  all have the app-level token, change nothing.
+- **`engine.claude_code.cwd` sets the directory Claude Code works in** (tenishai/daedalus#242,
+  PR 243), passed to the Agent SDK as `cwd`. A path that isn't a directory fails the load
+  when the claude-code engine runs the bundle; the litellm engine, which never uses it,
+  still loads the same bundle. Schema regenerated.
 - **The `cloudtrail` sidecar can lease its credential instead of assuming a role.** With
   `tools.cloudtrail.bab_url` and `bab_integration` set, the pod asks the room's permission
   service (bab) for a one-hour credential, proving itself with the service account token
@@ -108,6 +112,15 @@ Issue and pull request numbers all refer to this repository, written in full.
   through verbatim. A custom `ToolProvider` that only reads the agent's own material
   should set `knowledge_only = True` to stay offered on a colleague's task; the default
   is credentialed.
+
+### Fixed
+
+- **MCP tool results keep the file an embedded resource carries** (PR 238). The `mcp`
+  provider flattened a result to its text blocks, so a server that returns a file as an
+  `EmbeddedResource` (GitHub's hosted MCP server answers `get_file_contents` that way)
+  reached the model as one confirmation line. `result_text` now renders each resource's
+  text after a line naming its uri and mime type, names a binary resource without
+  expanding it, and still skips image blocks.
 
 ## [0.6.1] — 2026-10-31
 
