@@ -31,7 +31,7 @@ HEALTH: 50 test files (tests/ + docker/test_seeder.py). mash1 runs 2026-11-03, t
 GOTCHAS:
 - Never add a module-scope import of an optional extra (fastapi, slack_sdk, mcp, claude_agent_sdk, techne, liminal). Dev env has them all, so CI won't catch it.
 - The three techne-path test files (92 tests) collapse to 3 `s` under importorskip. A green default CI run did NOT run them. Use `pytest -rs`.
-- `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py. AGENTS.md's directory map says otherwise; the code wins.
+- `enforcement.py` is the hook LAW layer (bundle/tools/*.py pre_task/post_draft), NOT the three-tier approval model and NOT LLM tools. Tiers 1-2 live in agent.py.
 - `bundle/tools/` = enforcement hooks; `tools:` in agent.yaml = LLM tool providers. Same word, unrelated.
 - Engine choice is the OPERATOR's (--engine / DAEDALUS_ENGINE), never the bundle's; the bundle only carries engine.claude_code settings. Agent.__init__ checks the engine-specific ones at load: per_task_tokens is refused under claude-code, and a claude_code.cwd that isn't a directory fails the load (#242).
 - Every engine run has a deadline (#201): Agent._loop wraps it in asyncio.timeout(spec.task_timeout, default 600 s) and a run past it fails 704; the litellm engine also passes model.request_timeout (default 120 s) to litellm, whose own default is 6000 s. The cancellation reaches a running tool call only because nothing on the call path catches BaseException: keep Agent._call_tool's `except Exception`, and don't add `except BaseException` to a tool provider. A tool that runs in a thread (asyncio.to_thread, e.g. cloudtrail) is abandoned, not stopped.

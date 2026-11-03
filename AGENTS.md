@@ -82,7 +82,7 @@ src/daedalus/
   transports/      cli, a2a, slack — one file per transport
   memory/          techne adapter (optional)
   tools/           tool providers (optional)
-  enforcement.py   the three-tier approval model
+  enforcement.py   the hook law layer (bundle/tools/*.py pre_task/post_draft); tiers 1-2 are in agent.py
 tests/golden/      bundles that are both fixture and worked example
 docs/proposals/    design notes, not documentation of current behaviour
 ```
