@@ -265,6 +265,9 @@ class Agent:
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
         self.tools = tools if tools is not None else self._tools_from_spec()
+        # At load whenever it is set, not only when a root uses {workspace}: the Claude
+        # Code engine runs in the workspace too (Prudence on PR 248).
+        self._workspace_parent()
         self.checkpoints = (
             checkpoints if checkpoints is not None else self._checkpoints_from_spec()
         )
@@ -453,9 +456,12 @@ class Agent:
     def _task_workspace(self, task: Task) -> Path | None:
         """This task's workspace, None when the bundle has none; WorkspaceError when the
         bundle has one and the task's metadata doesn't name a valid folder."""
-        parent = self._workspace_parent()
-        if parent is None:
+        raw = self.bundle.spec.tools.workspace.parent
+        if not raw:
             return None
+        parent = Path(raw).expanduser()
+        if not parent.is_dir():  # checked at load; gone since, so this task fails (701)
+            raise workspace.WorkspaceError(f"tools.workspace.parent {raw!r} is not a directory")
         return workspace.resolve(parent, task.metadata.get(workspace.WORKSPACE_KEY))
 
     def _tools_from_spec(self) -> ToolProvider:
@@ -1183,6 +1189,10 @@ class Agent:
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
         binds = self.bundle.spec.tools.bind
+        unmatched = sorted(set(binds) - allowed_names)
+        if unmatched:
+            # A typo'd bind key binds nothing, and the model would choose that argument.
+            self._emit("bind_unmatched", tools=unmatched)
         # The model is never shown a bound argument, so it can't try to set one (#247).
         allowed = [
             workspace.hide_bound(spec, binds[spec["name"]]) if spec["name"] in binds else spec

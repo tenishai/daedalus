@@ -15,8 +15,9 @@ Issue and pull request numbers all refer to this repository, written in full.
   `daedalus_workspace` holds one folder name, never a path. A name that isn't one
   plain folder, a symlink out of the parent or a missing folder fails the task with 701
   before any tool is listed, so a caller can choose which folder a task uses but never
-  widen the roots. The token without a parent, a parent that isn't a directory, or a
-  sub-root with `..` fail at load. The Claude Code engine runs in the task's workspace,
+  widen the roots. The token without a parent, a parent that isn't a directory (checked whenever it is
+  set), or a sub-root with `..` fail at load; a parent removed after load fails the task
+  with 701. A `tools.bind` key that matches no offered tool emits `bind_unmatched`. The Claude Code engine runs in the task's workspace,
   ahead of `engine.claude_code.cwd`. `tools.bind` (`{tool: {argument:
   dotted.metadata.path}}`) fills a tool's arguments from task metadata on every call,
   before the approval gates. Bound arguments are removed from the listing the model

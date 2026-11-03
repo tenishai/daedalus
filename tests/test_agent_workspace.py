@@ -269,3 +269,34 @@ async def test_a_tool_call_dispatched_in_a_fresh_context_still_has_the_workspace
     task = await agent.handle_task(task_in("a"))
     assert task.state is TaskState.COMPLETED
     assert seen == ["in a"]
+
+
+def test_a_parent_is_checked_at_load_even_with_no_workspace_root(tmp_path):
+    """Prudence on PR 248: the parent alone gives a task a workspace (the Claude Code cwd)."""
+    bundle = write_bundle(
+        tmp_path / "bundle", f"  workspace:\n    parent: '{tmp_path / 'missing'}'\n  allow: []\n"
+    )
+    with pytest.raises(BundleError, match="not a directory"):
+        Agent(bundle, llm=ScriptedLLM("x"))
+
+
+async def test_a_parent_removed_after_load_fails_the_task_not_raises(tmp_path, parent):
+    import shutil
+
+    agent = Agent(files_bundle(tmp_path, parent), llm=ScriptedLLM("x"))
+    shutil.rmtree(parent)
+    task = await agent.handle_task(task_in("a"))
+    assert task.state is TaskState.FAILED
+    assert task.reason_code is ReasonCode.POLICY_VIOLATION
+
+
+async def test_a_bind_key_that_matches_no_offered_tool_is_reported(tmp_path):
+    events = []
+    bundle = write_bundle(
+        tmp_path / "bundle",
+        "  bind:\n    review.post_reveiw: {repo: review.repo}\n  allow: ['review.*']\n",
+    )
+    agent = Agent(bundle, llm=ScriptedLLM("done"), tools=FakeTools([POST]), on_event=events.append)
+    await agent.handle_task(task_in(None))
+    assert any(e["type"] == "bind_unmatched" and e["tools"] == ["review.post_reveiw"]
+               for e in events)
