@@ -211,14 +211,17 @@ Both timeouts must be positive; a bundle can raise them, not turn them off.
 |---|---|---|
 | (none) | create, chat, run, cli transport, litellm engine, files and exec built-ins | Always: the base. |
 | `mcp` | `tools.provider: mcp` | You use stdio MCP servers. |
-| `claude-code` | `--engine claude-code` (mcp>=2.2, uvicorn, claude-agent-sdk) | Claude Code should run the agent. |
+| `claude-code` | `--engine claude-code` (claude-agent-sdk) | Claude Code should run the agent. |
+| `bridge` | the loopback MCP bridge, `engines/bridge.py` (mcp>=2.2, uvicorn) | You build an engine that runs its own loop; no shipped engine uses it. |
 | `a2a` | the a2a transport and JWT auth | cabal or another service sends tasks. |
 | `slack` | the slack transport | The agent lives in Slack. |
 | `aws` | the `cloudtrail` sidecar (boto3) | The agent queries CloudTrail Lake, with a role it assumes itself or a credential leased from the room's permission service (`bab_url`). |
 | `techne` | `memory.personal: techne` | The agent should remember. |
 
-`claude-code` needs mcp>=2.2, and kobo pins `mcp>=1.15,<2`, so the two can't share one
-Python environment. Install daedalus with `claude-code` in its own venv or image.
+`claude-code` runs on mcp 1.x or 2.x, whichever the Agent SDK and the rest of the environment
+settle on, so it can share a venv with kobo, which pins `mcp>=1.15,<2`. Before 0.7.1 it required
+mcp>=2.2 for the bridge, which no engine uses; that requirement is now the `bridge` extra, and
+`bridge` still can't share a venv with kobo.
 
 ## How to install
 
