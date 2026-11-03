@@ -64,6 +64,11 @@ from daedalus.tools import workspace
 log = logging.getLogger(__name__)
 
 
+def _slack_token_present() -> bool:
+    """Whether the environment carries a Slack token the transport can serve with."""
+    return bool(os.environ.get("SLACK_BOT_TOKEN") or os.environ.get("SLACK_APP_TOKEN"))
+
+
 def _utc_now() -> datetime:
     """The pod's clock, read once per task (issue #171). A seam for tests."""
     return datetime.now(UTC)
@@ -1463,6 +1468,7 @@ class Agent:
         a2a_transport = None  # the HTTP app a Slack-over-HTTP transport attaches to
         slack_channels: list[str] = []
         slack_asked = False  # any slack block at all
+        slack_optional = False  # a block marked `optional: true` (the room's dormant wiring)
         slack_open = False  # a block that named no channel
         slack_approvers: list[str] = []  # union of every block's `approvers`
         slack_wakes: set[str] = set()  # every block's `wake`; they must agree
@@ -1520,6 +1526,8 @@ class Agent:
                         "set it, or omit the key to answer in every invited channel"
                     )
                 slack_asked = True
+                if options.get("optional"):
+                    slack_optional = True
                 slack_approvers.extend(options.get("approvers") or [])
                 if options.get("wake"):
                     slack_wakes.add(str(options["wake"]))
@@ -1543,6 +1551,13 @@ class Agent:
                     f"transport {spec.kind!r} is not available in this version; skipping",
                     stacklevel=2,
                 )
+        if slack_asked and slack_optional and not _slack_token_present():
+            # A block marked `optional: true` is the room's dormant wiring (2026-11-03):
+            # present from birth so adding Slack later is a Secret and a restart, not a
+            # rebuild. With no token in the environment it serves nothing and says so,
+            # instead of failing boot the way a required block does.
+            log.info("slack transport is optional and no token is set; Slack stays off")
+            slack_asked = False
         if slack_asked:
             from daedalus.transports.slack import SlackTransport
 

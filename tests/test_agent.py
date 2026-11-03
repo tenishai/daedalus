@@ -191,6 +191,35 @@ def test_slack_transport_needs_the_extra_but_no_longer_a_channel(tmp_path):
         assert agent2.transports()[0].channels == []
 
 
+def test_an_optional_slack_block_serves_only_once_a_token_is_present(tmp_path, monkeypatch):
+    """The room wires Slack dormant at birth (2026-11-03): `optional: true` on the block
+    means no token is no error, the agent serves without Slack; a token in the environment
+    turns it on at the next start. A block without `optional` keeps failing boot without
+    a token, as before (serve() raises), so local runs never go quiet by accident."""
+    import importlib.util
+
+    import pytest
+
+    if importlib.util.find_spec("slack_sdk") is None:
+        pytest.skip("slack extra not installed")
+    (tmp_path / "agent.yaml").write_text(
+        "name: x\nmodel:\n  id: m\ntransports:\n"
+        "  - kind: cli\n  - kind: slack\n    optional: true\n"
+    )
+    (tmp_path / "agent-card.json").write_text("{}")
+    (tmp_path / "persona.md").write_text("persona")
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    agent = Agent.load(tmp_path, llm=ScriptedLLM())
+    kinds = [type(t).__name__ for t in agent.transports()]
+    assert "SlackTransport" not in kinds and len(kinds) == 1
+
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    agent2 = Agent.load(tmp_path, llm=ScriptedLLM())
+    kinds2 = [type(t).__name__ for t in agent2.transports()]
+    assert "SlackTransport" in kinds2
+
+
 def test_unknown_transport_kind_warns_and_is_skipped(tmp_path):
     (tmp_path / "agent.yaml").write_text(
         "name: x\nmodel:\n  id: m\ntransports:\n  - kind: telepathy\n  - kind: cli\n"

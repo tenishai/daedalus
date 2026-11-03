@@ -6,6 +6,20 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **An agent image is the runtime and nothing else** (one runtime, bundles as artifacts;
+  tenishai/kobo#434). With `BUNDLE_ARTIFACT` in the pod's environment the entrypoint pulls
+  the bundle from that registry artifact at start (`docker/bundle_pull.py`: one gzip
+  tarball layer, a Google access token from the pod's own identity, the last pulled bundle
+  kept on the agent's volume for a start the registry cannot serve); without it the image's
+  own `/bundle` runs as before. Memory replication moved into the runtime image: with
+  `MEMORY_REPLICA_BUCKET` set the entrypoint writes the litestream config and runs under
+  it, so an agent's Dockerfile no longer adds litestream or its own entrypoint. A slack
+  transport block marked `optional: true` serves only once a Slack token is in the
+  environment, instead of failing boot: the room wires Slack dormant at birth, and adding
+  it later is a Secret and a restart.
+
 ## [0.7.0] — 2026-11-03
 
 ### Upgrading
