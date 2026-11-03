@@ -24,14 +24,21 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
-        # 3.12 adds the claude-code extra (mcp 2.x, uvicorn) so the engine bridge's tests
-        # run; 3.11 stays without mcp so the "mcp not installed" paths are tested too.
+        # Three legs, listed outright: two `include` entries for one python-version would
+        # merge into one leg, not add a second. 3.12 with claude-code and bridge runs the
+        # bridge's tests on mcp 2.x; 3.12 with claude-code and mcp<2 is how a set pinned to
+        # mcp<2 installs it (tenishai/ergon#34); 3.11 has no mcp, so the "mcp not installed"
+        # paths are tested too.
         include:
           - python-version: "3.11"
             extras: dev
+            constraint: ""
+          - python-version: "3.12"
+            extras: dev,claude-code,bridge
+            constraint: ""
           - python-version: "3.12"
             extras: dev,claude-code
+            constraint: "mcp<2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The runner CONTAINER persists between jobs (same machine name across legs), so
@@ -46,7 +53,7 @@ jobs:
         run: |
           uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
-      - run: pip install -e ".[${{ matrix.extras }}]"
+      - run: pip install -e ".[${{ matrix.extras }}]" ${{ matrix.constraint != '' && format('"{0}"', matrix.constraint) || '' }}
       - run: ruff check src tests docker conftest.py
       # Stdlib only. Fails when an anchored file changed without its arch card (#206).
       - run: python3 scripts/check_arch_cards.py
