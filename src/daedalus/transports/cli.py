@@ -52,9 +52,16 @@ class CliApprover:
 
 
 async def run_once(
-    handler: Handler, text: str, *, context_id: str | None = None, recall: str | None = None
+    handler: Handler,
+    text: str,
+    *,
+    context_id: str | None = None,
+    recall: str | None = None,
+    metadata: dict | None = None,
 ) -> Task:
     task = Task.from_text(text, context_id=context_id)
+    if metadata:
+        task.metadata.update(metadata)
     if recall:
         task.metadata[RECALL_KEY] = recall
     return await handler.handle_task(task)

@@ -1198,7 +1198,14 @@ class Agent:
                 except workspace.BindError as exc:
                     self._emit("bind_refused", tool=name, error=str(exc))
                     return f"error: {name} can't run: {exc}"
-            return await self._call_tool(name, arguments, allowed_names)
+            # Set again on every call, from this closure: an engine may dispatch tool calls
+            # on a task whose context it created before _run_engine set the workspace (the
+            # Claude Code SDK's in-process MCP server), and this must not depend on that.
+            token = workspace.current_workspace.set(task_workspace)
+            try:
+                return await self._call_tool(name, arguments, allowed_names)
+            finally:
+                workspace.current_workspace.reset(token)
 
         return await self._engine().run(
             EngineTurn(

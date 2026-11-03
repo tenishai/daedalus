@@ -206,6 +206,21 @@ def _print_usage(event: dict) -> None:
         click.echo(line, err=True)
 
 
+def _metadata_option(raw: str | None, message: str | None) -> dict | None:
+    """--metadata as a dict, refused before the bundle loads when it isn't a JSON object."""
+    if raw is None:
+        return None
+    if message is None:
+        raise click.UsageError("--metadata applies to a one-shot run; pass -m too.")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"--metadata is not JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise click.UsageError("--metadata must be a JSON object")
+    return value
+
+
 @main.command()
 @click.argument("bundle_path")
 @click.option("-m", "--message", default=None, help="One-shot: send MESSAGE, print the reply.")
@@ -216,12 +231,24 @@ def _print_usage(event: dict) -> None:
     default=None,
     help="With -m: recall personal memory on this text instead of MESSAGE.",
 )
+@click.option(
+    "--metadata",
+    default=None,
+    help="With -m: a JSON object merged into the task's metadata, e.g. "
+    '\'{"daedalus_workspace": "src"}\' for a bundle with tools.workspace (#247).',
+)
 def run(
-    bundle_path: str, message: str | None, verbose: bool, engine: str | None, recall: str | None
+    bundle_path: str,
+    message: str | None,
+    verbose: bool,
+    engine: str | None,
+    recall: str | None,
+    metadata: str | None,
 ) -> None:
     """Serve the bundle's declared transports, or one-shot with -m."""
     if recall is not None and message is None:
         raise click.UsageError("--recall applies to a one-shot run; pass -m too.")
+    extra = _metadata_option(metadata, message)
 
     def on_event(event: dict) -> None:
         if verbose:
@@ -233,7 +260,7 @@ def run(
 
         async def one_shot():
             try:
-                return await run_once(agent, message, recall=recall)
+                return await run_once(agent, message, recall=recall, metadata=extra)
             finally:
                 await agent.aclose()
 

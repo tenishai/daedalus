@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-approvals
 updated: 2026-11-03
-anchor: src/daedalus/agent.py sha=f696ffd597099fa89dee4dd42d280fd412d128e8
+anchor: src/daedalus/agent.py sha=162fb95318be6fabdeb2a9d4c831751ef16c3e8d
 anchor: src/daedalus/enforcement.py sha=95b336ce124c57932f89cdd533fdeebaeda48590
 ---
 # approvals — what a model may call, and what a reply may say

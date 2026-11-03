@@ -21,7 +21,9 @@ Issue and pull request numbers all refer to this repository, written in full.
   dotted.metadata.path}}`) fills a tool's arguments from task metadata on every call,
   before the approval gates. Bound arguments are removed from the listing the model
   sees, whatever the model sends for them is overwritten, and a missing value fails the
-  call. A bundle with neither field behaves as before. `docs/bundle.schema.json`
+  call. `daedalus run -m … --metadata '<json object>'` merges into the one-shot task's
+  metadata, so a launcher can name the workspace and bound values. A bundle with neither
+  field behaves as before. `docs/bundle.schema.json`
   regenerated, so kobo's vendored copy needs refreshing for bundles that use them.
 - **The thinking budget is kept apart from the visible reply's, and a cut reply says why
   in the log** (tenishai/daedalus#240). A one-line answer hit the 8192 `max_tokens` cap

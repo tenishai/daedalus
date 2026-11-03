@@ -243,3 +243,29 @@ def test_claude_code_runs_in_the_tasks_workspace(tmp_path, parent):
     turn = dataclasses.replace(_turn(tmp_path), workspace=parent / "a")
     engine = ClaudeCodeEngine(ClaudeCodeSpec(cwd=str(tmp_path)))
     assert str(engine.options(turn, sdk, "p").cwd) == str(parent / "a")
+
+
+async def test_a_tool_call_dispatched_in_a_fresh_context_still_has_the_workspace(
+    tmp_path, parent, monkeypatch
+):
+    """An engine may run a tool call on a task created outside _run_engine's context (the
+    Claude Code SDK's in-process MCP server); the workspace must reach it anyway."""
+    import contextvars
+
+    from daedalus.task import TaskState as State
+
+    seen = []
+
+    class FreshContextEngine:
+        name = "fresh"
+
+        async def run(self, turn):
+            call = turn.call_tool("files.read", {"path": str(parent / "a" / "f.txt")})
+            seen.append(await asyncio.create_task(call, context=contextvars.Context()))
+            return turn.task.reply("done", state=State.COMPLETED)
+
+    agent = Agent(files_bundle(tmp_path, parent), llm=ScriptedLLM("x"))
+    monkeypatch.setattr(agent, "_engine", lambda: FreshContextEngine())
+    task = await agent.handle_task(task_in("a"))
+    assert task.state is TaskState.COMPLETED
+    assert seen == ["in a"]

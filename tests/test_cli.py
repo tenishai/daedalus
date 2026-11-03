@@ -1,3 +1,4 @@
+import pytest
 from click.testing import CliRunner
 
 import daedalus
@@ -150,6 +151,47 @@ def test_run_recall_sets_the_recall_query(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert seen == ["title paths"]
+
+
+def test_run_metadata_reaches_the_task(tmp_path, monkeypatch):
+    """#247: a launcher names the task's workspace and bound values this way."""
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    real_handle = Agent.handle_task
+    seen = []
+
+    async def spy(self, task):
+        seen.append(dict(task.metadata))
+        return await real_handle(self, task)
+
+    real_load = Agent.load.__func__
+
+    def load_with_fake_llm(cls, path, **overrides):
+        overrides.setdefault("llm", ScriptedLLM("ok"))
+        return real_load(cls, path, **overrides)
+
+    monkeypatch.setattr(Agent, "load", classmethod(load_with_fake_llm))
+    monkeypatch.setattr(Agent, "handle_task", spy)
+    meta = '{"daedalus_workspace": "src", "review": {"pr": 7}}'
+    result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), "-m", "hi",
+                                       "--metadata", meta])
+    assert result.exit_code == 0, result.output
+    assert seen[0]["daedalus_workspace"] == "src"
+    assert seen[0]["review"] == {"pr": 7}
+
+
+@pytest.mark.parametrize(
+    "args, why",
+    [
+        (["-m", "hi", "--metadata", "not json"], "not JSON"),
+        (["-m", "hi", "--metadata", "[1]"], "JSON object"),
+        (["--metadata", "{}"], "pass -m too"),
+    ],
+)
+def test_run_metadata_is_refused_unless_a_json_object_with_a_message(tmp_path, args, why):
+    CliRunner().invoke(main, ["create", "scout", "--dir", str(tmp_path)])
+    result = CliRunner().invoke(main, ["run", str(tmp_path / "scout"), *args])
+    assert result.exit_code == 2
+    assert why in result.output
 
 
 def test_run_recall_without_message_is_refused(tmp_path):
