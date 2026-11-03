@@ -64,6 +64,8 @@ oauth_config:
       - channels:history
       - groups:history
       - chat:write
+      # The room's face on every message (SLACK_ICON_URL, per-message icon_url).
+      - chat:write.customize
       - reactions:read
       - reactions:write
 

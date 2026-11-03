@@ -8,6 +8,13 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **The agent's face on every Slack message.** With `SLACK_ICON_URL` set (the room
+  serves the agent's own picture there) and the app's `chat:write.customize` scope,
+  every `chat.postMessage` carries that picture as its icon, chunks included; an
+  owner changes the face in the room and Slack follows on the next message. An app
+  installed before the scope refuses the field once, and the transport posts plain
+  from then on, never dropping a message.
+
 - **One agent can work a different checkout on each task** (tenishai/daedalus#247,
   for tenishai/agents#171). `tools.workspace.parent` names a directory of prepared
   per-task folders, and a builtin `files` or `exec` root written as the literal

@@ -26,9 +26,11 @@ class FakeWeb:
         self.calls: list[dict] = []
         self._ts = 0
 
-    async def chat_postMessage(self, channel, text, thread_ts=None):
+    async def chat_postMessage(self, channel, text, thread_ts=None, **kwargs):
+        if kwargs.get("icon_url") and getattr(self, "refuse_icon", False):
+            raise RuntimeError("missing_scope")
         self._ts += 1
-        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts, **kwargs})
         return {"ts": f"ts-{self._ts}"}
 
 
@@ -2044,3 +2046,33 @@ async def test_the_message_path_keeps_threads_bounded(monkeypatch):
     assert len(transport._threads) == 3
     assert (CH, "100.0") not in transport._threads
     assert (CH, "104.0") in transport._threads
+
+
+async def test_every_post_carries_the_rooms_icon_when_one_is_given():
+    """The room's SLACK_ICON_URL rides on every chat.postMessage, chunks included,
+    so the agent's face from the room is what people see in Slack."""
+    from daedalus.transports.slack import SlackApi
+
+    web = FakeWeb()
+    api = SlackApi(web, icon_url="https://room.example/slack/relay/abc/face.png")
+    await api.post("C1", "hello", thread_ts="t1")
+    await api.post("C1", "x" * 7000)
+    face = "https://room.example/slack/relay/abc/face.png"
+    assert web.calls and all(c["icon_url"] == face for c in web.calls)
+    plain = SlackApi(FakeWeb())
+    assert plain.icon_url is None
+
+
+async def test_an_app_that_refuses_the_icon_posts_plain_from_then_on():
+    """An install that predates chat:write.customize refuses icon_url; the message
+    still goes out, without the icon, and later posts stop asking."""
+    from daedalus.transports.slack import SlackApi
+
+    web = FakeWeb()
+    web.refuse_icon = True
+    api = SlackApi(web, icon_url="https://room.example/face.png")
+    ts = await api.post("C1", "hello")
+    assert ts == "ts-1" and web.calls == [{"channel": "C1", "text": "hello", "thread_ts": None}]
+    assert api.icon_url is None
+    await api.post("C1", "again")
+    assert len(web.calls) == 2 and "icon_url" not in web.calls[1]
