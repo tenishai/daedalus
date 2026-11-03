@@ -10,7 +10,7 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 - **The agent's face on every Slack message.** With `SLACK_ICON_URL` set (the room
   serves the agent's own picture there) and the app's `chat:write.customize` scope,
-  every `chat.postMessage` carries that picture as its icon, chunks included; an
+  every `chat.postMessage` and every streamed reply (`chat.startStream`) carries that picture as its icon, chunks included; an
   owner changes the face in the room and Slack follows on the next message. An app
   installed before the scope refuses the field once, and the transport posts plain
   from then on, never dropping a message.

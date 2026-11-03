@@ -597,6 +597,19 @@ class SlackApi:
             kwargs["recipient_user_id"] = user
         if team:
             kwargs["recipient_team_id"] = team
+        # The streamed reply is the one people read, so it carries the room's
+        # icon too (chat.startStream takes icon_url like chat.postMessage); a
+        # refusal drops the icon exactly as _post does and the stream still opens.
+        if self.icon_url:
+            try:
+                response = await self._web.chat_startStream(icon_url=self.icon_url, **kwargs)
+                return response["ts"]
+            except Exception as exc:  # noqa: BLE001 -- the icon is decoration
+                logger.warning(
+                    "slack: streaming with the room's icon failed (%s); posting plain from now on",
+                    exc,
+                )
+                self.icon_url = None
         response = await self._web.chat_startStream(**kwargs)
         return response["ts"]
 
