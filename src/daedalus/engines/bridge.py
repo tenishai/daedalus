@@ -162,6 +162,12 @@ class ToolBridge:
     # -- lifecycle -----------------------------------------------------------
 
     async def __aenter__(self) -> ToolBridge:
+        import importlib.metadata
+
+        if int(importlib.metadata.version("mcp").split(".")[0]) < 2:
+            raise RuntimeError(
+                "the MCP bridge needs mcp>=2.2 (pip install 'tenish-daedalus[bridge]')"
+            )
         import uvicorn
         from mcp.server.lowlevel import Server
 

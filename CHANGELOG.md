@@ -20,6 +20,16 @@ Issue and pull request numbers all refer to this repository, written in full.
   environment, instead of failing boot: the room wires Slack dormant at birth, and adding
   it later is a Secret and a restart.
 
+### Changed
+
+- **The `claude-code` extra no longer requires mcp 2.x** (tenishai/ergon#34). It needed
+  `mcp>=2.2` and uvicorn only for the loopback MCP bridge (`engines/bridge.py`, PR 107), which
+  no engine uses: the Claude Code engine serves its tools through the Agent SDK's in-process
+  MCP server (PR 108). `claude-code` is now `claude-agent-sdk` alone, which accepts mcp 1.x or
+  2.x, so it co-installs with kobo's `mcp>=1.15,<2` and ergon's version set can include it. The
+  bridge's requirements are a new `bridge` extra, and the bridge refuses to start on mcp 1.x
+  with a message naming that extra. CI runs the `claude-code` extra on mcp 1.x as a third leg.
+
 ## [0.7.0] — 2026-11-03
 
 ### Upgrading
