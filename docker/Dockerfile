@@ -1,6 +1,8 @@
 # daedalus runtime base image. Agent images layer on top:
 #   FROM <ar>/daedalus-runtime:<tag>
-#   COPY bundle/ /bundle
+#   COPY bundle/ /bundle            (the bundle baked in; or, with no COPY at all,
+#                                    BUNDLE_ARTIFACT=<registry>/<agent>-bundle:current in the
+#                                    pod's env and the runtime pulls it at start: bundle_pull.py)
 #
 # techne and liminal are not on PyPI. Two ways to supply them, same image:
 # (liminal's distribution is `tenish-liminal` since its 0.4.0, and was
@@ -58,11 +60,17 @@ RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ 
  && PIP_EXTRA_INDEX_URL="$EXTRA_INDEX_URL" pip wheel --wheel-dir /wheels "$TECHNE" "$LIMINAL" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
+ARG TARGETARCH=amd64
 
 RUN useradd --uid 10001 --create-home agent
 # tini as PID 1 reaps orphans: exec.run's process-group kill can leave grandchildren
 # reparented to PID 1, and daedalus doesn't wait on pids it didn't spawn.
 RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
+# litestream, for the agents whose memory is replicated to object storage (the entrypoint
+# runs it when MEMORY_REPLICA_BUCKET is set). It used to be added by each agent's own
+# Dockerfile; here once, so an agent image is the runtime and nothing else.
+ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${TARGETARCH}.tar.gz /tmp/litestream.tar.gz
+RUN tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz litestream && rm /tmp/litestream.tar.gz
 
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenish-daedalus[a2a,slack,aws,claude-code]" "tenish-techne[vectors]" tenish-liminal google-cloud-aiplatform && rm -rf /wheels
@@ -79,8 +87,10 @@ RUN python -c "from techne.core.embeddings import backend_available; assert back
 RUN python -c "import techne, techne.api; v = tuple(int(x) for x in techne.__version__.split('.')[:3]); assert v >= (0, 19, 1), f'techne {techne.__version__} < 0.19.1, the floor in pyproject.toml: TechneMemoryStore needs techne.api'"
 
 COPY docker/seeder.py /usr/local/bin/seeder.py
+COPY docker/bundle_pull.py /usr/local/bin/bundle_pull.py
+COPY docker/run.sh /usr/local/bin/run.sh
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run.sh
 
 ENV TECHNE_HOME=/techne
 RUN mkdir -p /techne && chown agent:agent /techne
