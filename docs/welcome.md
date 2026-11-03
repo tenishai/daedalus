@@ -219,7 +219,7 @@ Both timeouts must be positive; a bundle can raise them, not turn them off.
 | `techne` | `memory.personal: techne` | The agent should remember. |
 
 `claude-code` runs on mcp 1.x or 2.x, whichever the Agent SDK and the rest of the environment
-settle on, so it can share a venv with kobo, which pins `mcp>=1.15,<2`. Before 0.7.1 it required
+settle on, so it can share a venv with kobo, which pins `mcp>=1.15,<2`. Through 0.7.0 it required
 mcp>=2.2 for the bridge, which no engine uses; that requirement is now the `bridge` extra, and
 `bridge` still can't share a venv with kobo.
 
