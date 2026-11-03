@@ -155,7 +155,9 @@ class ClaudeCodeEngine:
             max_turns=turn.spec.tools.max_steps,
             env=env,
         )
-        if self.spec.cwd:  # else the directory daedalus started in (#242)
+        if turn.workspace is not None:  # this task's workspace (#247) wins
+            kwargs["cwd"] = str(turn.workspace)
+        elif self.spec.cwd:  # else the directory daedalus started in (#242)
             kwargs["cwd"] = str(Path(self.spec.cwd).expanduser())
         if self.spec.binary:  # else the SDK finds its bundled CLI, then PATH
             kwargs["cli_path"] = self.spec.binary

@@ -793,6 +793,20 @@
           "title": "Allow",
           "type": "array"
         },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceSpec"
+        },
+        "bind": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "description": "Tool arguments filled from task metadata on every call (#247), as {tool: {argument: dotted.metadata.path}}. The model is not shown bound arguments, and a call whose bound value is missing fails.",
+          "title": "Bind",
+          "type": "object"
+        },
         "max_steps": {
           "anyOf": [
             {
@@ -891,6 +905,27 @@
         "kind"
       ],
       "title": "TransportSpec",
+      "type": "object"
+    },
+    "WorkspaceSpec": {
+      "additionalProperties": true,
+      "description": "Per-task workspaces (#247): a task's metadata names one folder under `parent`.",
+      "properties": {
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Directory holding the per-task workspaces. A builtin root written as {workspace} or {workspace}/sub is filled per task from the folder that task metadata daedalus_workspace names: one directory name, never a path. A task with no valid workspace fails.",
+          "title": "Parent"
+        }
+      },
+      "title": "WorkspaceSpec",
       "type": "object"
     }
   },
