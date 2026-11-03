@@ -59,6 +59,7 @@ from daedalus.tiers import (
     pick,
     tiers_path,
 )
+from daedalus.tools import workspace
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +265,9 @@ class Agent:
         self.llm = llm
         self.memory = memory if memory is not None else self._memory_from_spec()
         self.tools = tools if tools is not None else self._tools_from_spec()
+        # At load whenever it is set, not only when a root uses {workspace}: the Claude
+        # Code engine runs in the workspace too (Prudence on PR 248).
+        self._workspace_parent()
         self.checkpoints = (
             checkpoints if checkpoints is not None else self._checkpoints_from_spec()
         )
@@ -438,6 +442,28 @@ class Agent:
 
         return NoBudget()
 
+    def _workspace_parent(self) -> Path | None:
+        """tools.workspace.parent as a directory, or None when unset (#247). Checked at
+        load: a typo'd parent would otherwise fail every task."""
+        raw = self.bundle.spec.tools.workspace.parent
+        if not raw:
+            return None
+        parent = Path(raw).expanduser()
+        if not parent.is_dir():
+            raise BundleError(f"tools.workspace.parent {raw!r} is not a directory")
+        return parent.resolve()
+
+    def _task_workspace(self, task: Task) -> Path | None:
+        """This task's workspace, None when the bundle has none; WorkspaceError when the
+        bundle has one and the task's metadata doesn't name a valid folder."""
+        raw = self.bundle.spec.tools.workspace.parent
+        if not raw:
+            return None
+        parent = Path(raw).expanduser()
+        if not parent.is_dir():  # checked at load; gone since, so this task fails (701)
+            raise workspace.WorkspaceError(f"tools.workspace.parent {raw!r} is not a directory")
+        return workspace.resolve(parent, task.metadata.get(workspace.WORKSPACE_KEY))
+
     def _tools_from_spec(self) -> ToolProvider:
         spec = self.bundle.spec.tools
         providers: list[ToolProvider] = []
@@ -463,6 +489,15 @@ class Agent:
             else:
                 raise BundleError(f"unknown builtin tool group {key!r} (available: files, exec)")
             try:
+                if workspace.uses_token(config.get("roots")):
+                    parent = self._workspace_parent()
+                    if parent is None:
+                        raise BundleError(
+                            f"tools.builtin.{key} uses {workspace.TOKEN}, which needs "
+                            "tools.workspace.parent"
+                        )
+                    providers.append(workspace.WorkspaceToolProvider(group, config, parent))
+                    continue
                 providers.append(group(**config))
             except (TypeError, ValueError) as exc:
                 raise BundleError(f"tools.builtin.{key}: {exc}") from exc
@@ -1082,6 +1117,29 @@ class Agent:
         )
 
     async def _run_engine(self, task: Task, messages: list[dict]) -> Task:
+        # The task's workspace (#247), resolved before any tool is listed: a bundle with
+        # tools.workspace fails a task that doesn't name a valid folder, rather than
+        # letting its tools fall back to anywhere.
+        try:
+            task_workspace = self._task_workspace(task)
+        except workspace.WorkspaceError as exc:
+            self._emit("workspace_refused", error=str(exc))
+            return task.reply(
+                f"workspace refused: {exc}",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        if task_workspace is not None:
+            self._emit("workspace", path=str(task_workspace))
+        token = workspace.current_workspace.set(task_workspace)
+        try:
+            return await self._run_engine_turn(task, messages, task_workspace)
+        finally:
+            workspace.current_workspace.reset(token)
+
+    async def _run_engine_turn(
+        self, task: Task, messages: list[dict], task_workspace: Path | None
+    ) -> Task:
         try:
             allowed = await self._allowed_tools()
         except Exception as exc:
@@ -1130,15 +1188,41 @@ class Agent:
             messages = _with_inbound_note(messages, current_consult_asker.get())
         self._emit("tools_offered", names=[spec["name"] for spec in allowed])
         allowed_names = {spec["name"] for spec in allowed}
+        binds = self.bundle.spec.tools.bind
+        unmatched = sorted(set(binds) - allowed_names)
+        if unmatched:
+            # A typo'd bind key binds nothing, and the model would choose that argument.
+            self._emit("bind_unmatched", tools=unmatched)
+        # The model is never shown a bound argument, so it can't try to set one (#247).
+        allowed = [
+            workspace.hide_bound(spec, binds[spec["name"]]) if spec["name"] in binds else spec
+            for spec in allowed
+        ]
 
         async def call_tool(name: str, arguments: dict) -> str:
-            return await self._call_tool(name, arguments, allowed_names)
+            if name in binds and name in allowed_names:
+                # Before the gates, so an approver sees the real target. Whatever the
+                # model sent for a bound argument is overwritten, never merged.
+                try:
+                    arguments = workspace.bind_arguments(arguments, binds[name], task.metadata)
+                except workspace.BindError as exc:
+                    self._emit("bind_refused", tool=name, error=str(exc))
+                    return f"error: {name} can't run: {exc}"
+            # Set again on every call, from this closure: an engine may dispatch tool calls
+            # on a task whose context it created before _run_engine set the workspace (the
+            # Claude Code SDK's in-process MCP server), and this must not depend on that.
+            token = workspace.current_workspace.set(task_workspace)
+            try:
+                return await self._call_tool(name, arguments, allowed_names)
+            finally:
+                workspace.current_workspace.reset(token)
 
         return await self._engine().run(
             EngineTurn(
                 task=task,
                 messages=messages,
                 tools=allowed,
+                workspace=task_workspace,
                 call_tool=call_tool,
                 emit=self._emit,
                 budget=self._budget(),

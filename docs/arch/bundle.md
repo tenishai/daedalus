@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-11-01
-anchor: src/daedalus/bundle.py sha=54bc91d1fb098721683529e570c7175f503f91db
-anchor: docs/bundle.schema.json sha=2b36035b9e333471c7bada1e24b4748e7e275edf
+updated: 2026-11-03
+anchor: src/daedalus/bundle.py sha=693a0ec8fc131625fc314fc15cad4181eebbfcaf
+anchor: docs/bundle.schema.json sha=003f03108e1ca5b2201e61bc5d07f0976110ed3d
 ---
 # bundle — agent.yaml schema and the bundle directory
 
@@ -19,6 +19,8 @@ INVARIANTS:
 - Slack transport: `channel` key present but empty → BundleError (a typo must not open the widest reach); key omitted → every invited channel. All slack blocks fold into ONE SlackTransport (Socket Mode delivers each event to one connection).
 - model.id as a tier (#127, #129) resolves at Agent construction from the deployment's tiers file ($DAEDALUS_TIERS, tiers.py): the entry fills model.id, the endpoint fields, max_tokens/thinking/request_timeout, context_tokens/max_repeats and the claude-code model, never overriding a value the bundle set (model_fields_set decides; model.thinking None = silent); no tiers file → BundleError. tiers.py imports ThinkingSpec from bundle.py, never the reverse. The old model.tier/min_tier keys are refused with a pointer to model.id.
 - tools.builtin groups are `files` and `exec`; exec loads only with approvals.ceiling.exec: true (agent.py), anything else is a BundleError. The field stays an untyped dict (agent.py passes each block as provider kwargs); its schema `description` is where an author sees the refused files roots (tools/builtin.py _refused_root, #199). request_timeout, salvage_text_calls and task_timeout carry descriptions too.
+- Per-task workspaces (#247): `tools.workspace.parent` plus a builtin root written as the literal `{workspace}` or `{workspace}/sub` (not a ${VAR}: filled per task, never at load). Task metadata `daedalus_workspace` names ONE folder under the parent (regex `[A-Za-z0-9][A-Za-z0-9._-]*`, resolved after symlinks, must exist); anything else fails the task 701 before any tool is listed (agent.py _run_engine). The token without a parent, a parent that isn't a directory (checked at load whenever it is set, since the Claude Code engine runs in the workspace), or a sub-root with `..` fail at load; a parent gone after load fails the task 701. tools/workspace.py holds the resolver and WorkspaceToolProvider, which builds the real files/exec provider per workspace from a contextvar (cached, 32 entries).
+- `tools.bind` (#247): {tool: {argument: dotted.metadata.path}}. Agent._run_engine_turn hides bound arguments from the listing the engine gets and overwrites them on every call, before the gates; a missing or empty value fails the call, never falls back to the model's value. A bind key matching no offered tool emits `bind_unmatched` per turn.
 - tools.salvage_text_calls (#200): None = on only when model.api_base is set; salvage reads only JSON inside <tool_call>/<tools> tags (engines/litellm.py).
 - Fields validated at load so a typo fails the bundle: slack `approvers` (list of U…/W… user ids), slack `wake` (mention|thread|channel; every slack block must agree), github.branch_prefix (a valid git ref component, default "daedalus"), memory.team (only "none"; "outbox" is refused because it was never built).
 - The schema lets `${VAR}` / `${VAR:-default}` placeholders stand in for enum, integer, number and boolean leaves (#132), so an editor accepts what interpolate() will expand.

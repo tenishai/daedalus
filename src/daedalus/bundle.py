@@ -347,6 +347,20 @@ class JiraSpec(_WarnExtra):
     self: str | None = None  # this agent's own name, for the broker route
 
 
+class WorkspaceSpec(_WarnExtra):
+    """Per-task workspaces (#247): a task's metadata names one folder under `parent`."""
+
+    parent: str | None = Field(
+        default=None,
+        description=(
+            "Directory holding the per-task workspaces. A builtin root written as "
+            "{workspace} or {workspace}/sub is filled per task from the folder that "
+            "task metadata daedalus_workspace names: one directory name, never a path. "
+            "A task with no valid workspace fails."
+        ),
+    )
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
@@ -371,6 +385,15 @@ class ToolsSpec(_WarnExtra):
         ),
     )
     allow: list[str] = Field(default_factory=list)  # ceiling; empty = deny everything
+    workspace: WorkspaceSpec = Field(default_factory=WorkspaceSpec)
+    bind: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Tool arguments filled from task metadata on every call (#247), as "
+            "{tool: {argument: dotted.metadata.path}}. The model is not shown bound "
+            "arguments, and a call whose bound value is missing fails."
+        ),
+    )
     max_steps: int = 10
     # When the loop runs out of steps or context (#98): "stop" replies with the
     # step/context message; "wrap_up" makes one last call, with no tools offered,

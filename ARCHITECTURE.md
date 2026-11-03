@@ -2,7 +2,7 @@
 card: repo-card:daedalus
 updated: 2026-11-01
 anchor: pyproject.toml sha=8d581f6d8b0cd72a76a5f480574b2c12ea1d996f
-anchor: src/daedalus/agent.py sha=12335a826bddf41677126d2427dffaa49b1ad365
+anchor: src/daedalus/agent.py sha=013aa0cc73361f2b6c7f65d7184d87a24dc4bc8f
 ---
 # daedalus — repo card
 
@@ -37,5 +37,6 @@ GOTCHAS:
 - Every engine run has a deadline (#201): Agent._loop wraps it in asyncio.timeout(spec.task_timeout, default 600 s) and a run past it fails 704; the litellm engine also passes model.request_timeout (default 120 s) to litellm, whose own default is 6000 s. The cancellation reaches a running tool call only because nothing on the call path catches BaseException: keep Agent._call_tool's `except Exception`, and don't add `except BaseException` to a tool provider. A tool that runs in a thread (asyncio.to_thread, e.g. cloudtrail) is abandoned, not stopped.
 - `approvals.ceiling.write` and `.hosts` are parsed but read nowhere; don't describe them as controls. Only `ceiling.exec` is read, at load, where it gates the exec builtin (docs/design.md §3 says the same).
 - No code sets TaskState.INPUT_REQUIRED and nothing emits reason 700; escalation ends a task FAILED with 704 (design.md §3 says so since #203).
+- Tools are built once per process, except builtin groups whose roots use `{workspace}` (#247): those resolve per task from metadata `daedalus_workspace` through a contextvar set in Agent._run_engine. Don't read `current_workspace` outside a task turn; it is None there.
 - docs/bundle.schema.json must be regenerated (`daedalus schema --out docs/bundle.schema.json`) with any AgentSpec change, or test_schema fails.
 RELATED DOCS: AGENTS.md (traps, build/test), docs/design.md (rationale; predates the code), docs/proposals/capability-seam.md (proposal, not behaviour), SECURITY.md.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -40,6 +41,9 @@ class EngineTurn:
     # The agent's memory store. Model-driven engines don't touch it (the Agent recalls
     # before the turn); the scripted engine drives it directly (#227).
     memory: MemoryStore | None = None
+    # This task's workspace (#247), when the bundle sets tools.workspace. An engine that
+    # runs in a directory of its own (Claude Code) runs there instead of its bundle cwd.
+    workspace: Path | None = None
 
 
 class Engine(Protocol):

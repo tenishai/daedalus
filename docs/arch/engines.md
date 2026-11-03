@@ -1,15 +1,15 @@
 ---
 card: arch-card:daedalus-engines
-updated: 2026-10-30
-anchor: src/daedalus/engines/base.py sha=1be772ec18c984b2dfca59b9eb26e764aed109c7
+updated: 2026-11-03
+anchor: src/daedalus/engines/base.py sha=ecae4848c0b98eec961d225fa6e2311bef08b814
 anchor: src/daedalus/engines/litellm.py sha=ac68ff735bb55ce05e7af2d19922dbce36b039f4
-anchor: src/daedalus/engines/claude_code.py sha=0a292655f26670d55b097d32cadcb382450446bc
+anchor: src/daedalus/engines/claude_code.py sha=94fe3d515632ab33d0dafa1198c5b7b226763932
 anchor: src/daedalus/engines/bridge.py sha=bfadb495652bec27bb0239ebd00c0f6d1c97cf7e
 anchor: src/daedalus/engines/scripted.py sha=b7726a7718ce00b31a1402e8903d72c970addbc8
 ---
 # engines — what runs one task turn (tenishai/agents#51)
 
-WHAT / SEAM: `Engine` Protocol (engines/base.py): `name: str`, `async run(turn: EngineTurn) -> Task`. `EngineTurn` dataclass = everything an engine may use and nothing else: task, messages (system+history, built by Agent._messages), tools (allowlisted specs, CANONICAL dotted names), call_tool(name, args), emit(event, **fields), budget, checkpoints, spec (AgentSpec, read-only), approve(name, input) -> None|refusal, withheld(name) -> bool, memory (the agent's MemoryStore; only the scripted engine uses it, #227).
+WHAT / SEAM: `Engine` Protocol (engines/base.py): `name: str`, `async run(turn: EngineTurn) -> Task`. `EngineTurn` dataclass = everything an engine may use and nothing else: task, messages (system+history, built by Agent._messages), tools (allowlisted specs, CANONICAL dotted names), call_tool(name, args), emit(event, **fields), budget, checkpoints, spec (AgentSpec, read-only), approve(name, input) -> None|refusal, withheld(name) -> bool, memory (the agent's MemoryStore; only the scripted engine uses it, #227), workspace (this task's resolved workspace or None, #247; the claude-code engine uses it as cwd ahead of engine.claude_code.cwd).
 Registry: agent.py `ENGINES = ("litellm", "claude-code")`, and `engines()` adds "scripted" only when DAEDALUS_SCRIPTED_ENGINE=1 (#227); chosen by Agent(engine=) > $DAEDALUS_ENGINE > the engine of the model tier when model.id names one (#127, Agent._resolve_model) > "litellm". An explicit engine that disagrees with the tier is refused; an unknown name → BundleError at construction. Agent._engine() builds a fresh engine PER TURN (tests swap agent.llm).
 OPS / FLOW: Agent._loop → _allowed_tools (tier 1) → drop _unapprovable tools + system-prompt note → EngineTurn(...) → engine.run.
 - LiteLLMEngine (engines/litellm.py): daedalus's own loop. Per step: checkpoint save (images stripped) → budget check (702) → llm.complete → salvage tool calls written as text inside <tool_call>/<tools> tags (≤4; only when tools.salvage_text_calls, default on only with model.api_base, #200) → no calls = checkpoint drop + reply → context_tokens / max_repeats checks → dispatch each call via turn.call_tool. A name with its server prefix dropped (Gemini, #167) resolves only when exactly one offered tool ends in it (emits bare_tool_name); ambiguous or unknown stays refused. Exhaustion (steps/context/repeats) → FAILED 701/702, optional one tool-less wrap_up call when tools.on_exhausted=wrap_up and budget remains.

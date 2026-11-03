@@ -8,6 +8,24 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **One agent can work a different checkout on each task** (tenishai/daedalus#247,
+  for tenishai/agents#171). `tools.workspace.parent` names a directory of prepared
+  per-task folders, and a builtin `files` or `exec` root written as the literal
+  `{workspace}` (or `{workspace}/sub`) is filled per task. Task metadata
+  `daedalus_workspace` holds one folder name, never a path. A name that isn't one
+  plain folder, a symlink out of the parent or a missing folder fails the task with 701
+  before any tool is listed, so a caller can choose which folder a task uses but never
+  widen the roots. The token without a parent, a parent that isn't a directory (checked whenever it is
+  set), or a sub-root with `..` fail at load; a parent removed after load fails the task
+  with 701. A `tools.bind` key that matches no offered tool emits `bind_unmatched`. The Claude Code engine runs in the task's workspace,
+  ahead of `engine.claude_code.cwd`. `tools.bind` (`{tool: {argument:
+  dotted.metadata.path}}`) fills a tool's arguments from task metadata on every call,
+  before the approval gates. Bound arguments are removed from the listing the model
+  sees, whatever the model sends for them is overwritten, and a missing value fails the
+  call. `daedalus run -m … --metadata '<json object>'` merges into the one-shot task's
+  metadata, so a launcher can name the workspace and bound values. A bundle with neither
+  field behaves as before. `docs/bundle.schema.json`
+  regenerated, so kobo's vendored copy needs refreshing for bundles that use them.
 - **The thinking budget is kept apart from the visible reply's, and a cut reply says why
   in the log** (tenishai/daedalus#240). A one-line answer hit the 8192 `max_tokens` cap
   twice on one day because the provider counted the model's thinking against it.
