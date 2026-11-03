@@ -27,9 +27,9 @@ class FakeWeb:
         self._ts = 0
 
     async def chat_postMessage(self, channel, text, thread_ts=None, **kwargs):
-        self._ts += 1
         if kwargs.get("icon_url") and getattr(self, "refuse_icon", False):
             raise RuntimeError("missing_scope")
+        self._ts += 1
         self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts, **kwargs})
         return {"ts": f"ts-{self._ts}"}
 
