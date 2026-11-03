@@ -457,7 +457,8 @@ class SlackApi:
                 return await self._web.chat_postMessage(icon_url=self.icon_url, **kwargs)
             except Exception as exc:  # noqa: BLE001 -- the icon is decoration
                 logger.warning(
-                    "slack: posting with the room's icon failed (%s); posting plain from now on", exc
+                    "slack: posting with the room's icon failed (%s); posting plain from now on",
+                    exc,
                 )
                 self.icon_url = None
         return await self._web.chat_postMessage(**kwargs)
