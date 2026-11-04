@@ -8,6 +8,25 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **`audit.trace`: the access-provenance chain in a fixed order** (`tools.audit_trace`). An
+  auditing agent asked "when did this person get this access, and who approved it" used to
+  pick its own steps from a skill, and sometimes skipped one, searched a partial name, or
+  stopped at the first empty search. The tool runs the chain itself over the agent's own
+  lanes: the provisioning log's adds, removes and account lifecycle; the access-request
+  tickets naming the person's full email in a window around each add, each checked for
+  naming the group, its created time and its approval; the approval recorded nearest before
+  the add chosen as the authorization; and the request thread the ticket (or its parent)
+  names, else an anchored search that keeps only a thread carrying the ticket's key. On when
+  `tracker_site` and `tracker_project` are set; needs `cloudtrail` and `slack_read` on.
+- **`slack.find_threads` reads replies too.** A request bot's opening message often names the
+  requester by Slack id, and the email appears only in a reply, so a root-only scan answered
+  "no thread" for a thread that existed. The find now also reads the replies of up to 150
+  threads in the window. **`slack.read_thread` shows who posted and who reacted**: each
+  message's author and reactions with the reacting users (the approval is often a reaction),
+  resolved to names and emails when the app has `users:read`, and said plainly when not.
+- **`cloudtrail.query_provisioning` returns account creation** (`user.lifecycle.create`), the
+  real answer to "when was this person onboarded".
+
 - **An agent image is the runtime and nothing else** (one runtime, bundles as artifacts;
   tenishai/kobo#434). With `BUNDLE_ARTIFACT` in the pod's environment the entrypoint pulls
   the bundle from that registry artifact at start (`docker/bundle_pull.py`: one gzip

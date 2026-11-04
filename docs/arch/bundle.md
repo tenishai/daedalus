@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-11-03
-anchor: src/daedalus/bundle.py sha=693a0ec8fc131625fc314fc15cad4181eebbfcaf
-anchor: docs/bundle.schema.json sha=d933acd3e60937b2372c7922e0d5b78c48e2f162
+updated: 2026-11-04
+anchor: src/daedalus/bundle.py sha=7602aef2177bbb69940854049b5e672a268ca7a7
+anchor: docs/bundle.schema.json sha=a691ff07d5d2d422ef266b2c3ae667fe6ea7b8ef
 ---
 # bundle — agent.yaml schema and the bundle directory
 
@@ -12,7 +12,7 @@ OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursive
 INVARIANTS:
 - Unknown fields load with a WARNING, never an error and never silently (`_WarnExtra`): forward-compat with newer writers (kobo, kaminos).
 - docs/bundle.schema.json is drift-pinned: tests/test_schema.py::test_committed_schema_cannot_drift_from_the_runtime. Any AgentSpec change needs `daedalus schema --out docs/bundle.schema.json` in the same commit. The schema is the contract for non-Python readers (cabal's bundle reader, editors).
-- `tools.allow` empty = deny everything. `tools.provider` ∈ none|mcp|liminal|colleagues picks ONE primary; github, cloudtrail, slack_read, jira, liminal.url are SIDECARS that stack beside it (agent.py _tools_from_spec). `cloudtrail` is ON when `event_data_store` plus either `role_arn` (the pod assumes) or `bab_url`+`bab_integration` (a one-hour credential leased from the room's permission service with the token at `bab_token_file`) are set; `CloudTrailSpec.on` is the one predicate (2026-10-29). `slack_read.channels: []` = lane ON for every invited channel; omitted = OFF (2026-09-23).
+- `tools.allow` empty = deny everything. `tools.provider` ∈ none|mcp|liminal|colleagues picks ONE primary; github, cloudtrail, slack_read, jira, liminal.url are SIDECARS that stack beside it (agent.py _tools_from_spec). `cloudtrail` is ON when `event_data_store` plus either `role_arn` (the pod assumes) or `bab_url`+`bab_integration` (a one-hour credential leased from the room's permission service with the token at `bab_token_file`) are set; `CloudTrailSpec.on` is the one predicate (2026-10-29). `slack_read.channels: []` = lane ON for every invited channel; omitted = OFF (2026-09-23). `audit_trace` (2026-11-04) is ON when `tracker_site` + `tracker_project` are set (`AuditTraceSpec.on`) and then REQUIRES cloudtrail and slack_read on (BundleError at wiring otherwise); every org-specific value (tracker tool prefix, group prefixes and noise words, the request bot's thread marker, approval phrase, approver field) lives in the block, none in code.
 - Which engine runs a bundle is NOT in the bundle; `engine.claude_code` only configures that engine. Same bundle must run with and without Claude Code.
 - `memory.revision` unknown value → warn and disable; absent = the revision module is never imported.
 - A skill whose `requires:` the allowlist doesn't admit, or skills without `skills.load` allowed, warn at load (unmet_requirements); they don't fail.

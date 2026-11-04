@@ -347,6 +347,33 @@ class JiraSpec(_WarnExtra):
     self: str | None = None  # this agent's own name, for the broker route
 
 
+class AuditTraceSpec(_WarnExtra):
+    """`audit.trace` (2026-11-04): the access-provenance evidence chain run in
+    a fixed order over the agent's own `cloudtrail` and `slack_read` lanes and
+    the gateway's issue-tracker tools, so an auditing agent starts from one
+    evidence pack instead of choosing (and sometimes skipping) the steps.
+    Everything org-specific lives here. On when the tracker site and project
+    are set and both the cloudtrail and slack_read blocks are on."""
+
+    tracker_site: str | None = None  # the tracker tools' cloudId, e.g. yourorg.atlassian.net
+    tracker_project: str | None = None  # the access-request project key, e.g. REQ
+    tracker_tools: str = "atlassian"  # gateway tool prefix serving the Jira tools
+    # Directory-group name prefixes to strip before matching a group against a
+    # ticket's words (eng_ops_global-cdn -> global, cdn), and words a ticket
+    # need not repeat (a region suffix, say).
+    group_prefixes: list[str] = Field(default_factory=list)
+    group_noise_words: list[str] = Field(default_factory=list)
+    # The words a request bot writes before the Slack thread timestamp in a
+    # ticket's description; absent = always search the channel.
+    thread_marker: str | None = None
+    approval_phrase: str = "Approved by"  # how an approval comment begins
+    approver_field: str = "Approver"  # the ticket field naming the approver
+
+    @property
+    def on(self) -> bool:
+        return bool(self.tracker_site and self.tracker_project)
+
+
 class WorkspaceSpec(_WarnExtra):
     """Per-task workspaces (#247): a task's metadata names one folder under `parent`."""
 
@@ -370,6 +397,7 @@ class ToolsSpec(_WarnExtra):
     cloudtrail: CloudTrailSpec = Field(default_factory=CloudTrailSpec)
     slack_read: SlackReadSpec = Field(default_factory=SlackReadSpec)
     jira: JiraSpec = Field(default_factory=JiraSpec)
+    audit_trace: AuditTraceSpec = Field(default_factory=AuditTraceSpec)
     # Left an untyped dict on purpose: agent.py dispatches on the group name and passes
     # the block to the provider as keyword args. The description is where a schema
     # reader learns the files-root refusal (tools/builtin.py _refused_root, #199).

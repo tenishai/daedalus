@@ -70,6 +70,9 @@ _LEASE_RECHECK_S = 60.0
 # the group" audit answer. Activate/unsuspend are included so a restore
 # after suspension is visible in the same timeline.
 _LIFECYCLE_EVENTS = (
+    # create: when the account was made, the answer to "when was this person
+    # onboarded" that the first group add only approximates.
+    "user.lifecycle.create",
     "user.lifecycle.activate",
     "user.lifecycle.deactivate",
     "user.lifecycle.delete.initiated",

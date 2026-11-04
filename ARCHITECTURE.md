@@ -1,8 +1,8 @@
 ---
 card: repo-card:daedalus
-updated: 2026-11-03
+updated: 2026-11-04
 anchor: pyproject.toml sha=081f2b646bd1f4b2904112280a1c04d5bae4e739
-anchor: src/daedalus/agent.py sha=a2fc3b601aa52e3f92fa8ddfda1a173ea42fe185
+anchor: src/daedalus/agent.py sha=64ee872a68fe3c8f8816565975b50d7e11fd8745
 ---
 # daedalus — repo card
 
@@ -22,7 +22,7 @@ SEAMS → card:
 - bundle      src/daedalus/bundle.py         (AgentSpec = agent.yaml schema, drift-pinned JSON Schema) → docs/arch/bundle.md
 - (uncarded) transports/slack.py (Socket Mode with SLACK_APP_TOKEN, else events over HTTP at the a2a app's POST /slack/events gated by SLACK_RELAY_SECRET, kobo#304; `admit()` dedupes event_id for both ways in; reaction approver; one transport for all slack blocks; a block with `optional: true` is skipped when neither SLACK_BOT_TOKEN nor SLACK_APP_TOKEN is set, the room's dormant wiring, kobo#434); transports/cli.py
 - (uncarded) tiers.py (the deployment's tiers file: tier word → model, endpoint, engine, limits incl. max_tokens and thinking, #240)
-- (uncarded) tools/*: builtin files.* (roots that serve the host are refused at load: /, system dirs, $HOME or above, $TECHNE_HOME, #199) and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149; a task with inbound depth ≥ 1 is offered only `knowledge_only` providers' tools, and the cloudtrail/github/liminal lanes refuse it with one sentence, kobo#310), github/jira (room brokers, mint-per-call tokens), cloudtrail, slack_read; compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
+- (uncarded) tools/*: builtin files.* (roots that serve the host are refused at load: /, system dirs, $HOME or above, $TECHNE_HOME, #199) and exec.run (exec.py; a command in the agent's workspace, needs approvals.ceiling.exec: true), skills.load, mcp (stdio), liminal (gateway), colleagues (switchboard A2A asks; per-answer limits and no onward asks when answering a colleague, #149; a task with inbound depth ≥ 1 is offered only `knowledge_only` providers' tools, and the cloudtrail/github/liminal lanes refuse it with one sentence, kobo#310), github/jira (room brokers, mint-per-call tokens), cloudtrail (adds `user.lifecycle.create`, 2026-11-04), slack_read (a find also reads the replies of up to 150 window threads; a read renders author and reactions, names when the app has users:read), audit_trace (audit.trace: the provenance chain over the agent's own cloudtrail + slack_read + gateway tracker tools, appended to the MultiToolProvider it calls through, 2026-11-04); compose.py MultiToolProvider (first name wins; a provider raising ToolProviderRefused is skipped for the turn, #156)
 - (uncarded) memory/: techne.py (MemoryStore over techne), teach.py (operator lanes; teach_authorized is an allowlist, `auth.operator_subs`, #195), journal.py (7-day journal.db, one row per (context_id, verified sub), #212), learnings.py, revision.py (opt-in belief revision), tooling.py (port of kobo's tool-file lint; not a sandbox: a delivered file runs as the agent at next boot, #195)
 - (uncarded) events.py EventBus (trace stream; -v and /events SSE); checkpoints.py SqliteCheckpoints; llm.py LiteLLMClient (+ the `_THINKING_ROUTES` table and `thinking_kwargs`: the ONE place provider thinking facts live; logs `reply truncated:` on finish reason length, #240); budget.py; scaffold.py
 
