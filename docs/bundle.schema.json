@@ -20,6 +20,79 @@
       "title": "ApprovalsSpec",
       "type": "object"
     },
+    "AuditTraceSpec": {
+      "additionalProperties": true,
+      "description": "`audit.trace` (2026-11-04): the access-provenance evidence chain run in\na fixed order over the agent's own `cloudtrail` and `slack_read` lanes and\nthe gateway's issue-tracker tools, so an auditing agent starts from one\nevidence pack instead of choosing (and sometimes skipping) the steps.\nEverything org-specific lives here. On when the tracker site and project\nare set and both the cloudtrail and slack_read blocks are on.",
+      "properties": {
+        "tracker_site": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tracker Site"
+        },
+        "tracker_project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tracker Project"
+        },
+        "tracker_tools": {
+          "default": "atlassian",
+          "title": "Tracker Tools",
+          "type": "string"
+        },
+        "group_prefixes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Group Prefixes",
+          "type": "array"
+        },
+        "group_noise_words": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Group Noise Words",
+          "type": "array"
+        },
+        "thread_marker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Marker"
+        },
+        "approval_phrase": {
+          "default": "Approved by",
+          "title": "Approval Phrase",
+          "type": "string"
+        },
+        "approver_field": {
+          "default": "Approver",
+          "title": "Approver Field",
+          "type": "string"
+        }
+      },
+      "title": "AuditTraceSpec",
+      "type": "object"
+    },
     "BudgetSpec": {
       "additionalProperties": true,
       "properties": {
@@ -776,6 +849,9 @@
         },
         "jira": {
           "$ref": "#/$defs/JiraSpec"
+        },
+        "audit_trace": {
+          "$ref": "#/$defs/AuditTraceSpec"
         },
         "builtin": {
           "additionalProperties": {

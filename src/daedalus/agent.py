@@ -653,7 +653,32 @@ class Agent:
             return providers[0]
         from daedalus.tools.compose import MultiToolProvider
 
-        return MultiToolProvider(providers)
+        multi = MultiToolProvider(providers)
+        # audit.trace (2026-11-04): the evidence chain run in a fixed order over
+        # this agent's own cloudtrail, slack_read and gateway providers. It calls
+        # them through `multi`, so it has exactly their reach and credentials.
+        if spec.audit_trace.on:
+            from daedalus.tools.audit_trace import AuditTraceProvider
+            from daedalus.tools.cloudtrail import CloudTrailToolProvider
+            from daedalus.tools.slack_read import SlackReadToolProvider
+
+            cloudtrail = next((p for p in providers if isinstance(p, CloudTrailToolProvider)), None)
+            slack_read = next((p for p in providers if isinstance(p, SlackReadToolProvider)), None)
+            if cloudtrail is None or slack_read is None:
+                raise BundleError(
+                    "tools.audit_trace needs the cloudtrail and slack_read blocks on too"
+                )
+            at = spec.audit_trace
+            multi.providers.append(
+                AuditTraceProvider(
+                    multi, cloudtrail, slack_read,
+                    tracker_site=at.tracker_site, tracker_project=at.tracker_project,
+                    tracker_tools=at.tracker_tools, group_prefixes=at.group_prefixes,
+                    group_noise_words=at.group_noise_words, thread_marker=at.thread_marker,
+                    approval_phrase=at.approval_phrase, approver_field=at.approver_field,
+                )
+            )
+        return multi
 
     @classmethod
     def load(cls, path: str | Path, **overrides) -> Agent:

@@ -32,7 +32,9 @@ text; the provider never raises out to the agent loop.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import time
 from datetime import UTC, datetime
 
@@ -57,6 +59,14 @@ _WINDOW_CAP = 60
 _REPLIES_PER_THREAD = 100
 _THREAD_CHARS = 8_000
 _PAGE_SIZE = 200
+# Threads whose ROOT does not name the person still may: a request bot's root
+# often names the requester as <@U...>, and the email only appears in the
+# bot's replies (seen 2026-11-04: a root-only scan reported "no thread" for a
+# thread that existed). The find scans the replies of up to this many threads
+# in the window, a few at a time.
+_REPLY_SCAN_CAP = 150
+_REPLY_SCAN_CONCURRENCY = 6
+_MENTION = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]*)?>")
 
 
 def _capped_int(value, default: int, cap: int) -> int:
@@ -106,6 +116,11 @@ class SlackReadToolProvider:
         self.scan_limit = scan_limit
         self._client = client  # injectable: tests pass a fake request client
         self._now = now
+        # Slack user id -> "Name <email>", filled by users.info. None marks a
+        # bot that lacks users:read: ids are then shown as they are, once
+        # said out loud, instead of failing the read.
+        self._people: dict[str, str] | None = {}
+        self._by_email: dict[str, str | None] = {}
 
     def _ensure_client(self):
         if self._client is None:
@@ -264,6 +279,72 @@ class SlackReadToolProvider:
             raise RuntimeError(f"slack {method}: {data.get('error', 'unknown')}")
         return data
 
+    async def _person(self, user_id: str) -> str:
+        """"Name <email> (U123)" when users:read lets the bot look the id
+        up, else the bare id. Cached for the process."""
+        if not user_id:
+            return "?"
+        if self._people is None:
+            return user_id
+        if user_id in self._people:
+            return self._people[user_id]
+        try:
+            data = await self._get("users.info", {"user": user_id})
+        except RuntimeError as exc:
+            if "missing_scope" in str(exc) or "not_allowed" in str(exc):
+                self._people = None
+                return user_id
+            self._people[user_id] = user_id
+            return user_id
+        user = data.get("user") or {}
+        profile = user.get("profile") or {}
+        name = profile.get("real_name") or user.get("real_name") or user.get("name") or ""
+        email = profile.get("email") or ""
+        if email:
+            label = f"{name} <{email}> ({user_id})"
+        else:
+            label = f"{name} ({user_id})" if name else user_id
+        self._people[user_id] = label
+        return label
+
+    async def _user_id_for(self, email: str) -> str | None:
+        """The Slack id for an email (users.lookupByEmail, users:read.email),
+        or None when the scope is missing or nobody has that address."""
+        if email in self._by_email:
+            return self._by_email[email]
+        try:
+            data = await self._get("users.lookupByEmail", {"email": email})
+            uid = (data.get("user") or {}).get("id")
+        except RuntimeError:
+            uid = None
+        self._by_email[email] = uid
+        return uid
+
+    async def _render(self, m: dict) -> str:
+        """One message as text, with who wrote it, every mention resolved
+        where the scope allows, and its reactions with who reacted -- the
+        approval evidence (a :+1: from an approver) lives there."""
+        text = m.get("text") or ""
+        ids = sorted(set(_MENTION.findall(text)))
+        for uid in ids:
+            label = await self._person(uid)
+            if label != uid:
+                text = re.sub(rf"<@{uid}(?:\|[^>]*)?>", f"@{label}", text)
+        if m.get("user"):
+            author = await self._person(m["user"])
+        else:
+            bot = (m.get("bot_profile") or {}).get("name")
+            author = "bot:" + (bot or m.get("username") or m.get("bot_id") or "?")
+        line = f"[{_fmt_ts(m.get('ts'))}] {author}: {text}"
+        reactions = m.get("reactions") or []
+        if reactions:
+            parts = []
+            for r in reactions:
+                who = [await self._person(u) for u in (r.get("users") or [])]
+                parts.append(f":{r.get('name')}: by {', '.join(who) or '?'}")
+            line += "\n    reactions: " + "; ".join(parts)
+        return line
+
     async def _thread_text(self, channel: str, thread_ts: str) -> tuple[str, int]:
         """The joined text of one full thread, honestly truncated, plus the
         message count."""
@@ -274,11 +355,14 @@ class SlackReadToolProvider:
         messages = replies.get("messages") or []
         parts = []
         for m in messages:
-            text = m.get("text") or ""
-            if not text:
+            if not (m.get("text") or m.get("reactions")):
                 continue
-            stamp = _fmt_ts(m.get("ts"))
-            parts.append(f"[{stamp}] {text}")
+            parts.append(await self._render(m))
+        if self._people is None:
+            parts.append(
+                "(note: user ids are shown as <@U...> because this app lacks the "
+                "users:read scope; reactions and authors are still exact)"
+            )
         joined = "\n---\n".join(parts)
         if len(joined) > _THREAD_CHARS:
             joined = joined[:_THREAD_CHARS] + "\n[thread truncated -- it continues past this point]"
@@ -334,6 +418,8 @@ class SlackReadToolProvider:
         seen: set[str] = set()
         scanned = 0
         cursor: str | None = None
+        uid = await self._user_id_for(email)
+        candidates: list[dict] = []  # roots with replies that did not name the person
         try:
             while scanned < self.scan_limit:
                 params: dict = {
@@ -352,7 +438,12 @@ class SlackReadToolProvider:
                     thread_ts = m.get("thread_ts") or m.get("ts")
                     if not thread_ts or thread_ts in seen:
                         continue
-                    if not _matches(m.get("text") or "", email):
+                    root_text = m.get("text") or ""
+                    if not (_matches(root_text, email) or (uid and f"<@{uid}" in root_text)):
+                        if m.get("reply_count") and m.get("ts") == thread_ts:
+                            candidates.append(
+                                {"thread_ts": thread_ts, "root_ts": float(m.get("ts") or 0)}
+                            )
                         continue
                     seen.add(thread_ts)
                     try:
@@ -370,6 +461,48 @@ class SlackReadToolProvider:
         except Exception as exc:
             return f"Could not read the channel history: {exc}"
 
+        reply_note = ""
+        if len(matches) < count and candidates:
+            pool = [c for c in candidates if c["thread_ts"] not in seen][:_REPLY_SCAN_CAP]
+            gate = asyncio.Semaphore(_REPLY_SCAN_CONCURRENCY)
+
+            async def _hit(c: dict) -> dict | None:
+                async with gate:
+                    try:
+                        data = await self._get(
+                            "conversations.replies",
+                            {
+                                "channel": channel_id,
+                                "ts": c["thread_ts"],
+                                "limit": _REPLIES_PER_THREAD,
+                            },
+                        )
+                    except Exception:
+                        return None
+                for r in (data.get("messages") or [])[1:]:
+                    text = r.get("text") or ""
+                    if _matches(text, email) or (uid and f"<@{uid}" in text):
+                        return {**c, "in_reply": True}
+                return None
+
+            hits = [h for h in await asyncio.gather(*(_hit(c) for c in pool)) if h]
+            for h in sorted(hits, key=lambda h: -h["root_ts"]):
+                if len(matches) >= count:
+                    break
+                seen.add(h["thread_ts"])
+                matches.append(h)
+            clipped = len(candidates) > _REPLY_SCAN_CAP
+            reply_note = (
+                f" (also searched the replies of {len(pool)} threads"
+                + (
+                    f"; {len(candidates) - _REPLY_SCAN_CAP} older threads' replies "
+                    "were not searched"
+                    if clipped
+                    else ""
+                )
+                + ")"
+            )
+
         if not matches:
             budget_note = (
                 f" (scan budget hit after {scanned} messages)"
@@ -378,7 +511,7 @@ class SlackReadToolProvider:
             )
             return (
                 f"No threads mentioning {email} in {channel_id} within "
-                f"{reach}{budget_note}."
+                f"{reach}{budget_note}{reply_note}."
             )
 
         sections = []
@@ -395,7 +528,13 @@ class SlackReadToolProvider:
             permalink = await self._permalink(channel_id, thread_ts)
             header = (
                 f"Thread {thread_ts} (started {_fmt_ts(m['root_ts'])}, "
-                f"{n} messages)"
+                f"{n} messages"
+                + (
+                    "; the person is named in a reply, not the opening message"
+                    if m.get("in_reply")
+                    else ""
+                )
+                + ")"
             )
             if permalink:
                 header += f"\n{permalink}"

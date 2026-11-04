@@ -106,7 +106,9 @@ Built-in groups, under `tools.builtin`, stack beside the provider:
 
 Sidecar blocks also stack beside the provider when configured: `github` and `jira` (room
 brokers), `cloudtrail` (needs the `aws` extra), `slack_read`, and `liminal.url` when
-liminal is not the primary.
+liminal is not the primary. `audit_trace` adds one tool, `audit.trace`, that runs an
+access-provenance audit in a fixed order over the agent's own `cloudtrail`, `slack_read`
+and gateway issue-tracker tools; it needs those two blocks on.
 
 `tools.allow` is the ceiling: fnmatch patterns, and an empty list means no tools at all.
 

@@ -17,11 +17,14 @@ NOW = 1_760_000_000.0  # fixed "now" for every test
 class FakeSlack:
     """Answers Slack Web API GETs from scripted tables and records calls."""
 
-    def __init__(self, history_pages=None, replies=None, permalink=None, errors=None):
+    def __init__(self, history_pages=None, replies=None, permalink=None, errors=None, users=None):
         self.history_pages = list(history_pages or [])
         self.replies = replies or {}
         self.permalink = permalink
         self.errors = errors or {}  # method -> slack error string
+        # Slack id -> {"real_name", "email"}. None = the app lacks users:read
+        # (and users:read.email), the way most bots are installed.
+        self.users = users
         self.calls = []
 
     async def get(self, url, headers=None, params=None):
@@ -37,6 +40,19 @@ class FakeSlack:
             return _Resp({"ok": True, "messages": self.replies.get(ts, [])})
         if method == "chat.getPermalink":
             return _Resp({"ok": True, "permalink": self.permalink})
+        if method in ("users.info", "users.lookupByEmail"):
+            if self.users is None:
+                return _Resp({"ok": False, "error": "missing_scope"})
+            if method == "users.info":
+                u = self.users.get((params or {}).get("user"))
+                if u is None:
+                    return _Resp({"ok": False, "error": "user_not_found"})
+                return _Resp({"ok": True, "user": {"id": params["user"], "profile": u}})
+            email = (params or {}).get("email")
+            uid = next((k for k, u in self.users.items() if u.get("email") == email), None)
+            if uid is None:
+                return _Resp({"ok": False, "error": "users_not_found"})
+            return _Resp({"ok": True, "user": {"id": uid}})
         raise AssertionError(f"unscripted slack method {method}")
 
     async def aclose(self):
@@ -127,7 +143,7 @@ def test_day_window_is_enforced_api_side(monkeypatch):
     out = asyncio.run(
         provider.call("slack.find_threads", {"email": "jdoe@acme.io", "days": 30})
     )
-    method, params = fake.calls[0]
+    method, params = next(c for c in fake.calls if c[0] == "conversations.history")
     assert method == "conversations.history"
     # The API's own oldest bound does the scoping -- no page-walking cutoff.
     assert abs(float(params["oldest"]) - (NOW - 30 * 86400)) < 2
@@ -153,7 +169,7 @@ def test_anchored_window_bounds_both_sides(monkeypatch):
             {"email": "jdoe@acme.io", "around": anchor, "window_days": 5},
         )
     )
-    _, params = fake.calls[0]
+    _, params = next(c for c in fake.calls if c[0] == "conversations.history")
     assert float(params["latest"]) - float(params["oldest"]) == 10 * 86400
     # An anchored search finds the old thread the from-today scan never
     # reaches -- the whole point of anchoring on a known event time.
@@ -351,3 +367,57 @@ def test_unreadable_window_reads_as_default(monkeypatch):
     out = asyncio.run(provider.call("slack.find_threads", {
         "email": "jdoe@acme.io", "around": "2026-07-10", "window_days": "wide"}))
     assert "2026-07-10 +/- 7 days" in out
+
+
+def test_a_thread_that_names_the_person_only_in_a_reply_is_found(monkeypatch):
+    """A request bot's root often names the requester as <@U...>; the email
+    shows up only in a reply. A root-only scan answered "no thread" for a
+    thread that existed (2026-11-04), so the find also reads the replies of
+    the window's threads."""
+    root = {**_msg(3600, "<@U0REQ> can I get edge cache access?"), "reply_count": 2}
+    root["thread_ts"] = root["ts"]
+    other = {**_msg(7200, "unrelated ask"), "reply_count": 1}
+    other["thread_ts"] = other["ts"]
+    fake = FakeSlack(
+        history_pages=[{"messages": [root, other]}],
+        replies={
+            root["ts"]: [
+                root,
+                _msg(3500, "Plan: add <mailto:jdoe@acme.io|jdoe@acme.io> to the cdn group"),
+            ],
+            other["ts"]: [other, _msg(7100, "done")],
+        },
+        permalink="https://slack.example/p1",
+    )
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(provider.call("slack.find_threads", {"email": "jdoe@acme.io"}))
+    assert "named in a reply, not the opening message" in out
+    assert "https://slack.example/p1" in out
+    assert "unrelated ask" not in out
+
+
+def test_a_thread_read_shows_reactions_and_who_reacted(monkeypatch):
+    """The approval often IS a reaction (:+1: from an approver), so a read
+    returns each message's reactions with the reacting users, and names them
+    when the app may look people up."""
+    root = {**_msg(3600, "<@U0REQ> please add me"), "user": "U0REQ",
+            "reactions": [{"name": "+1", "users": ["U0VP"], "count": 1}]}
+    fake = FakeSlack(
+        replies={root["ts"]: [root]},
+        users={"U0REQ": {"real_name": "Jo Doe", "email": "jdoe@acme.io"},
+               "U0VP": {"real_name": "Vee Pee", "email": "vp@acme.io"}},
+    )
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(provider.call("slack.read_thread", {"thread_ts": root["ts"]}))
+    assert ":+1: by Vee Pee <vp@acme.io> (U0VP)" in out
+    assert "Jo Doe <jdoe@acme.io> (U0REQ): @Jo Doe <jdoe@acme.io> (U0REQ) please add me" in out
+
+
+def test_without_users_read_ids_stay_ids_and_the_read_says_why(monkeypatch):
+    root = {**_msg(3600, "please add me"), "user": "U0REQ",
+            "reactions": [{"name": "+1", "users": ["U0VP"], "count": 1}]}
+    fake = FakeSlack(replies={root["ts"]: [root]})
+    provider = _provider(fake, monkeypatch)
+    out = asyncio.run(provider.call("slack.read_thread", {"thread_ts": root["ts"]}))
+    assert ":+1: by U0VP" in out
+    assert "lacks the users:read scope" in out
