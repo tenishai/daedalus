@@ -6,6 +6,18 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-11-11
+
+### Upgrading
+
+- **`pip install "tenish-daedalus[claude-code]"` no longer brings mcp 2.x or uvicorn.** Only
+  the loopback MCP bridge (`engines/bridge.py`) needed them, and no engine uses it. An
+  environment that runs the bridge installs the new `bridge` extra (see Changed).
+- **A slack transport block may be `optional: true`.** Such an agent boots with no Slack
+  token in its environment and serves Slack once one is there; a block without the flag
+  still fails boot without a token, as before. A room that wires Slack dormant at birth
+  needs this release (tenishai/kobo#434).
+
 ### Added
 
 - **`audit.trace`: the access-provenance chain in a fixed order** (`tools.audit_trace`). An
@@ -49,6 +61,14 @@ Issue and pull request numbers all refer to this repository, written in full.
   bridge's requirements are a new `bridge` extra, and the bridge refuses to start on mcp 1.x
   with a message naming that extra. CI runs the `claude-code` extra on mcp 1.x as a third leg.
 
+### Fixed
+
+- **The streamed reply opens with the agent's face too** (tenishai/daedalus#251). 0.7.0 put
+  the icon on `chat.postMessage` only; a reply that streams (`chat.startStream`, the path a
+  room agent answers on) opened without it, so Slack showed the app's default picture on
+  every answer. The stream now carries `SLACK_ICON_URL` as its icon the same way, and falls
+  back to plain when the app lacks `chat:write.customize`.
+
 ## [0.7.0] — 2026-11-03
 
 ### Upgrading
@@ -65,7 +85,7 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 - **The agent's face on every Slack message.** With `SLACK_ICON_URL` set (the room
   serves the agent's own picture there) and the app's `chat:write.customize` scope,
-  every `chat.postMessage` and every streamed reply (`chat.startStream`) carries that picture as its icon, chunks included; an
+  every `chat.postMessage` carries that picture as its icon, chunks included; an
   owner changes the face in the room and Slack follows on the next message. An app
   installed before the scope refuses the field once, and the transport posts plain
   from then on, never dropping a message.
