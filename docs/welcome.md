@@ -237,7 +237,7 @@ clone step.
 From a pinned git tag:
 
 ```bash
-pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.7.0"
+pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.7.1"
 ```
 
 or from your team's package index as `tenish-daedalus`. The `techne` extra needs a
