@@ -119,10 +119,51 @@ _WAKE_NOTICES = {
         "between other people, stay out of it."
     ),
 }
+# What another Slack app's @-mention of this agent does. A message a bot
+# wrote used to be dropped whole, so one agent could never ask another in a
+# channel. Only an `app_mention` is ever admitted (Slack delivers it to the
+# mentioned app alone); a bot's plain message stays dropped in every wake mode,
+# and so does anything this agent wrote itself.
+#
+# `knowledge` is the default and the same ceiling as a colleague's ask over the
+# switchboard (kobo#310): the turn runs with knowledge-only tools, because the
+# words came from a program and not from a person. Some apps post text an
+# outsider wrote (an issue title, an alert body), and a mention inside it must
+# not be able to drive this agent's credentials. `full` gives a bot's mention
+# the same tools a person's gets, per agent, on its operator's word. `off` is
+# the behaviour before this option existed.
+BOTS_OFF = "off"
+BOTS_KNOWLEDGE = "knowledge"
+BOTS_FULL = "full"
+BOT_MENTION_MODES = frozenset({BOTS_OFF, BOTS_KNOWLEDGE, BOTS_FULL})
+#: The env var a deployment sets per agent; unset means `knowledge`.
+BOT_MENTIONS_ENV = "SLACK_BOT_MENTIONS"
+#: Bot-woken turns in a row one thread gets before the agent stops answering
+#: there; a person's message to the agent in that thread starts the count again.
+#: Two agents that mention each other in their replies end here, not at the bill.
+_BOT_TURNS_PER_THREAD = 3
+#: Bot-woken turns one sending app gets per hour, across every thread: the
+#: bound for a loop that opens a new thread each time.
+_BOT_TURNS_PER_HOUR = 30
+_BOT_WINDOW_SECONDS = 3600.0
+#: Reaction left on a bot's mention that was not answered because a bound was hit.
+_BOT_LIMIT_REACTION = "octagonal_sign"
 # Slack's own ceiling on a task_update chunk.
 _TASK_UPDATE_MAX = 256
 # chat.appendStream takes markdown_text up to 12,000 characters per call.
 _STREAM_PIECE = 12000
+
+
+def _app_name(event: dict) -> str:
+    """What to call the app that wrote a message, for the prompt note and a
+    provenance line: the name Slack shows for it, else its bot id. Quoted back to the
+    model, never used as an identity (Agent bounds and flattens it)."""
+    profile = event.get("bot_profile")
+    name = profile.get("name") if isinstance(profile, dict) else None
+    for candidate in (name, event.get("username")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return str(event.get("bot_id"))
 
 
 def wake_notice(mode: object) -> str:
@@ -565,6 +606,16 @@ class SlackApi:
         except Exception:  # noqa: BLE001  identity is an optimization, not a gate
             return ""
 
+    async def bot_id(self) -> str:
+        """This app's own bot id (auth.test `bot_id`), "" on any failure. A
+        message posted with a custom name or icon carries no `user`, only this,
+        so it is the one sure way to know a bot-written message as our own."""
+        try:
+            response = await self._web.auth_test()
+            return response.get("bot_id") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     async def team_id(self) -> str:
         """The workspace id (auth.test `team_id`), "" on any failure. Streaming
         into a channel needs it as `recipient_team_id`; without it the
@@ -809,6 +860,7 @@ class SlackTransport:
         api: SlackApi | None = None,
         wake: str | None = None,
         relay_secret: str | None = None,
+        bot_mentions: str | None = None,
     ):
         # How a channel wakes the agent (WAKE_* above). None means the default,
         # `mention`, which is exactly the behaviour before this option existed.
@@ -817,6 +869,17 @@ class SlackTransport:
             raise ValueError(
                 f"slack wake mode {wake!r} is not one of {sorted(WAKE_MODES)}"
             )
+        # What another app's @-mention does (BOTS_* above). A word that is not
+        # one of the modes closes the door rather than failing boot: this comes
+        # from the environment, and a typo there must not take the agent down.
+        chosen = bot_mentions or os.environ.get(BOT_MENTIONS_ENV) or BOTS_KNOWLEDGE
+        if chosen not in BOT_MENTION_MODES:
+            logger.warning(
+                "slack: %s=%r is not one of %s; mentions from other apps stay off",
+                BOT_MENTIONS_ENV, chosen, sorted(BOT_MENTION_MODES),
+            )
+            chosen = BOTS_OFF
+        self.bot_mentions = chosen
         # `approvers` (Slack user ids) are the only people whose reaction approves
         # a tier-2 action (#53); none configured means tier-2 stays denied.
         self.approvers = frozenset(a for a in (approvers or ()) if a)
@@ -865,11 +928,21 @@ class SlackTransport:
         # the agent without a mention. A mention buried in a busy thread answers
         # that one message and adopts nothing. Bounded like `_seen`.
         self._owned: OrderedDict[tuple, bool] = OrderedDict()
+        # (channel, thread_ts) -> bot-woken turns in a row; a person's message to
+        # the agent in that thread drops the entry. Bounded like `_seen`.
+        self._bot_turns: OrderedDict[tuple, int] = OrderedDict()
+        # Sending app -> when each of its recent mentions was answered
+        # (monotonic seconds), for the hourly bound. Bounded like `_seen`.
+        self._bot_window: OrderedDict[str, list[float]] = OrderedDict()
         # Workspace id for streaming into channels (auth.test at serve time).
         self.team_id: str | None = None
         # Own Slack user id (auth.test at serve time). None = unknown: the
         # tagged-only gate then trusts only app_mention delivery in channels.
         self.user_id: str | None = None
+        # Own bot id (auth.test at serve time). None = unknown: a bot-written
+        # mention that names no author is then never answered, since it could
+        # be this agent's own.
+        self.bot_id: str | None = None
 
     @property
     def over_http(self) -> bool:
@@ -900,6 +973,8 @@ class SlackTransport:
                     "cannot be verified as ours and will be answered only "
                     "via app_mention delivery"
                 )
+        if self.bot_id is None:
+            self.bot_id = (await self._api.bot_id()) or None
         self._wire_approver(handler)
         self._started.set()
         if self.over_http:
@@ -1107,7 +1182,12 @@ class SlackTransport:
     async def handle_event(self, event: dict, handler: Handler) -> None:
         if event.get("type") not in {"message", "app_mention"}:
             return
-        if event.get("bot_id") or event.get("subtype"):
+        from_bot = self._mention_from_another_app(event)
+        if (event.get("bot_id") or event.get("subtype")) and not from_bot:
+            # A bot's own words and every edited/joined/deleted variant. The one
+            # bot-written event that passes is another app's @-mention of this
+            # agent (BOTS_* above); its paired plain `message` is dropped here,
+            # before the dedupe mark, so the mention is never consumed by it.
             return
         if (
             self.channels
@@ -1157,6 +1237,14 @@ class SlackTransport:
         # (plus DMs), so the event's own channel is the only correct
         # destination for reactions, the placeholder, and the reply.
         channel = event.get("channel")
+        thread = event.get("thread_ts") or ts
+        if from_bot:
+            if not self._bot_turn_allowed(channel, thread, event):
+                await self._api.react(channel, ts, _BOT_LIMIT_REACTION)
+                return
+        else:
+            # A person spoke to the agent here: the run of bot-woken turns is over.
+            self._bot_turns.pop((channel, thread), None)
         # React immediately -- before any (possibly slow, sequential) image
         # downloads below -- so the sender sees SOMETHING within
         # milliseconds instead of after every attachment finishes fetching
@@ -1169,8 +1257,12 @@ class SlackTransport:
         if not text:
             # An image with no words is still an ask.
             text = "(image)"
+        if from_bot:
+            # The thread's history is read again on every later turn, a person's
+            # included, and the model is not shown who sent what: say that these
+            # words are a program's, so they are never mistaken for a person's.
+            text = f"(From the Slack app {_app_name(event)}, not a person.)\n{text}"
 
-        thread = event.get("thread_ts") or ts
         if thread == ts and self._addressed_to_us(event):
             # The root of a new thread, asked of us: in `thread` mode its
             # replies reach us from here on. `_owned` lives in memory only, so
@@ -1255,6 +1347,21 @@ class SlackTransport:
         requester_token = current_slack_requester.set(
             sender if isinstance(sender, str) else None
         )
+        # A thread's Task outlives the turn, so the mark is set AND cleared for
+        # every turn: a bot's turn must not leave a person's next one without
+        # its tools. Done here, with no await before the handler reads it, so a
+        # second event in the same thread cannot change it in between.
+        from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
+
+        if from_bot and self.bot_mentions == BOTS_KNOWLEDGE:
+            # Another program asked, so this turn is answered the way a
+            # colleague's ask is (kobo#310): knowledge-only tools, no borrowed
+            # credential, no forwarding to other colleagues.
+            task.metadata[DEPTH_KEY] = 1
+            task.metadata[ASKED_BY_KEY] = _app_name(event)
+        else:
+            task.metadata.pop(DEPTH_KEY, None)
+            task.metadata.pop(ASKED_BY_KEY, None)
         try:
             task = await handler.handle_task(task)
             self._remember_thread((channel, thread), task)
@@ -1304,6 +1411,57 @@ class SlackTransport:
         self._threads.move_to_end(key)
         while len(self._threads) > _THREAD_CAP:
             self._threads.popitem(last=False)
+
+    def _mention_from_another_app(self, event: dict) -> bool:
+        """True for the one bot-written event this transport answers: another
+        Slack app's @-mention of this agent.
+
+        Only `app_mention` qualifies: Slack delivers it to the mentioned app
+        alone, so nothing here has to parse the text to know it was meant for
+        us. Edits, joins and every other subtype stay dropped; `bot_message` is
+        the subtype Slack gives a post that carries a custom name or icon.
+        Never this agent's own words: a reply that happened to name the agent
+        would otherwise wake it again. When the agent does not know its own
+        identity (auth.test failed) it cannot tell, so it stays silent."""
+        if self.bot_mentions == BOTS_OFF or event.get("type") != "app_mention":
+            return False
+        app = event.get("bot_id")
+        if not app or event.get("subtype") not in (None, "bot_message"):
+            return False
+        author = event.get("user")
+        if self.user_id is None or author == self.user_id:
+            return False
+        if self.bot_id is None:
+            # No bot id to compare: an event that names its author was checked
+            # above; one that names none could be ours.
+            return isinstance(author, str) and bool(author)
+        return app != self.bot_id
+
+    def _bot_turn_allowed(self, channel: str, thread: str, event: dict) -> bool:
+        """Count this bot-woken turn against both bounds; False when either is
+        spent. A refused turn is not counted, so the hour's budget is not eaten
+        by mentions that were never answered."""
+        app = str(event.get("bot_id"))
+        key = (channel, thread)
+        turns = self._bot_turns.get(key, 0)
+        now = time.monotonic()
+        recent = [t for t in self._bot_window.get(app, []) if now - t < _BOT_WINDOW_SECONDS]
+        if turns >= _BOT_TURNS_PER_THREAD or len(recent) >= _BOT_TURNS_PER_HOUR:
+            logger.warning(
+                "slack: not answering %s in %s/%s: %d bot-woken turns in a row in "
+                "this thread, %d from this app in the last hour",
+                app, channel, thread, turns, len(recent),
+            )
+            return False
+        self._bot_turns[key] = turns + 1
+        self._bot_turns.move_to_end(key)
+        while len(self._bot_turns) > _SEEN_CAP:
+            self._bot_turns.popitem(last=False)
+        self._bot_window[app] = [*recent, now]
+        self._bot_window.move_to_end(app)
+        while len(self._bot_window) > _SEEN_CAP:
+            self._bot_window.popitem(last=False)
+        return True
 
     def _addressed_to_us(self, event: dict) -> bool:
         """An app_mention, a DM, or a message whose text mentions this bot."""

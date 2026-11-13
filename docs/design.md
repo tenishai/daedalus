@@ -425,7 +425,16 @@ back. Persona constant, transport variable:
   restart, a `thread`-mode agent answers an old thread only when mentioned,
   and only a new thread started with a mention is followed again. DMs
   keep full delivery in every mode, and
-  bots/subtypes/duplicates are still dropped. A reply is a streamed message
+  subtypes/duplicates are still dropped. A bot's message is dropped too, with
+  one exception: another Slack app's `app_mention` of this agent wakes it, so
+  one agent can ask another in a channel. `SLACK_BOT_MENTIONS` sets what that
+  mention may do: `knowledge` (the default) runs the turn as a colleague's ask,
+  with knowledge-only tools and no borrowed credential, because some apps post
+  words an outsider wrote; `full` gives it the tools a person's mention gets;
+  `off` drops it. The agent's own words never wake it, a bot's words are
+  labelled as a program's in the thread's history, and two bounds end a loop:
+  three bot-woken turns in a row per thread (a person speaking to the agent
+  there starts the count again) and thirty an hour per sending app. A reply is a streamed message
   (`chat.startStream`): the agent's tool calls and recalls appear as progress
   lines under it while it works, and it becomes the answer in place; where
   streaming is refused, the hourglass placeholder path remains. Widening *where* does change
