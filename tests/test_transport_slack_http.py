@@ -116,6 +116,34 @@ async def test_repeated_event_id_is_accepted_but_not_run_again():
     assert len(handler.tasks) == 1
 
 
+async def test_a_slash_command_and_a_click_come_through_the_same_route():
+    """The relay forwards a command's form fields as one object with `type`
+    added, and a click's payload as Slack sent it. A repeat runs once."""
+    handler = EchoHandler()
+    api = FakeApi()
+    transport = over_http(api=api)
+    command = {
+        "type": "slash_command",
+        "command": "/helper",
+        "text": "what changed today?",
+        "user_id": "U1",
+        "channel_id": CH,
+        "trigger_id": "trig-1",
+    }
+    async with client(build_a2a_app(handler, slack=transport)) as c:
+        first = await c.post(EVENTS_PATH, json=command, headers={HEADER: SECRET})
+        again = await c.post(EVENTS_PATH, json=command, headers={HEADER: SECRET})
+        foreign = await c.post(
+            EVENTS_PATH,
+            json={"type": "block_actions", "trigger_id": "trig-2", "actions": []},
+            headers={HEADER: SECRET},
+        )
+        await settled(transport)
+    assert [r.json() for r in (first, again, foreign)] == [{"accepted": True}] * 3
+    assert [t.user_text() for t in handler.tasks] == ["what changed today?"]
+    assert api.posts[0][1] == "<@U1> asked with `/helper`:\n> what changed today?"
+
+
 async def test_url_verification_is_answered_with_its_challenge():
     handler = EchoHandler()
     transport = over_http()

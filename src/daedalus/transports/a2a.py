@@ -405,6 +405,12 @@ def build_a2a_app(
         runs after the answer. A repeated event_id is accepted and dropped in
         the transport, so a retry never runs the turn twice. Slack's
         url_verification is the room's to answer, but is answered here too.
+
+        A click and a slash command come through here as well (2026-11-14):
+        the relay forwards a `block_actions` payload as Slack sent it and a
+        command's form fields as one object with `type: slash_command`. The
+        transport tells them from events by that `type` and runs a repeated
+        `trigger_id` once.
         """
         if slack is None:
             return JSONResponse(

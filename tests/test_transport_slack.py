@@ -61,6 +61,10 @@ class FakeApi:
         self.downloaded: list[str] = []
         self.downloads_return: bytes = b""
         self.downloads_raise: Exception | None = None
+        self.member = True
+
+    async def in_conversation(self, channel):
+        return self.member
 
     async def post(self, channel, text, thread_ts=None):
         self.posts.append((channel, text, thread_ts))

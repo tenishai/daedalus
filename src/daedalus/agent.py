@@ -612,6 +612,22 @@ class Agent:
                 )
             )
 
+        # The slack-actions sidecar (2026-11-14): an agent with a `kind: slack`
+        # transport can also post somewhere else, offer buttons or a menu, pin
+        # and bookmark. The transport block is what turns it on; with no bot
+        # token in the environment it lists nothing, and `tools.allow` still
+        # decides what is offered. Its reach outside the conversation a task
+        # was asked in is the channels the blocks name (none named: Slack's own
+        # membership rules), read here the way transports() folds them.
+        slack_blocks = [t.options() for t in self.bundle.spec.transports if t.kind == "slack"]
+        if slack_blocks:
+            from daedalus.tools.slack_actions import SlackActionsToolProvider
+
+            named = [str(o["channel"]) for o in slack_blocks if o.get("channel")]
+            providers.append(
+                SlackActionsToolProvider(named if len(named) == len(slack_blocks) else [])
+            )
+
         # The jira sidecar (room broker's issue-tracker read lane,
         # 2026-09-04): the github custody model applied to reads.
         if spec.jira.broker_url:
