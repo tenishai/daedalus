@@ -26,6 +26,19 @@ Issue and pull request numbers all refer to this repository, written in full.
   end a loop between agents: three bot-woken turns in a row in one thread, after which the
   mention gets a stop-sign reaction and no answer until a person speaks to the agent there,
   and thirty an hour from one sending app.
+- **A reaction can wake an agent in Slack.** `SLACK_WAKE_EMOJI` names the emoji, separated
+  by commas (`ticket, eyes`); unset, a reaction is dropped as it always was. It works in
+  every wake mode: a named emoji added to a message in a channel the agent is in asks the
+  agent about that message. The agent reads the message, the person who reacted is the
+  requester, and the answer lands in that message's thread (which a `thread`-mode agent
+  then follows when the message started it). The rest is not configurable: a removed
+  reaction never wakes it, one message wakes it once per emoji however many people add the
+  same one, and its own reactions never do. A reaction another app left is treated the way
+  another app's mention is (`SLACK_BOT_MENTIONS`, same bounds), and a reactor Slack will
+  not identify is never taken for a person. People's reactions start at most sixty turns an
+  hour; past that the message gets a stop-sign reaction and no answer. The app needs
+  `reactions:read`, the `reaction_added` event, and `channels:history` / `groups:history`
+  or `reactions:read` to read the message; `users:read` tells a person from a program.
 
 ### Fixed
 

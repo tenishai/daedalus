@@ -2333,3 +2333,197 @@ async def test_a_bots_edit_or_plain_message_is_still_dropped():
     await transport.handle_event(bot_mention(ts="66.0", subtype="message_changed"), handler)
     await transport.handle_event(bot_mention(ts="66.1", type="message"), handler)
     assert handler.tasks == []
+
+
+# ---- a reaction wakes the agent (SLACK_WAKE_EMOJI) ---------------------------
+#
+# A reaction was dropped whole. An emoji the deployment names now asks the
+# agent about the message it was left on, whatever the wake mode, and the
+# answer lands in that message's thread. Unset, nothing changes.
+
+
+class ReactingApi(AddressingApi):
+    """The two reads a reaction needs: the message it was left on, and whether
+    a person left it."""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: dict[tuple[str, str], dict] = {}
+        self.people: dict[str, tuple[bool | None, str]] = {}
+
+    async def message(self, channel, ts):
+        return self.messages.get((channel, ts))
+
+    async def who(self, user):
+        return self.people.get(user, (False, ""))
+
+
+def make_reacting(emoji="ticket", **kwargs):
+    api = ReactingApi()
+    transport = SlackTransport(
+        CH, bot_token="xoxb", app_token="xapp", api=api, wake_emoji=emoji, **kwargs
+    )
+    transport.user_id, transport.bot_id = SELF_ID, SELF_BOT
+    return transport, api, MarkHandler()
+
+
+def reaction(
+    name="ticket", ts="80.0", user="U1", channel=CH, kind="reaction_added", item="message"
+):
+    return {
+        "type": kind, "user": user, "reaction": name, "event_ts": "999.0",
+        "item": {"type": item, "channel": channel, "ts": ts},
+    }
+
+
+async def test_a_named_emoji_asks_the_agent_about_that_message():
+    """The message is read, the reactor is the requester, the marks go on the
+    message and the answer in its thread. Slack's spelling of an emoji (skin
+    tone and all) matches the plain name."""
+    transport, api, handler = make_reacting()
+    api.messages[(CH, "80.5")] = {
+        "ts": "80.5", "thread_ts": "80.0", "user": "U2", "text": "the deploy is stuck",
+    }
+    await transport.handle_event(reaction("ticket::skin-tone-2", ts="80.5"), handler)
+    asked = handler.tasks[0].history[0]
+    assert asked.sender == "U1"
+    assert asked.text == (
+        "(<@U1> reacted with :ticket: to a message <@U2> wrote. The reaction is the ask: "
+        "nobody wrote you a new message. The message follows.)\nthe deploy is stuck"
+    )
+    assert ("80.5", "eyes") in api.reacts and ("80.5", "white_check_mark") in api.reacts
+    assert api.updates[-1][3] == "80.0"
+    assert handler.tasks[0].context_id == f"slack:{CH}:80.0"
+
+
+async def test_a_reaction_nobody_named_never_wakes_it():
+    """No emoji named is the behaviour before the option existed. With one
+    named: another emoji, a removed reaction, a reaction on something that is
+    not a message, and a channel off the allowlist are all dropped."""
+    transport, api, handler = make_reacting(emoji=None)
+    api.messages[(CH, "81.0")] = {"ts": "81.0", "user": "U2", "text": "hello"}
+    await transport.handle_event(reaction(ts="81.0"), handler)
+    assert handler.tasks == [] and transport.wake_emoji == frozenset()
+
+    transport, api, handler = make_reacting()
+    api.messages[(CH, "81.0")] = {"ts": "81.0", "user": "U2", "text": "hello"}
+    api.messages[("C0ELSE", "81.0")] = {"ts": "81.0", "user": "U2", "text": "hello"}
+    await transport.handle_event(reaction("tada", ts="81.0"), handler)
+    await transport.handle_event(reaction(ts="81.0", kind="reaction_removed"), handler)
+    await transport.handle_event(reaction(ts="81.0", item="file"), handler)
+    await transport.handle_event(reaction(ts="81.0", channel="C0ELSE"), handler)
+    assert handler.tasks == [] and api.reacts == []
+
+
+async def test_one_message_wakes_it_once_per_emoji_and_never_by_its_own_marks():
+    """Slack sends an event for every person who adds the same emoji. The
+    agent's own `eyes` is a reaction too, and an agent that does not know who
+    it is cannot tell its own apart, so it stays silent."""
+    transport, api, handler = make_reacting(emoji="eyes, ticket")
+    api.messages[(CH, "82.0")] = {"ts": "82.0", "user": "U2", "text": "look at this"}
+    await transport.handle_event(reaction("eyes", ts="82.0", user=SELF_ID), handler)
+    assert handler.tasks == []
+    await transport.handle_event(reaction("eyes", ts="82.0", user="U1"), handler)
+    await transport.handle_event(reaction("eyes", ts="82.0", user="U3"), handler)
+    assert len(handler.tasks) == 1
+    await transport.handle_event(reaction("ticket", ts="82.0", user="U3"), handler)
+    assert len(handler.tasks) == 2
+    transport.user_id = None
+    await transport.handle_event(reaction("ticket", ts="82.1", user="U1"), handler)
+    assert len(handler.tasks) == 2
+
+
+async def test_a_message_that_cannot_be_read_is_said_and_not_spent(caplog):
+    transport, api, handler = make_reacting()
+    with caplog.at_level(logging.WARNING):
+        await transport.handle_event(reaction(ts="83.0"), handler)
+    assert handler.tasks == [] and "could not be read" in caplog.text
+    api.messages[(CH, "83.0")] = {"ts": "83.0", "user": "U2", "text": ""}
+    await transport.handle_event(reaction(ts="83.0"), handler)
+    assert handler.tasks[0].history[0].text.endswith("\n(the message has no text)")
+
+
+async def test_a_programs_reaction_is_answered_as_a_programs_mention_is():
+    """Knowledge-only by default and labelled; dropped when other apps are
+    turned off; and a reactor that cannot be looked up is never taken for a
+    person."""
+    from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
+
+    transport, api, handler = make_reacting()
+    api.people[ASKER_USER] = (True, "Scout")
+    api.messages[(CH, "84.0")] = {"ts": "84.0", "user": "U2", "text": "disk is full"}
+    api.messages[(CH, "84.1")] = {"ts": "84.1", "user": "U2", "text": "again"}
+    await transport.handle_event(reaction(ts="84.0", user=ASKER_USER), handler)
+    assert handler.marks[0][DEPTH_KEY] == 1 and handler.marks[0][ASKED_BY_KEY] == "Scout"
+    assert handler.tasks[0].history[0].text.startswith(
+        "(The Slack app Scout, not a person, reacted with :ticket: to a message <@U2> wrote."
+    )
+    api.people["UWHO"] = (None, "")
+    await transport.handle_event(reaction(ts="84.1", user="UWHO"), handler)
+    assert handler.marks[1][ASKED_BY_KEY] == "UWHO"
+
+    transport, api, handler = make_reacting(bot_mentions="off")
+    api.people[ASKER_USER] = (True, "Scout")
+    api.messages[(CH, "84.0")] = {"ts": "84.0", "user": "U2", "text": "disk is full"}
+    await transport.handle_event(reaction(ts="84.0", user=ASKER_USER), handler)
+    assert handler.tasks == []
+
+
+async def test_reactions_start_a_bounded_number_of_turns_an_hour():
+    """An emoji that turns out to be on everything ends at the bound, with a
+    stop sign on the message that was not answered."""
+    from daedalus.transports import slack as slack_transport
+
+    transport, api, handler = make_reacting()
+    budget = slack_transport._REACTION_TURNS_PER_HOUR
+    for n in range(budget + 1):
+        api.messages[(CH, f"9{n}.0")] = {"ts": f"9{n}.0", "user": "U2", "text": "x"}
+        await transport.handle_event(reaction(ts=f"9{n}.0"), handler)
+    assert len(handler.tasks) == budget
+    assert (f"9{budget}.0", "octagonal_sign") in api.reacts
+
+
+async def test_a_thread_started_by_a_reaction_is_followed_in_thread_mode():
+    """The agent answered under that message, so replies there are to it."""
+    transport, api, handler = make_reacting(wake="thread")
+    api.messages[(CH, "85.0")] = {"ts": "85.0", "user": "U2", "text": "who owns this?"}
+    await transport.handle_event(reaction(ts="85.0"), handler)
+    await transport.handle_event(
+        event("and the runbook?", ts="85.1", thread="85.0", channel_type="channel"), handler
+    )
+    assert len(handler.tasks) == 2
+
+
+def test_wake_emoji_is_read_from_the_env_the_way_people_type_it(monkeypatch):
+    monkeypatch.setenv("SLACK_WAKE_EMOJI", ":Thumbsup:, eyes  :ticket:")
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=FakeApi())
+    assert transport.wake_emoji == {"+1", "eyes", "ticket"}
+    assert transport.listening_line() == (
+        "(slack listening in C0MAIN, on @-mention, and on a reaction with :+1:, :eyes:, :ticket:)"
+    )
+
+
+async def test_the_reacted_message_is_read_by_thread_then_by_reaction():
+    """A reply's thread comes from the thread read; an app that cannot make it
+    still gets the message from reactions.get."""
+
+    class Web:
+        def __init__(self, refuse_thread=False):
+            self.refuse_thread = refuse_thread
+
+        async def conversations_replies(self, **kwargs):
+            if self.refuse_thread:
+                raise RuntimeError("missing_scope")
+            return {"messages": [{"ts": kwargs["ts"], "thread_ts": "1.0", "text": "a reply"}]}
+
+        async def reactions_get(self, channel, timestamp):
+            return {"message": {"ts": timestamp, "text": "by reaction"}}
+
+        async def users_info(self, user):
+            return {"user": {"is_bot": user == "UBOT", "real_name": "Scout"}}
+
+    assert (await SlackApi(Web()).message("C1", "1.5"))["thread_ts"] == "1.0"
+    assert (await SlackApi(Web(refuse_thread=True)).message("C1", "1.5"))["text"] == "by reaction"
+    assert await SlackApi(Web()).who("UBOT") == (True, "Scout")
+    assert await SlackApi(Web()).who("U1") == (False, "Scout")
+    assert await SlackApi(object()).who("U1") == (None, "")

@@ -152,6 +152,25 @@ _BOT_TURNS_PER_HOUR = 30
 _BOT_WINDOW_SECONDS = 3600.0
 #: Reaction left on a bot's mention that was not answered because a bound was hit.
 _BOT_LIMIT_REACTION = "octagonal_sign"
+# A reaction can wake the agent as well (2026-11-13). `SLACK_WAKE_EMOJI` names
+# the emoji, separated by commas (the room sets it per agent); unset means a
+# reaction never wakes it, which is the behaviour before this option existed.
+# It rides beside the wake mode, not inside it: whichever of the three modes is
+# in force, a named emoji added to a message in a channel the agent is in asks
+# the agent about that message, and it answers in that message's thread.
+#
+# The rest is fixed, on purpose. A removed reaction never wakes it. One message
+# wakes it once per emoji, however many people add the same one (Slack sends an
+# event for each of them). Its own reactions never wake it: it leaves `eyes`
+# and a check mark on everything it answers. A program's reaction is treated
+# the way a program's mention is (BOTS_* above), bounds included, since a
+# reaction event does not say whether a person left it and users.info does.
+WAKE_EMOJI_ENV = "SLACK_WAKE_EMOJI"
+#: Turns people's reactions may start in an hour, across every channel: the
+#: bound for an emoji that turns out to be on everything.
+_REACTION_TURNS_PER_HOUR = 60
+#: Slack names the two thumbs `+1` and `-1` in events; people type these.
+_EMOJI_ALIASES = {"thumbsup": "+1", "thumbsdown": "-1"}
 # Slack's own ceiling on a task_update chunk.
 _TASK_UPDATE_MAX = 256
 # chat.appendStream takes markdown_text up to 12,000 characters per call.
@@ -168,6 +187,21 @@ def _app_name(event: dict) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return str(event.get("bot_id"))
+
+
+def _emoji_name(raw: object) -> str:
+    """One emoji name the way Slack's reaction events spell it: no colons, lower
+    case, no skin tone (`:Thumbsup::skin-tone-3:` is `+1`)."""
+    if not isinstance(raw, str):
+        return ""
+    name = raw.strip().strip(":").split("::", 1)[0].strip().lower()
+    return _EMOJI_ALIASES.get(name, name)
+
+
+def wake_emoji_names(raw: Iterable[str] | str | None) -> frozenset[str]:
+    """The emoji that wake an agent, from the env var's text or a list."""
+    parts = re.split(r"[,\s]+", raw) if isinstance(raw, str) else list(raw or ())
+    return frozenset(name for name in map(_emoji_name, parts) if name)
 
 
 def wake_notice(mode: object) -> str:
@@ -572,6 +606,44 @@ class SlackApi:
             for r in message.get("reactions", [])
         ]
 
+    async def message(self, channel: str, ts: str) -> dict | None:
+        """The one message at `ts`, a thread's root or a reply in one; None when
+        it cannot be read. A reaction event names the message and carries none
+        of it, so the transport reads it before the agent is asked about it.
+        Two reads, because either scope may be the one an app has: the thread
+        read says which thread a reply belongs to, and reactions.get (which
+        this transport already uses for approvals) is addressed by the exact
+        message."""
+        try:
+            response = await self._web.conversations_replies(
+                channel=channel, ts=ts, latest=ts, inclusive=True, limit=1
+            )
+            for found in response.get("messages") or []:
+                if isinstance(found, dict) and found.get("ts") == ts:
+                    return found
+        except Exception:  # noqa: BLE001  the second read is the answer to this one failing
+            pass
+        try:
+            response = await self._web.reactions_get(channel=channel, timestamp=ts)
+        except Exception:  # noqa: BLE001
+            return None
+        found = response.get("message") if hasattr(response, "get") else None
+        return found if isinstance(found, dict) else None
+
+    async def who(self, user: str) -> tuple[bool | None, str]:
+        """(is a program, the name Slack shows) for a user id; (None, "") when
+        users.info cannot be read, which the transport takes as "may be a
+        program" and never as "a person"."""
+        try:
+            response = await self._web.users_info(user=user)
+        except Exception:  # noqa: BLE001
+            return None, ""
+        info = response.get("user") if hasattr(response, "get") else None
+        if not isinstance(info, dict):
+            return None, ""
+        name = info.get("real_name") or info.get("name") or ""
+        return bool(info.get("is_bot")), name if isinstance(name, str) else ""
+
     async def download_file(self, url: str) -> bytes:
         """Fetch a Slack file's bytes. files.url_private requires the bot
         token as a bearer header -- slack_sdk has no download helper, so
@@ -865,6 +937,7 @@ class SlackTransport:
         wake: str | None = None,
         relay_secret: str | None = None,
         bot_mentions: str | None = None,
+        wake_emoji: Iterable[str] | str | None = None,
     ):
         # How a channel wakes the agent (WAKE_* above). None means the default,
         # `mention`, which is exactly the behaviour before this option existed.
@@ -884,6 +957,11 @@ class SlackTransport:
             )
             chosen = BOTS_OFF
         self.bot_mentions = chosen
+        # The emoji whose reaction wakes the agent (WAKE_EMOJI_ENV above); none
+        # means a reaction never does.
+        self.wake_emoji = wake_emoji_names(
+            os.environ.get(WAKE_EMOJI_ENV) if wake_emoji is None else wake_emoji
+        )
         # `approvers` (Slack user ids) are the only people whose reaction approves
         # a tier-2 action (#53); none configured means tier-2 stays denied.
         self.approvers = frozenset(a for a in (approvers or ()) if a)
@@ -938,6 +1016,12 @@ class SlackTransport:
         # Sending app -> when each of its recent mentions was answered
         # (monotonic seconds), for the hourly bound. Bounded like `_seen`.
         self._bot_window: OrderedDict[str, list[float]] = OrderedDict()
+        # (channel, message ts, emoji) already answered: one message wakes the
+        # agent once per emoji. Bounded like `_seen`; a restart forgets it.
+        self._reacted: OrderedDict[tuple, bool] = OrderedDict()
+        # When each recent turn a person's reaction started was admitted
+        # (monotonic seconds), for the hourly bound.
+        self._reaction_window: list[float] = []
         # Workspace id for streaming into channels (auth.test at serve time).
         self.team_id: str | None = None
         # Own Slack user id (auth.test at serve time). None = unknown: the
@@ -1079,6 +1163,9 @@ class SlackTransport:
             WAKE_THREAD: "on @-mention, then the thread",
             WAKE_CHANNEL: "on every message",
         }[self.wake]
+        if self.wake_emoji:
+            named = ", ".join(f":{name}:" for name in sorted(self.wake_emoji))
+            wake = f"{wake}, and on a reaction with {named}"
         if not self.channels:
             return f"(slack listening in every channel the app is invited to, {wake})"
         return f"(slack listening in {', '.join(self.channels)}, {wake})"
@@ -1184,6 +1271,9 @@ class SlackTransport:
             )
 
     async def handle_event(self, event: dict, handler: Handler) -> None:
+        if event.get("type") == "reaction_added":
+            await self._handle_reaction(event, handler)
+            return
         if event.get("type") not in {"message", "app_mention"}:
             return
         from_bot = self._mention_from_another_app(event)
@@ -1253,6 +1343,146 @@ class SlackTransport:
         else:
             # A person spoke to the agent here: the run of bot-woken turns is over.
             self._bot_turns.pop((channel, thread), None)
+        sender = event.get("user")
+        await self._turn(
+            handler,
+            channel=channel,
+            ts=ts,
+            thread=thread,
+            text=text,
+            files=files,
+            sender=sender if isinstance(sender, str) else None,
+            # The thread's history is read again on every later turn, a person's
+            # included, and the model is not shown who sent what: say that these
+            # words are a program's, so they are never mistaken for a person's.
+            preface=(
+                f"(From the Slack app {_app_name(event)}, not a person.)" if from_bot else None
+            ),
+            asked_by=(
+                _app_name(event) if from_bot and self.bot_mentions == BOTS_KNOWLEDGE else None
+            ),
+            adopt=thread == ts and self._addressed_to_us(event),
+        )
+
+    async def _handle_reaction(self, event: dict, handler: Handler) -> None:
+        """A `reaction_added` event: wake the agent about the message when the
+        emoji is one of `wake_emoji`. Every rule is in the note at
+        WAKE_EMOJI_ENV; a reaction that fails one is dropped without a word,
+        the way a message the wake mode does not admit is."""
+        name = _emoji_name(event.get("reaction"))
+        if not name or name not in self.wake_emoji:
+            return
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "message":
+            return
+        channel, ts = item.get("channel"), item.get("ts")
+        if not isinstance(channel, str) or not isinstance(ts, str) or not channel or not ts:
+            return
+        if self.channels and channel not in self.channels and not channel.startswith("D"):
+            # The same allowlist messages meet. A reaction event carries no
+            # channel_type; a direct message's channel id starts with D.
+            return
+        reactor = event.get("user")
+        if not isinstance(reactor, str) or not reactor:
+            return
+        if self.user_id is None or reactor == self.user_id:
+            # Its own marks (`eyes`, the check) must never wake it, and an
+            # agent that does not know who it is cannot tell them apart.
+            return
+        key = (channel, ts, name)
+        if key in self._reacted:
+            return
+        self._reacted[key] = True
+        while len(self._reacted) > _SEEN_CAP:
+            self._reacted.popitem(last=False)
+        message = await self._api.message(channel, ts)
+        if message is None:
+            # Not answered, so not spent: the same emoji may be added again.
+            self._reacted.pop(key, None)
+            logger.warning(
+                "slack: a :%s: reaction in %s was not answered: the message at %s "
+                "could not be read (channels:history, groups:history or "
+                "reactions:read is missing, or the app is not in that channel)",
+                name, channel, ts,
+            )
+            return
+        thread = message.get("thread_ts") or ts
+        program, shown = await self._api.who(reactor)
+        asked_by: str | None = None
+        if program is False:
+            now = time.monotonic()
+            recent = [t for t in self._reaction_window if now - t < _BOT_WINDOW_SECONDS]
+            if len(recent) >= _REACTION_TURNS_PER_HOUR:
+                logger.warning(
+                    "slack: not answering a :%s: reaction in %s/%s: %d turns started "
+                    "by reactions in the last hour",
+                    name, channel, ts, len(recent),
+                )
+                await self._api.react(channel, ts, _BOT_LIMIT_REACTION)
+                return
+            self._reaction_window = [*recent, now]
+            # A person asked the agent here: the run of bot-woken turns is over.
+            self._bot_turns.pop((channel, thread), None)
+            who = f"<@{reactor}>"
+        else:
+            if program is None:
+                logger.warning(
+                    "slack: could not look up who left a :%s: reaction (users:read); "
+                    "it is answered as a program's would be",
+                    name,
+                )
+            if self.bot_mentions == BOTS_OFF:
+                return
+            if not self._bot_turn_allowed(channel, thread, {"bot_id": reactor}):
+                await self._api.react(channel, ts, _BOT_LIMIT_REACTION)
+                return
+            label = shown.strip() or reactor
+            who = f"The Slack app {label}, not a person,"
+            if self.bot_mentions == BOTS_KNOWLEDGE:
+                asked_by = label
+        author = message.get("user")
+        if author == self.user_id or (self.bot_id and message.get("bot_id") == self.bot_id):
+            whose = "a message you wrote"
+        elif isinstance(author, str) and author and not message.get("bot_id"):
+            whose = f"a message <@{author}> wrote"
+        else:
+            whose = f"a message the Slack app {_app_name(message)} wrote"
+        await self._turn(
+            handler,
+            channel=channel,
+            ts=ts,
+            thread=thread,
+            text=(message.get("text") or "").strip(),
+            files=message.get("files") or [],
+            sender=reactor,
+            preface=(
+                f"({who} reacted with :{name}: to {whose}. The reaction is the ask: "
+                "nobody wrote you a new message. The message follows.)"
+            ),
+            asked_by=asked_by,
+            adopt=thread == ts,
+            empty="(the message has no text)",
+        )
+
+    async def _turn(
+        self,
+        handler: Handler,
+        *,
+        channel: str,
+        ts: str,
+        thread: str,
+        text: str,
+        files: list[dict],
+        sender: str | None,
+        preface: str | None,
+        asked_by: str | None,
+        adopt: bool,
+        empty: str = "(image)",
+    ) -> None:
+        """One admitted ask, from its first reaction to the reply: `ts` is the
+        message the marks go on, `thread` where the answer lands. `preface` is
+        put above the words when they are not simply a person's message to the
+        agent; `asked_by` names a program whose ask runs knowledge-only."""
         # React immediately -- before any (possibly slow, sequential) image
         # downloads below -- so the sender sees SOMETHING within
         # milliseconds instead of after every attachment finishes fetching
@@ -1264,14 +1494,11 @@ class SlackTransport:
             text = "\n".join(filter(None, [text, *notes]))
         if not text:
             # An image with no words is still an ask.
-            text = "(image)"
-        if from_bot:
-            # The thread's history is read again on every later turn, a person's
-            # included, and the model is not shown who sent what: say that these
-            # words are a program's, so they are never mistaken for a person's.
-            text = f"(From the Slack app {_app_name(event)}, not a person.)\n{text}"
+            text = empty
+        if preface:
+            text = f"{preface}\n{text}"
 
-        if thread == ts and self._addressed_to_us(event):
+        if adopt:
             # The root of a new thread, asked of us: in `thread` mode its
             # replies reach us from here on. `_owned` lives in memory only, so
             # a restart forgets every thread. A mention in an old thread is
@@ -1291,14 +1518,8 @@ class SlackTransport:
         # included) stays in history forever and every later turn re-sends
         # it, failing identically each time (thread bricked).
         history_len = len(task.history)
-        sender = event.get("user")
         task.history.append(
-            Message(
-                role="user",
-                text=text,
-                images=images or None,
-                sender=sender if isinstance(sender, str) else None,
-            )
+            Message(role="user", text=text, images=images or None, sender=sender)
         )
         task.state = TaskState.SUBMITTED
 
@@ -1322,9 +1543,7 @@ class SlackTransport:
         stream_ts: str | None = None
         thinking_ts: str | None = None
         try:
-            stream_ts = await self._api.start_stream(
-                channel, thread, sender if isinstance(sender, str) else None, self.team_id
-            )
+            stream_ts = await self._api.start_stream(channel, thread, sender, self.team_id)
         except Exception:
             stream_ts = None
         if stream_ts is None:
@@ -1352,21 +1571,19 @@ class SlackTransport:
             pump = asyncio.create_task(
                 self._pump_progress(bus, queue, task, channel, stream_ts, pump_done)
             )
-        requester_token = current_slack_requester.set(
-            sender if isinstance(sender, str) else None
-        )
+        requester_token = current_slack_requester.set(sender)
         # A thread's Task outlives the turn, so the mark is set AND cleared for
         # every turn: a bot's turn must not leave a person's next one without
         # its tools. Done here, with no await before the handler reads it, so a
         # second event in the same thread cannot change it in between.
         from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
 
-        if from_bot and self.bot_mentions == BOTS_KNOWLEDGE:
+        if asked_by is not None:
             # Another program asked, so this turn is answered the way a
             # colleague's ask is (kobo#310): knowledge-only tools, no borrowed
             # credential, no forwarding to other colleagues.
             task.metadata[DEPTH_KEY] = 1
-            task.metadata[ASKED_BY_KEY] = _app_name(event)
+            task.metadata[ASKED_BY_KEY] = asked_by
         else:
             task.metadata.pop(DEPTH_KEY, None)
             task.metadata.pop(ASKED_BY_KEY, None)
