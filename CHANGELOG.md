@@ -58,7 +58,8 @@ Issue and pull request numbers all refer to this repository, written in full.
   restart between the offer and the pick loses nothing. `/its-command some words` posts a
   message in the channel saying who asked what and the agent answers in its thread; an
   empty command, or one in a conversation the agent cannot post in, is answered to that
-  person alone. Over Socket Mode these are the `interactive` and `slash_commands` requests.
+  person alone. A command is answered only in a conversation the agent is in;
+  `SLACK_COMMAND_PUBLIC=on` also answers in a public channel it was never added to. Over Socket Mode these are the `interactive` and `slash_commands` requests.
   Over HTTP the relay forwards them to the same `POST /slack/events`: a `block_actions`
   payload as Slack sent it, and a command's form fields as one JSON object with
   `"type": "slash_command"` added. A repeated `trigger_id` runs once. The app needs

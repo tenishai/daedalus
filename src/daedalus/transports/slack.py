@@ -179,6 +179,14 @@ _BOT_LIMIT_REACTION = "octagonal_sign"
 # the way a program's mention is (BOTS_* above), bounds included, since a
 # reaction event does not say whether a person left it and users.info does.
 WAKE_EMOJI_ENV = "SLACK_WAKE_EMOJI"
+# A slash command can be typed anywhere in the workspace, and the token can
+# post in a public channel the agent was never added to (`chat:write.public`).
+# So where a command is answered is its own rule (2026-11-14): only in a
+# conversation the agent is in, the same line an event keeps by arriving at
+# all. `SLACK_COMMAND_PUBLIC=on` (the room sets it per agent) also answers in a
+# public channel it is not in. A private one is out of reach either way.
+COMMAND_PUBLIC_ENV = "SLACK_COMMAND_PUBLIC"
+_ON = frozenset({"1", "on", "true", "yes"})
 #: Turns people's reactions may start in an hour, across every channel: the
 #: bound for an emoji that turns out to be on everything.
 _REACTION_TURNS_PER_HOUR = 60
@@ -623,6 +631,18 @@ class SlackApi:
             blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}],
         )
 
+    async def in_conversation(self, channel: str) -> bool:
+        """Whether the agent is in `channel`: a member of a channel or a group
+        conversation, or one side of a direct message. A conversation Slack
+        will not describe to it is one it is not in."""
+        try:
+            answer = await self._web.conversations_info(channel=channel)
+        except Exception as exc:  # noqa: BLE001 -- not visible to it, most often
+            logger.info("slack: could not look at %s (%s)", channel, exc)
+            return False
+        found = answer.get("channel") or {}
+        return bool(found.get("is_member") or found.get("is_im"))
+
     async def respond(self, response_url: object, text: str) -> None:
         """Tell the one person who ran a slash command something, seen by them
         alone. Best effort, and only ever to Slack's own response host: the
@@ -1000,6 +1020,7 @@ class SlackTransport:
         relay_secret: str | None = None,
         bot_mentions: str | None = None,
         wake_emoji: Iterable[str] | str | None = None,
+        command_public: bool | None = None,
     ):
         # How a channel wakes the agent (WAKE_* above). None means the default,
         # `mention`, which is exactly the behaviour before this option existed.
@@ -1024,6 +1045,11 @@ class SlackTransport:
         self.wake_emoji = wake_emoji_names(
             os.environ.get(WAKE_EMOJI_ENV) if wake_emoji is None else wake_emoji
         )
+        # Whether a slash command is answered in a public channel the agent is
+        # not in (COMMAND_PUBLIC_ENV above); off unless said.
+        if command_public is None:
+            command_public = (os.environ.get(COMMAND_PUBLIC_ENV) or "").strip().lower() in _ON
+        self.command_public = command_public
         # `approvers` (Slack user ids) are the only people whose reaction approves
         # a tier-2 action (#53); none configured means tier-2 stays denied.
         self.approvers = frozenset(a for a in (approvers or ()) if a)
@@ -1322,8 +1348,9 @@ class SlackTransport:
 
     async def _handle_command(self, payload: dict, handler: Handler) -> None:
         """The agent's slash command: say in the channel who asked what, then
-        answer in that message's thread. Whatever stops it is told to the
-        person alone, through the command's response address."""
+        answer in that message's thread, in a conversation the agent is in
+        (or any public channel, with COMMAND_PUBLIC_ENV). Whatever stops it is
+        told to the person alone, through the command's response address."""
         user, channel = payload.get("user_id"), payload.get("channel_id")
         if not all(isinstance(v, str) and v for v in (user, channel)):
             return
@@ -1332,6 +1359,11 @@ class SlackTransport:
         answer_to = payload.get("response_url")
         if self.channels and channel not in self.channels and not channel.startswith("D"):
             await self._api.respond(answer_to, "I do not answer in this channel.")
+            return
+        if not self.command_public and not await self._api.in_conversation(channel):
+            await self._api.respond(
+                answer_to, "I am not in this conversation. Add me to it, then ask again."
+            )
             return
         if not text:
             await self._api.respond(

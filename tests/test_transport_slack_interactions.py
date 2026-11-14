@@ -159,12 +159,38 @@ async def test_a_command_it_cannot_run_is_explained_to_that_person_alone():
     await transport.handle_interaction(command(trigger="b"), handler)
     listed = SlackTransport("C0ONLY", bot_token="xoxb", app_token="xapp", api=api)
     await listed.handle_interaction(command(trigger="c"), handler)
+    api.refuse_posts, api.member = False, False
+    await transport.handle_interaction(command(trigger="d"), handler)
     assert handler.tasks == [] and api.posts == []
     assert [text.split(".")[0] for _, text in api.responses] == [
         "Type what you want after the command, like `/helper what changed today?`",
         "I cannot post in this conversation",
         "I do not answer in this channel",
+        "I am not in this conversation",
     ]
+
+
+async def test_a_command_where_it_was_never_added_runs_only_when_switched_on(monkeypatch):
+    monkeypatch.setenv("SLACK_COMMAND_PUBLIC", "on")
+    transport, api, handler = make()
+    api.member = False
+    await transport.handle_interaction(command(), handler)
+    assert len(handler.tasks) == 1 and api.responses == []
+
+
+async def test_being_in_a_conversation_is_slacks_word_for_it():
+    from daedalus.transports.slack import SlackApi
+
+    class Web:
+        async def conversations_info(self, channel):
+            if channel == "C0GONE":
+                raise RuntimeError("channel_not_found")
+            known = {"C0IN": {"is_member": True}, "D0ME": {"is_im": True}}
+            return {"channel": known.get(channel, {"is_member": False})}
+
+    api = SlackApi(web_client=Web())
+    asked = ("C0IN", "D0ME", "C0OUT", "C0GONE")
+    assert [await api.in_conversation(c) for c in asked] == [True, True, False, False]
 
 
 async def test_the_http_way_in_takes_both_and_runs_a_repeat_once():

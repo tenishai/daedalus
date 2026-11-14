@@ -515,8 +515,11 @@ back. Persona constant, transport variable:
   offer keeps no state): the first pick rewrites the message to say who chose
   what and runs as that person's next message in the thread. A slash command
   has no message of its own, so the agent posts one saying who asked what and
-  answers in its thread; what stops it is told to that person alone. Both are
-  a person's act and get a person's tools.
+  answers in its thread; what stops it is told to that person alone. It is
+  answered only in a conversation the agent is in (`conversations.info`),
+  since the token could post in any public channel; `SLACK_COMMAND_PUBLIC=on`
+  lifts that for public channels. Both are a person's act and get a person's
+  tools.
 
 FastAPI stays at the edge: nothing below a transport imports it.
 
