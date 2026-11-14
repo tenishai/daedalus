@@ -66,6 +66,10 @@ RELAY_SECRET_ENV = "SLACK_RELAY_SECRET"
 EVENTS_PATH = "/slack/events"
 #: Slack threads kept in memory, least recently used dropped first (#202).
 _THREAD_CAP = 500
+#: The subtypes Slack puts on a message a person wrote: one that carries an
+#: upload, and a thread reply also sent to the channel. Every other subtype is
+#: an edit, a join, a deletion or a bot's post, and none of those is an ask.
+_PERSON_SUBTYPES = frozenset({"file_share", "thread_broadcast"})
 
 logger = logging.getLogger(__name__)
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
@@ -1183,11 +1187,15 @@ class SlackTransport:
         if event.get("type") not in {"message", "app_mention"}:
             return
         from_bot = self._mention_from_another_app(event)
-        if (event.get("bot_id") or event.get("subtype")) and not from_bot:
+        subtype = event.get("subtype")
+        not_a_persons = bool(subtype) and subtype not in _PERSON_SUBTYPES
+        if (event.get("bot_id") or not_a_persons) and not from_bot:
             # A bot's own words and every edited/joined/deleted variant. The one
             # bot-written event that passes is another app's @-mention of this
             # agent (BOTS_* above); its paired plain `message` is dropped here,
             # before the dedupe mark, so the mention is never consumed by it.
+            # A person's upload or broadcast reply is their message
+            # (_PERSON_SUBTYPES) and goes on to the wake rule like any other.
             return
         if (
             self.channels

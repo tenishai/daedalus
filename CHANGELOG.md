@@ -27,6 +27,15 @@ Issue and pull request numbers all refer to this repository, written in full.
   mention gets a stop-sign reaction and no answer until a person speaks to the agent there,
   and thirty an hour from one sending app.
 
+### Fixed
+
+- **A person's upload in a thread the agent follows is no longer dropped.** Slack marks a
+  message that carries a file `file_share` and a thread reply also sent to the channel
+  `thread_broadcast`. Both were dropped with the edits and joins, so in `thread` and
+  `channel` wake modes a screenshot posted without a mention never reached the agent
+  (a mention still worked, through `app_mention`). Both now go through the wake rule like
+  any other message a person wrote. Edits, joins, deletions and a bot's uploads stay dropped.
+
 ## [0.7.1] — 2026-11-11
 
 ### Upgrading

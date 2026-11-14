@@ -1623,6 +1623,78 @@ async def test_thread_mode_ignores_replies_in_a_thread_nobody_asked_the_agent_in
     assert api.posts == []
 
 
+async def test_a_persons_file_in_a_followed_thread_reaches_the_agent():
+    """Slack marks a person's message that carries an upload `file_share`. It
+    was dropped with the edits and joins, so in a thread the agent follows a
+    screenshot posted without a mention went unanswered and unseen."""
+    transport, api, handler = make_waking("thread")
+    api.downloads_return = b"hello"
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> look at this", ts="40.0", channel_type="channel"), handler
+    )
+    await transport.handle_event(
+        event("here is the graph", ts="41.0", thread="40.0", channel_type="channel",
+              subtype="file_share", files=[_file()]),
+        handler,
+    )
+    message = transport._threads[(CH, "40.0")].history[2]
+    assert message.text == "here is the graph"
+    assert message.images[0].data == "aGVsbG8="
+
+
+async def test_a_thread_reply_also_sent_to_the_channel_reaches_the_agent():
+    """A reply a person ticks "also send to channel" on is `thread_broadcast`:
+    their own words in the thread, not an edit of anything."""
+    transport, api, handler = make_waking("thread")
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> hey", ts="45.0", channel_type="channel"), handler
+    )
+    await transport.handle_event(
+        event("and one more thing", ts="46.0", thread="45.0", channel_type="channel",
+              subtype="thread_broadcast"),
+        handler,
+    )
+    task = transport._threads[(CH, "45.0")]
+    assert [m.text for m in task.history][2:] == ["and one more thing", "echo: and one more thing"]
+
+
+async def test_a_file_or_broadcast_changes_nothing_about_who_may_wake_the_agent():
+    """The two subtypes are admitted as a person's message and nothing more:
+    the wake rule, the bot filter and the dedupe mark all still apply."""
+    transport, api, handler = make_waking("thread")
+    # Not in a thread the agent follows, and no mention.
+    await transport.handle_event(
+        event("a picture for the humans", ts="47.0", channel_type="channel",
+              subtype="file_share", files=[_file()]),
+        handler,
+    )
+    # Another app's upload.
+    await transport.handle_event(
+        event("report", ts="47.1", channel_type="channel", subtype="file_share",
+              bot_id="B9", files=[_file()]),
+        handler,
+    )
+    # An edit is still not a new message.
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> edited", ts="47.2", channel_type="channel",
+              subtype="message_changed"),
+        handler,
+    )
+    assert api.posts == []
+    # The mention and its file_share twin are one message, answered once.
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> what is this?", ts="48.0", channel_type="channel",
+              type="app_mention", files=[_file()]),
+        handler,
+    )
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> what is this?", ts="48.0", channel_type="channel",
+              subtype="file_share", files=[_file()]),
+        handler,
+    )
+    assert len(api.posts) == 1
+
+
 async def test_thread_mode_answers_a_mention_deep_in_a_thread_but_adopts_nothing():
     transport, api, handler = make_waking("thread")
     await transport.handle_event(
