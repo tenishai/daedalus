@@ -6,6 +6,27 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Another Slack app's @-mention now wakes an agent.** It used to be dropped. The turn runs
+  with knowledge-only tools by default, the same ceiling as a colleague's ask; set
+  `SLACK_BOT_MENTIONS=off` on an agent to keep the old behaviour (see Added).
+
+### Added
+
+- **One agent can ask another in a Slack channel.** A message a bot wrote was dropped whole,
+  so an agent that @-mentioned another agent got silence. Another app's `app_mention` now
+  wakes the mentioned agent. `SLACK_BOT_MENTIONS` sets what that mention may do:
+  `knowledge` (the default) answers it the way a colleague's ask over the switchboard is
+  answered, with knowledge-only tools and no borrowed credential (tenishai/kobo#310),
+  because some apps post text an outsider wrote and a mention inside it must not drive an
+  agent's access; `full` gives it the tools a person's mention gets; `off` drops it. An
+  agent never answers its own words, a bot's plain message is still dropped in every wake
+  mode, and a bot's words are labelled as a program's in the thread's history. Two bounds
+  end a loop between agents: three bot-woken turns in a row in one thread, after which the
+  mention gets a stop-sign reaction and no answer until a person speaks to the agent there,
+  and thirty an hour from one sending app.
+
 ## [0.7.1] — 2026-11-11
 
 ### Upgrading

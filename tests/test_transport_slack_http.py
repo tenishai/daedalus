@@ -272,6 +272,9 @@ async def test_serve_over_http_opens_no_socket(monkeypatch, capsys):
         async def auth_test(self):
             return "UBOT"
 
+        async def bot_id(self):
+            return "BBOT"
+
     transport = over_http(api=ServeApi())
     serving = asyncio.create_task(transport.serve(EchoHandler()))
     started = asyncio.create_task(transport._started.wait())

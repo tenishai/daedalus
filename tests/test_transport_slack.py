@@ -2103,3 +2103,161 @@ async def test_a_streamed_reply_opens_with_the_rooms_icon_too():
     api2 = SlackApi(refused, icon_url="https://room.example/face.png")
     assert await api2.start_stream("C1", None, None, None) == "ts-1"
     assert refused.calls == [{"channel": "C1", "stream": True}] and api2.icon_url is None
+
+
+# ---- another app's mention (one agent asks another in a channel) -----------
+#
+# A message a bot wrote used to be dropped whole, so an agent could never be
+# asked by another agent in Slack. Another app's `app_mention` now wakes it,
+# as a colleague's ask does: knowledge-only tools for that turn, never the
+# agent's own words, and bounded so two agents cannot talk each other broke.
+
+SELF_BOT = "BSELF"
+ASKER_BOT = "BASKER"
+ASKER_USER = "UASKER"
+
+
+class MarkHandler(EchoHandler):
+    """Records what the runtime would read at the start of each turn: the
+    thread's Task is reused, so the metadata has to be copied when called."""
+
+    def __init__(self):
+        super().__init__()
+        self.marks: list[dict] = []
+
+    async def handle_task(self, task: Task) -> Task:
+        self.marks.append(dict(task.metadata))
+        return await super().handle_task(task)
+
+
+def make_asked(**kwargs):
+    api = AddressingApi()
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=api, **kwargs)
+    transport.user_id, transport.bot_id = SELF_ID, SELF_BOT
+    return transport, api, MarkHandler()
+
+
+def bot_mention(text="status?", ts="1.0", thread=None, **extra):
+    fields = {
+        "type": "app_mention", "channel_type": "channel", "user": ASKER_USER,
+        "bot_id": ASKER_BOT, "bot_profile": {"name": "Scout"},
+    }
+    fields.update(extra)
+    return event(f"<@{SELF_ID}> {text}", ts=ts, thread=thread, **fields)
+
+
+async def test_another_apps_mention_is_answered_as_a_colleagues_ask():
+    """The turn carries the consult mark the runtime keys knowledge-only tools
+    on, and the words are labelled as a program's for every later turn."""
+    from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
+
+    transport, api, handler = make_asked()
+    await transport.handle_event(bot_mention("status?", ts="60.0"), handler)
+    assert handler.marks[0][DEPTH_KEY] == 1 and handler.marks[0][ASKED_BY_KEY] == "Scout"
+    assert handler.tasks[0].history[0].text == (
+        "(From the Slack app Scout, not a person.)\nstatus?"
+    )
+    assert ("60.0", "white_check_mark") in api.reacts
+
+
+async def test_a_persons_turn_after_a_bots_keeps_every_tool():
+    """The mark lives on the thread's Task, which outlives the turn: left
+    behind, the next person in that thread would be answered without tools."""
+    from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
+
+    transport, api, handler = make_asked()
+    await transport.handle_event(bot_mention(ts="61.0"), handler)
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> and now me", ts="61.1", thread="61.0", channel_type="channel"),
+        handler,
+    )
+    assert DEPTH_KEY in handler.marks[0]
+    assert DEPTH_KEY not in handler.marks[1] and ASKED_BY_KEY not in handler.marks[1]
+
+
+async def test_a_bots_plain_message_never_consumes_its_own_mention():
+    """An app subscribed to channel messages gets the pair: the plain message is
+    dropped before the dedupe mark, and the mention is answered once."""
+    transport, api, handler = make_asked(wake="channel")
+    plain = bot_mention(ts="62.0", type="message")
+    await transport.handle_event(plain, handler)
+    assert handler.tasks == []
+    await transport.handle_event(bot_mention(ts="62.0"), handler)
+    await transport.handle_event(bot_mention(ts="62.0"), handler)
+    assert len(handler.tasks) == 1
+
+
+async def test_the_agents_own_words_never_wake_it():
+    """A reply that names the agent comes back as a mention of itself. With a
+    custom name or icon it carries no `user`, only the bot id; and an agent
+    that does not know who it is cannot tell, so it stays silent."""
+    transport, api, handler = make_asked()
+    await transport.handle_event(bot_mention(ts="63.0", user=SELF_ID, bot_id=SELF_BOT), handler)
+    own = bot_mention(ts="63.1", bot_id=SELF_BOT, subtype="bot_message")
+    del own["user"]
+    await transport.handle_event(own, handler)
+    transport.user_id = None
+    await transport.handle_event(bot_mention(ts="63.2"), handler)
+    transport.user_id, transport.bot_id = SELF_ID, None
+    unnamed = bot_mention(ts="63.3", subtype="bot_message")
+    del unnamed["user"]
+    await transport.handle_event(unnamed, handler)
+    assert handler.tasks == [] and api.posts == []
+
+
+async def test_two_agents_cannot_keep_each_other_talking():
+    """Three bot-woken turns in a row per thread, then silence and a stop sign;
+    a person speaking to the agent there starts the count again."""
+    transport, api, handler = make_asked()
+    for n in range(4):
+        await transport.handle_event(bot_mention(ts=f"64.{n + 1}", thread="64.0"), handler)
+    assert len(handler.tasks) == 3
+    assert ("64.4", "octagonal_sign") in api.reacts and ("64.4", "eyes") not in api.reacts
+    await transport.handle_event(
+        event(f"<@{SELF_ID}> carry on", ts="64.5", thread="64.0", channel_type="channel"),
+        handler,
+    )
+    await transport.handle_event(bot_mention(ts="64.6", thread="64.0"), handler)
+    assert len(handler.tasks) == 5
+
+
+async def test_one_app_gets_a_bounded_number_of_turns_an_hour():
+    """A loop that opens a new thread each time never meets the per-thread
+    bound, so the sending app has an hourly one too; another app is unaffected."""
+    from daedalus.transports import slack as slack_transport
+
+    transport, api, handler = make_asked()
+    budget = slack_transport._BOT_TURNS_PER_HOUR
+    for n in range(budget + 1):
+        await transport.handle_event(bot_mention(ts=f"7{n}.0"), handler)
+    assert len(handler.tasks) == budget
+    await transport.handle_event(bot_mention(ts="99.0", bot_id="BOTHER", user="UOTHER"), handler)
+    assert len(handler.tasks) == budget + 1
+
+
+async def test_bot_mentions_can_be_turned_off_or_given_every_tool(monkeypatch):
+    """`off` is the behaviour before the option existed; `full` treats the
+    mention as a person's (no consult mark); a word that is not a mode, which
+    can only come from the environment, closes the door instead of failing boot."""
+    from daedalus.tools.colleagues import DEPTH_KEY
+
+    transport, api, handler = make_asked(bot_mentions="off")
+    await transport.handle_event(bot_mention(ts="65.0"), handler)
+    assert handler.tasks == []
+
+    transport, api, handler = make_asked(bot_mentions="full")
+    await transport.handle_event(bot_mention(ts="65.1"), handler)
+    assert len(handler.tasks) == 1 and DEPTH_KEY not in handler.marks[0]
+
+    monkeypatch.setenv("SLACK_BOT_MENTIONS", "everything")
+    transport, api, handler = make_asked()
+    assert transport.bot_mentions == "off"
+
+
+async def test_a_bots_edit_or_plain_message_is_still_dropped():
+    """Only a fresh mention passes: an edited one, and a bot's plain message
+    in a channel the agent listens to in full, stay out."""
+    transport, api, handler = make_asked(wake="channel")
+    await transport.handle_event(bot_mention(ts="66.0", subtype="message_changed"), handler)
+    await transport.handle_event(bot_mention(ts="66.1", type="message"), handler)
+    assert handler.tasks == []
