@@ -437,7 +437,16 @@ back. Persona constant, transport variable:
   `off` drops it. The agent's own words never wake it, a bot's words are
   labelled as a program's in the thread's history, and two bounds end a loop:
   three bot-woken turns in a row per thread (a person speaking to the agent
-  there starts the count again) and thirty an hour per sending app. A reply is a streamed message
+  there starts the count again) and thirty an hour per sending app. A reaction
+  wakes the agent only when `SLACK_WAKE_EMOJI` names its emoji (comma-separated;
+  unset, reactions are dropped as before). It rides beside the wake mode: a
+  named emoji added to a message in a channel the agent is in asks the agent
+  about that message, the person who reacted is the requester, and the answer
+  lands in that message's thread. The rest is fixed: a removed reaction never
+  wakes it, one message wakes it once per emoji however many people add it,
+  its own reactions never do, a program's reaction is treated the way a
+  program's mention is (same setting, same bounds), and people's reactions
+  start at most sixty turns an hour. A reply is a streamed message
   (`chat.startStream`): the agent's tool calls and recalls appear as progress
   lines under it while it works, and it becomes the answer in place; where
   streaming is refused, the hourglass placeholder path remains. Widening *where* does change
