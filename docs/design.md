@@ -425,7 +425,10 @@ back. Persona constant, transport variable:
   restart, a `thread`-mode agent answers an old thread only when mentioned,
   and only a new thread started with a mention is followed again. DMs
   keep full delivery in every mode, and
-  subtypes/duplicates are still dropped. A bot's message is dropped too, with
+  subtypes/duplicates are still dropped, except the two Slack puts on a
+  person's own message: `file_share` (it carries an upload) and
+  `thread_broadcast` (a thread reply also sent to the channel). Those go
+  through the wake rule like any other message. A bot's message is dropped too, with
   one exception: another Slack app's `app_mention` of this agent wakes it, so
   one agent can ask another in a channel. `SLACK_BOT_MENTIONS` sets what that
   mention may do: `knowledge` (the default) runs the turn as a colleague's ask,
