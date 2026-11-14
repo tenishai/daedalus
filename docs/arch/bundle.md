@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-11-11
+updated: 2026-11-14
 anchor: src/daedalus/bundle.py sha=7602aef2177bbb69940854049b5e672a268ca7a7
-anchor: docs/bundle.schema.json sha=9f07556ddb4c85c837ba19eec0c7f11012787e8f
+anchor: docs/bundle.schema.json sha=950760f004fb3f75651bbd56c0ac50dd7b0ca2a4
 ---
 # bundle — agent.yaml schema and the bundle directory
 

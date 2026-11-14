@@ -6,6 +6,8 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-14
+
 ### Upgrading
 
 - **Another Slack app's @-mention now wakes an agent.** It used to be dropped. The turn runs

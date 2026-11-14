@@ -23,7 +23,7 @@ memory and no tool gateway still runs.
 - kobo: composes bundles and teaches agents through cabal (optional).
 - a visual builder GUI: a companion project, in development.
 
-> Status: 0.7.1, released. Bundle loader, runtime, CLI/A2A/Slack transports,
+> Status: 0.8.0, released. Bundle loader, runtime, CLI/A2A/Slack transports,
 > approvals and enforcement have all shipped. Design rationale:
 > [docs/design.md](docs/design.md) — where it disagrees with the code, the
 > code is right.
