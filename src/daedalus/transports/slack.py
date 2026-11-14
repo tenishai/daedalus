@@ -30,6 +30,11 @@ SLACK_BOT_TOKEN, no socket is opened: Slack's event envelopes arrive by
 gated by the `X-Kobo-Relay-Secret` header matching SLACK_RELAY_SECRET. Both
 ways pass each envelope through `admit()` (dedupe on event_id) and then the
 same `handle_event`; nothing after that point knows which way the event came.
+
+A click and a slash command come the same two ways (2026-11-14). Slack sends
+them as interactions, not events: over the socket as `interactive` and
+`slash_commands` requests, over HTTP as a `block_actions` or `slash_command`
+body the relay forwards to the same route. Both end in `handle_interaction`.
 """
 
 from __future__ import annotations
@@ -83,6 +88,14 @@ log = logging.getLogger(__name__)
 # that did not start from a Slack event: a2a, cli, a colleague agent.
 current_slack_requester: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_slack_requester", default=None
+)
+# Where the running task was asked, as (channel, thread ts, message ts): the
+# message is the one the marks go on (what a person wrote, what was reacted to,
+# what a slash command opened). Set beside the requester and for the same span,
+# so a Slack tool called with no channel acts in the conversation it was asked
+# in (tools/slack_actions.py). None for any task that did not start in Slack.
+current_slack_conversation: contextvars.ContextVar[tuple[str, str, str] | None] = (
+    contextvars.ContextVar("current_slack_conversation", default=None)
 )
 
 _THINKING = ":hourglass_flowing_sand: _thinking..._"
@@ -171,6 +184,31 @@ WAKE_EMOJI_ENV = "SLACK_WAKE_EMOJI"
 _REACTION_TURNS_PER_HOUR = 60
 #: Slack names the two thumbs `+1` and `-1` in events; people type these.
 _EMOJI_ALIASES = {"thumbsup": "+1", "thumbsdown": "-1"}
+# Buttons, menus and a slash command (2026-11-14). Slack sends none of these as
+# events. A click on something the agent posted is a `block_actions` payload;
+# `/its-name words` is a slash command. Over HTTP the room's relay forwards a
+# click as Slack sent it and a command's form fields as one JSON object with
+# `type: slash_command` added; over the socket both arrive as their own
+# request types and are given the same shape before `handle_interaction`.
+#
+# A click is answered only when it is on choices this runtime posted: the
+# actions block carries CHOICES_BLOCK_ID (tools/slack_actions.py builds it, and
+# each element's value is the choice's own words, so nothing about an offer is
+# kept in memory and a restart between the offer and the pick loses nothing).
+# The first pick settles it: the message is rewritten to say who chose what,
+# the buttons go, and the pick runs as that person's next message in the
+# thread. A slash command has no message of its own in the channel, so the
+# agent posts one saying who asked what and answers in its thread; where it
+# cannot post, the person alone is told why.
+#
+# Both are a person's act (Slack sends neither for a program), so they get a
+# person's tools and none of the bounds a program's mention meets.
+CHOICES_BLOCK_ID = "daedalus_choices"
+SLASH_COMMAND = "slash_command"
+BLOCK_ACTIONS = "block_actions"
+INTERACTION_TYPES = frozenset({BLOCK_ACTIONS, SLASH_COMMAND})
+#: The only host an answer to a slash command is ever sent to.
+_RESPONSE_URL_PREFIX = "https://hooks.slack.com/"
 # Slack's own ceiling on a task_update chunk.
 _TASK_UPDATE_MAX = 256
 # chat.appendStream takes markdown_text up to 12,000 characters per call.
@@ -573,6 +611,30 @@ class SlackApi:
         await self._web.chat_update(channel=channel, ts=ts, text=chunks[0])
         for chunk in chunks[1:]:
             await self._post(channel=channel, text=chunk, thread_ts=thread_ts)
+
+    async def settle(self, channel: str, ts: str, text: str) -> None:
+        """Rewrite a message that carried buttons or a menu into plain words:
+        `blocks` is replaced, not left out, because chat.update keeps the old
+        blocks (and their buttons) when only the text changes."""
+        await self._web.chat_update(
+            channel=channel,
+            ts=ts,
+            text=text,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}],
+        )
+
+    async def respond(self, response_url: object, text: str) -> None:
+        """Tell the one person who ran a slash command something, seen by them
+        alone. Best effort, and only ever to Slack's own response host: the
+        address arrives inside the payload."""
+        if not isinstance(response_url, str) or not response_url.startswith(_RESPONSE_URL_PREFIX):
+            return
+        try:
+            from slack_sdk.webhook.async_client import AsyncWebhookClient
+
+            await AsyncWebhookClient(response_url).send(text=text, response_type="ephemeral")
+        except Exception as exc:  # noqa: BLE001 -- a note to one person, never a failure
+            logger.warning("slack: could not answer a slash command privately (%s)", exc)
 
     async def react(self, channel: str, ts: str, name: str) -> None:
         try:
@@ -1097,6 +1159,13 @@ class SlackTransport:
                 event = self.admit(request.payload)
                 if event is not None:
                     await self.handle_event(event, handler)
+            elif request.type in {"interactive", "slash_commands"}:
+                payload = request.payload if isinstance(request.payload, dict) else {}
+                if request.type == "slash_commands":
+                    payload = {**payload, "type": SLASH_COMMAND}
+                interaction = self.admit_interaction(payload)
+                if interaction is not None:
+                    await self.handle_interaction(interaction, handler)
 
         socket.socket_mode_request_listeners.append(listener)
         await socket.connect()
@@ -1137,21 +1206,162 @@ class SlackTransport:
         the envelope was dropped (not an event_callback, or a repeat). The
         scheduled run waits for serve() when it lands first, and logs its own
         failure, since nothing awaits it."""
-        event = self.admit(envelope)
+        if isinstance(envelope, dict) and envelope.get("type") in INTERACTION_TYPES:
+            run, event = self.handle_interaction, self.admit_interaction(envelope)
+        else:
+            run, event = self.handle_event, self.admit(envelope)
         if event is None:
             return False
-        task = asyncio.create_task(self._handle_scheduled(event, handler))
+        task = asyncio.create_task(self._handle_scheduled(event, handler, run))
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return True
 
-    async def _handle_scheduled(self, event: dict, handler: Handler) -> None:
+    async def _handle_scheduled(self, event: dict, handler: Handler, run=None) -> None:
         if self._api is None:
             await self._started.wait()
         try:
-            await self.handle_event(event, handler)
+            await (run or self.handle_event)(event, handler)
         except Exception:
             log.exception("slack: an event that arrived over HTTP failed")
+
+    def admit_interaction(self, payload: object) -> dict | None:
+        """The door for a click or a slash command, as `admit` is for an event:
+        the payload when it is one of INTERACTION_TYPES and its `trigger_id` (one
+        per act) has not been seen, None otherwise. The ids share `admit`'s
+        memory, so a forward that arrives twice runs once."""
+        if not isinstance(payload, dict) or payload.get("type") not in INTERACTION_TYPES:
+            return None
+        trigger = payload.get("trigger_id")
+        if isinstance(trigger, str) and trigger:
+            key = f"trigger:{trigger}"
+            if key in self._event_ids:
+                return None
+            self._event_ids[key] = True
+            while len(self._event_ids) > _EVENT_ID_CAP:
+                self._event_ids.popitem(last=False)
+        return payload
+
+    async def handle_interaction(self, payload: dict, handler: Handler) -> None:
+        """A click or a slash command, whichever way it came (the note at
+        CHOICES_BLOCK_ID has the rules)."""
+        if payload.get("type") == SLASH_COMMAND:
+            await self._handle_command(payload, handler)
+        elif payload.get("type") == BLOCK_ACTIONS:
+            await self._handle_choice(payload, handler)
+
+    async def _handle_choice(self, payload: dict, handler: Handler) -> None:
+        """A pick from choices this runtime offered: settle the message, then
+        run the pick as that person's next message in the thread. A click on
+        anything else, or a second click on the same message, is dropped."""
+        actions = payload.get("actions")
+        action = next(
+            (
+                a
+                for a in (actions if isinstance(actions, list) else [])
+                if isinstance(a, dict) and a.get("block_id") == CHOICES_BLOCK_ID
+            ),
+            None,
+        )
+        if action is None:
+            return
+
+        def part(name: str) -> dict:
+            found = payload.get(name)
+            return found if isinstance(found, dict) else {}
+
+        picked = action.get("selected_option")
+        picked = picked if isinstance(picked, dict) else {}
+        choice = str(action.get("value") or picked.get("value") or "").strip()
+        user = part("user").get("id")
+        channel = part("channel").get("id")
+        message, container = part("message"), part("container")
+        ts = message.get("ts") or container.get("message_ts")
+        if not choice or not all(isinstance(v, str) and v for v in (user, channel, ts)):
+            return
+        if self.channels and channel not in self.channels and not channel.startswith("D"):
+            return
+        key = ("choice", channel, ts)
+        if key in self._reacted:
+            return
+        self._reacted[key] = True
+        while len(self._reacted) > _SEEN_CAP:
+            self._reacted.popitem(last=False)
+        thread = message.get("thread_ts") or container.get("thread_ts") or ts
+        question = ""
+        for block in message.get("blocks") if isinstance(message.get("blocks"), list) else []:
+            text = block.get("text") if isinstance(block, dict) else None
+            if isinstance(text, dict) and block.get("type") == "section":
+                question = str(text.get("text") or "").strip()
+                break
+        question = question or str(message.get("text") or "").strip()
+        try:
+            await self._api.settle(
+                channel, ts, f"{question}\n:white_check_mark: <@{user}> chose *{choice}*".strip()
+            )
+        except Exception as exc:  # noqa: BLE001 -- the pick still counts
+            logger.warning("slack: could not settle the choices at %s/%s (%s)", channel, ts, exc)
+        # A person answered here: the run of bot-woken turns is over.
+        self._bot_turns.pop((channel, thread), None)
+        asked = f" You had asked: {question}" if question else ""
+        await self._turn(
+            handler,
+            channel=channel,
+            ts=ts,
+            thread=thread,
+            text=choice,
+            files=[],
+            sender=user,
+            preface=(
+                f"(<@{user}> picked one of the choices you offered in Slack.{asked}\n"
+                "Their pick follows; it is their answer, not a new question.)"
+            ),
+            asked_by=None,
+            adopt=thread == ts,
+        )
+
+    async def _handle_command(self, payload: dict, handler: Handler) -> None:
+        """The agent's slash command: say in the channel who asked what, then
+        answer in that message's thread. Whatever stops it is told to the
+        person alone, through the command's response address."""
+        user, channel = payload.get("user_id"), payload.get("channel_id")
+        if not all(isinstance(v, str) and v for v in (user, channel)):
+            return
+        command = str(payload.get("command") or "").strip() or "the command"
+        text = str(payload.get("text") or "").strip()
+        answer_to = payload.get("response_url")
+        if self.channels and channel not in self.channels and not channel.startswith("D"):
+            await self._api.respond(answer_to, "I do not answer in this channel.")
+            return
+        if not text:
+            await self._api.respond(
+                answer_to,
+                f"Type what you want after the command, like `{command} what changed today?`",
+            )
+            return
+        quoted = "\n".join(f"> {line}" for line in text.splitlines())
+        try:
+            root = await self._api.post(channel, f"<@{user}> asked with `{command}`:\n{quoted}")
+        except Exception as exc:  # noqa: BLE001 -- not in the conversation, most often
+            logger.info("slack: could not open a thread for %s in %s (%s)", command, channel, exc)
+            await self._api.respond(
+                answer_to,
+                "I cannot post in this conversation. Add me to it, then ask again.",
+            )
+            return
+        self._bot_turns.pop((channel, root), None)
+        await self._turn(
+            handler,
+            channel=channel,
+            ts=root,
+            thread=root,
+            text=text,
+            files=[],
+            sender=user,
+            preface=None,
+            asked_by=None,
+            adopt=True,
+        )
 
     def listening_line(self) -> str:
         """The one line boot prints about this transport's reach. It states
@@ -1572,6 +1782,7 @@ class SlackTransport:
                 self._pump_progress(bus, queue, task, channel, stream_ts, pump_done)
             )
         requester_token = current_slack_requester.set(sender)
+        conversation_token = current_slack_conversation.set((channel, thread, ts))
         # A thread's Task outlives the turn, so the mark is set AND cleared for
         # every turn: a bot's turn must not leave a person's next one without
         # its tools. Done here, with no await before the handler reads it, so a
@@ -1598,6 +1809,7 @@ class SlackTransport:
             reply = f"error: {exc}"
         finally:
             current_slack_requester.reset(requester_token)
+            current_slack_conversation.reset(conversation_token)
             if pump is not None:
                 # Let the pump show the last steps it has queued, then stop it;
                 # a pump that will not finish in time is cut, never waited on.

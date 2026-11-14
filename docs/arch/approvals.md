@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-approvals
-updated: 2026-11-04
-anchor: src/daedalus/agent.py sha=64ee872a68fe3c8f8816565975b50d7e11fd8745
+updated: 2026-11-14
+anchor: src/daedalus/agent.py sha=40a419cf6e992b760ccdf27817b1002e8830c62d
 anchor: src/daedalus/enforcement.py sha=95b336ce124c57932f89cdd533fdeebaeda48590
 ---
 # approvals — what a model may call, and what a reply may say
@@ -14,6 +14,7 @@ INVARIANTS:
 - Agent._call_tool turns a provider's Exception into a `tool error:` result but lets CancelledError through, so the task deadline (#201, Agent._loop) cancels a running tool call. Never widen it to BaseException.
 - Empty `tools.allow` = no tools at all. The model never sees a tool it can't call; a hallucinated name misses the map.
 - DenyAll is the default approver. Only `chat` (CliApprover) and SlackTransport._wire_approver replace it; headless `run`/a2a stay denied. Approver is process-wide: a Slack-wired approver also gates calls arriving over a2a or cli (design.md §3, by design).
+- The Slack tools (slack.post_message / offer_choices / pins / bookmarks, tools/slack_actions.py, 2026-11-14) are ordinary tier-1 tools: on with a `kind: slack` transport block, offered only when `tools.allow` matches them, and never on a turn a program asked for (the provider is not `knowledge_only`).
 - Unapprovable gated tools are WITHHELD, not offered-then-refused (#105): a model refused every time retries a refusal it can't understand.
 - Slack reaction approver: only user ids in the `approvers:` list of a `kind: slack` block may approve (#53, #141; unioned across blocks). No list = every gate denied before a plan is posted. The Slack requester doesn't count as an approver unless they are the only one listed. A ❌ from anyone denies. The transport wires the approver only when `approvers` AND a `channel` allowlist are set; an open transport keeps DenyAll (transports/slack.py _wire_approver).
 - Law never half-loads: any hook import failure (image or overlay) locks the Enforcement; every task then fails 703 until fixed. An overlay file shadowing an image hook name is skipped with a warning, not loaded.

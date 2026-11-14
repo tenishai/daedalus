@@ -40,6 +40,31 @@ Issue and pull request numbers all refer to this repository, written in full.
   `reactions:read`, the `reaction_added` event, and `channels:history` / `groups:history`
   or `reactions:read` to read the message; `users:read` tells a person from a program.
 
+- **An agent in Slack can post, offer choices, pin and bookmark.** A bundle with a
+  `kind: slack` transport block now gets four tools once its bot token is set, each still
+  subject to `tools.allow` like any other (`slack.*` allows them all): `slack.post_message`
+  (a message in the conversation it was asked in, or in another channel, where it names the
+  person it is sent for), `slack.offer_choices` (a question with buttons, or a menu past
+  five choices), `slack.pins` and `slack.bookmarks` (add, remove, list). A tool called with
+  no channel acts where the task was asked; a block's `channel` list is also the list of
+  other channels the tools may reach. A turn a program asked for (a colleague's ask, another
+  app's mention) never gets them. With the `chat:write.public` scope a post reaches a public
+  channel the agent was never invited to; pins need `pins:read` / `pins:write`, bookmarks
+  `bookmarks:read` / `bookmarks:write`. Slack's refusals come back as a sentence that names
+  the missing scope.
+- **A click and a slash command reach the agent.** The first pick from choices the agent
+  offered rewrites that message to say who chose what, removes the buttons, and runs as that
+  person's next message in the thread; nothing about an offer is kept in memory, so a
+  restart between the offer and the pick loses nothing. `/its-command some words` posts a
+  message in the channel saying who asked what and the agent answers in its thread; an
+  empty command, or one in a conversation the agent cannot post in, is answered to that
+  person alone. Over Socket Mode these are the `interactive` and `slash_commands` requests.
+  Over HTTP the relay forwards them to the same `POST /slack/events`: a `block_actions`
+  payload as Slack sent it, and a command's form fields as one JSON object with
+  `"type": "slash_command"` added. A repeated `trigger_id` runs once. The app needs
+  interactivity turned on and a slash command (with the `commands` scope) pointed at the
+  relay or the socket.
+
 ### Fixed
 
 - **A person's upload in a thread the agent follows is no longer dropped.** Slack marks a

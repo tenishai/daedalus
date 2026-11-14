@@ -496,6 +496,28 @@ back. Persona constant, transport variable:
   prints a line when the lane is open, because a bundle that wrote
   `channels: []` before 2026-09-23 got the lane off and now gets it on.
 
+  What the agent can do in Slack besides answer (2026-11-14) needs no block of
+  its own: a `kind: slack` transport block adds the `slack_actions` sidecar,
+  which lists nothing until the bot token is set and whose four tools pass
+  through `tools.allow` like any other. `slack.post_message` posts in the
+  conversation the task was asked in or in another channel (there it names
+  who it is sent for); `slack.offer_choices` posts a question with buttons, or
+  a menu past five choices; `slack.pins` and `slack.bookmarks` add, remove and
+  list. A tool given no channel acts where the task was asked (a contextvar
+  set beside the requester); the blocks' `channel` allowlist is also the list
+  of other channels the tools may reach, and the conversation itself always
+  passes. The sidecar is not `knowledge_only`, so a turn a program asked for
+  never has it. A click and a slash command are interactions, not events:
+  `interactive` / `slash_commands` requests over the socket, a `block_actions`
+  or `slash_command` body at `POST /slack/events` over HTTP, deduped on
+  `trigger_id`. A click is answered only on choices this runtime posted (the
+  block id says so, and each element's value is the choice's own words, so an
+  offer keeps no state): the first pick rewrites the message to say who chose
+  what and runs as that person's next message in the thread. A slash command
+  has no message of its own, so the agent posts one saying who asked what and
+  answers in its thread; what stops it is told to that person alone. Both are
+  a person's act and get a person's tools.
+
 FastAPI stays at the edge: nothing below a transport imports it.
 
 ## 3. Approvals — three tiers
