@@ -72,6 +72,7 @@ prudence/
 ├── agent-card.json    # who the agent is (A2A standard)
 ├── persona.md         # how it behaves
 ├── agent.yaml         # what it's wired to
+├── guardrails.md      # optional: its owners' rules, one per line, on every task
 └── skills/            # optional: <id>/SKILL.md, loaded on demand with skills.load
 ```
 

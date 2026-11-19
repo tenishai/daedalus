@@ -46,6 +46,10 @@ Nothing in daedalus imports cabal, kobo or kaminos; they call it.
   loaded on demand with the `skills.load` tool (allow it in `tools.allow`). Memory then
   holds a short card per skill, so recall can say which skill fits a question without
   pasting the whole skill into every prompt.
+- **Give it rules it always follows.** `guardrails.md` holds one rule per line, and every
+  task's system prompt carries them right after the persona. An operator can replace the
+  list on a running agent; the next task uses it, with no restart. Rules guide the model.
+  To make sure something never happens, use the allow list, a gate or a law hook.
 
 ## Options
 
