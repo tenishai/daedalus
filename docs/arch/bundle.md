@@ -1,13 +1,13 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-11-14
-anchor: src/daedalus/bundle.py sha=7602aef2177bbb69940854049b5e672a268ca7a7
+updated: 2026-11-19
+anchor: src/daedalus/bundle.py sha=93eb5e5560a9fbcdc9171a3d9a5e310f85160160
 anchor: docs/bundle.schema.json sha=950760f004fb3f75651bbd56c0ac50dd7b0ca2a4
 ---
 # bundle — agent.yaml schema and the bundle directory
 
 WHAT / SEAM: `Bundle.load(path, env=None)` (bundle.py) → Bundle(path, spec: AgentSpec, card: dict, persona: str, skills: dict[str, Skill]). `AgentSpec` (pydantic) is the agent.yaml schema: name, card, persona, model (ModelSpec: id, max_tokens (the visible reply's ceiling, default 8192, gt 0), thinking (ThinkingSpec | None: mode auto|off|on, budget_tokens ≥ 1024; the thinking budget kept apart from max_tokens, #240, litellm engine only; daedalus.llm.thinking_kwargs reads it), request_timeout (s per model call, default 120, litellm engine only, #201), api_base, api_key_env, budget.per_task_tokens; id is required and is either a model or a tier word, fast|balanced|best), transports[], tools (ToolsSpec), memory (MemorySpec), checkpoints, approvals (ceiling, gates, escalation), engine.claude_code (ClaudeCodeSpec: binary, model, builtin_tools, permission_mode, on_denied, config_dir, cwd — the directory Claude Code works in, #242), task_timeout (s per engine run, default 600, #201). `bundle_schema()` emits it as JSON Schema → docs/bundle.schema.json.
-Directory: agent.yaml, persona.md, agent-card.json (required); skills/<id>/SKILL.md (frontmatter when_to_use, requires); tools/*.py (enforcement hooks, not LLM tools); knowledge/*.md and intake/* (seeded into techne by docker/seeder.py, not by the runtime).
+Directory: agent.yaml, persona.md, agent-card.json (required); skills/<id>/SKILL.md (frontmatter when_to_use, description, requires; `Skill.summary` = when_to_use, else description, else name, else id, one line cut at `SUMMARY_MAX_CHARS` 300, and that is the index line); tools/*.py (enforcement hooks, not LLM tools); knowledge/*.md and intake/* (seeded into techne by docker/seeder.py, not by the runtime; a skill seeds as its card, not its body, when tools.allow admits skills.load, `offers_skills_load`).
 OPS / FLOW: read agent.yaml → `interpolate` ${VAR} / ${VAR:-default} recursively (undefined without default → BundleError) → AgentSpec.model_validate → require card + persona files → strip persona comments → load_skills. Agent then builds collaborators from spec (see protocols card).
 INVARIANTS:
 - Unknown fields load with a WARNING, never an error and never silently (`_WarnExtra`): forward-compat with newer writers (kobo, kaminos).

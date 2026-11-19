@@ -73,6 +73,24 @@ def test_skill_without_frontmatter_is_all_body(tmp_path):
     assert skill.summary == "plain"
 
 
+def test_summary_falls_back_to_the_description(tmp_path):
+    """A skill written in the room carries a name and a description and no
+    when_to_use. Indexed by name alone, it said nothing about when it fits."""
+    path = tmp_path / "SKILL.md"
+    path.write_text(
+        "---\nname: triage\ndescription: Sort an incoming page by service and urgency.\n---\n"
+        "Body.\n"
+    )
+    assert parse_skill("triage", path).summary == "Sort an incoming page by service and urgency."
+
+
+def test_summary_is_one_line_cut_at_a_word(tmp_path):
+    path = tmp_path / "SKILL.md"
+    path.write_text("---\ndescription: |\n  " + "word " * 100 + "\n  second line\n---\nBody.\n")
+    summary = parse_skill("long", path).summary
+    assert "\n" not in summary and len(summary) <= 300 and summary.endswith("…")
+
+
 def test_unparseable_frontmatter_warns_and_degrades_rather_than_raising(tmp_path):
     """A catalog-metadata typo must not stop an agent booting — the body is
     still a usable procedure."""

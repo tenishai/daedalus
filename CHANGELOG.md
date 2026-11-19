@@ -6,6 +6,23 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **Memory holds a skill's card, not its whole text, when the bundle offers `skills.load`.**
+  The boot seeder stored every SKILL.md whole, and recall pasted whole rows into the prompt,
+  so a question near a skill brought the entire skill along on every task, beside the
+  skills index and `skills.load` that already reach it. Replayed on a seven-skill audit
+  agent's bundle with the runtime image's own seeder and search, the five rows recalled per
+  question carried 14,000 to 59,000 characters, 67 to 98% of it skill text, and skills
+  took up to three of the five rows. A skill now seeds as its card: the id, the one-line
+  summary and how to load it. The same questions recall 2,000 to 5,000 characters, and the
+  rows go to learned memories. An agent seeded the old way re-seeds each skill once at its
+  next boot (the card mode is part of the file's digest); a bundle without `skills.load`
+  keeps the whole text, since recall is its only route to a skill.
+- **The skills index falls back to a skill's `description`** when it has no `when_to_use`,
+  before the name. A skill written with a name and a description only was listed by its
+  name alone. Index lines are one line, cut at 300 characters.
+
 ## [0.8.0] — 2026-11-14
 
 ### Upgrading
