@@ -233,3 +233,28 @@ async def test_a_finished_reply_logs_nothing(sent, caplog):
     with caplog.at_level(logging.INFO, logger="daedalus.llm"):
         await client.complete([{"role": "user", "content": "one line"}])
     assert not [r for r in caplog.records if "reply truncated" in r.getMessage()]
+
+
+# ---- usage is reported honestly (#268) ------------------------------------
+
+
+async def test_missing_usage_is_none_not_zero(sent):
+    response = _response()
+    response.usage = None
+    sent.reply["response"] = response
+    result = await LiteLLMClient("openai/gpt-x").complete([{"role": "user", "content": "q"}])
+    assert result.input_tokens is None and result.output_tokens is None
+    assert result.cache_read_input_tokens is None
+    assert result.tokens_spent() == 0
+
+
+async def test_cache_counts_come_from_prompt_tokens_details(sent):
+    response = _response()
+    response.usage.prompt_tokens_details = SimpleNamespace(
+        cached_tokens=700, cache_write_tokens=200
+    )
+    sent.reply["response"] = response
+    result = await LiteLLMClient("openai/gpt-x").complete([{"role": "user", "content": "q"}])
+    assert result.input_tokens == 10
+    assert result.cache_read_input_tokens == 700
+    assert result.cache_creation_input_tokens == 200

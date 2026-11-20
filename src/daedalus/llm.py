@@ -15,6 +15,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _count(usage, name: str) -> int | None:
+    """A usage count as reported, or None when the provider left it out (#268).
+    Not `or 0`: an unreported count must not read as zero."""
+    value = getattr(usage, name, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -237,7 +244,7 @@ class LiteLLMClient:
 
         usage = getattr(response, "usage", None)
         finish_reason = getattr(response.choices[0], "finish_reason", None)
-        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        completion_tokens = _count(usage, "completion_tokens")
         if finish_reason == "length":
             # The one line that makes a cut reply diagnosable from the agent's log
             # (#240): did the answer run long, or did thinking eat the budget first?
@@ -245,11 +252,11 @@ class LiteLLMClient:
             details = getattr(usage, "completion_tokens_details", None)
             reasoning_tokens = getattr(details, "reasoning_tokens", None)
             log.info(
-                "reply truncated: model=%s max_tokens_sent=%d completion_tokens=%d "
+                "reply truncated: model=%s max_tokens_sent=%d completion_tokens=%s "
                 "reasoning_tokens=%s thinking=%s",
                 self.model,
                 self.max_tokens_sent,
-                completion_tokens,
+                completion_tokens if completion_tokens is not None else "unreported",
                 reasoning_tokens if reasoning_tokens is not None else "unreported",
                 self.thinking_kwargs.get("thinking")
                 or self.thinking_kwargs.get("extra_body")
@@ -259,7 +266,16 @@ class LiteLLMClient:
             text=text,
             reasoning=reasoning,
             tool_calls=tool_calls,
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            input_tokens=_count(usage, "prompt_tokens"),
             output_tokens=completion_tokens,
+            # litellm carries cache counts in prompt_tokens_details, and for Anthropic
+            # its prompt_tokens already INCLUDES them (anthropic/chat/transformation.py,
+            # calculate_usage), so these are a breakdown, not an addition.
+            cache_read_input_tokens=_count(
+                getattr(usage, "prompt_tokens_details", None), "cached_tokens"
+            ),
+            cache_creation_input_tokens=_count(
+                getattr(usage, "prompt_tokens_details", None), "cache_write_tokens"
+            ),
             finish_reason=finish_reason,
         )

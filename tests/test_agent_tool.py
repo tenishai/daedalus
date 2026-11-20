@@ -341,7 +341,7 @@ class _BlockingEnforcement:
     async def run_pre_task(self, message):
         raise AssertionError("enforcement must not run for tool tasks")
 
-    async def run_post_draft(self, draft):
+    async def run_post_draft(self, draft, record=None):
         raise AssertionError("enforcement must not run for tool tasks")
 
 

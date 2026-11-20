@@ -185,6 +185,7 @@ class LiteLLMEngine:
                 },
             )
             if budget.remaining() == 0:
+                emit("loop_limit", reason="budget")
                 # checkpoint intentionally kept: re-fund and resume()
                 # The reply is read by HUMANS on every surface (a Slack
                 # channel got the raw sentinel once, as an agent's entire
@@ -197,17 +198,20 @@ class LiteLLMEngine:
                     reason=ReasonCode.BUDGET_EXHAUSTED,
                 )
             response = await self.llm.complete(messages, tools=llm_tools)
+            # One event per model call, budget or not (#268): the run record and
+            # log-summed token totals both read it.
+            emit("usage", model=getattr(self.llm, "model", None), **response.usage_fields())
             truncated = response.finish_reason == "length"
             if truncated:
                 # Silent truncation looks like a complete reply to every
                 # surface downstream (finding #27, born as kobo #1/#4) —
                 # trace it AND mark the reply so operators see the cut.
                 emit("truncated", max_tokens=spec.model.max_tokens)
-            budget.spend(response.input_tokens + response.output_tokens)
+            budget.spend(response.tokens_spent())
             if budget.remaining() is not None:
                 emit(
                     "budget",
-                    spent=response.input_tokens + response.output_tokens,
+                    spent=response.tokens_spent(),
                     remaining=budget.remaining(),
                 )
             if response.reasoning:
@@ -226,7 +230,11 @@ class LiteLLMEngine:
                         f"limit ({spec.model.max_tokens})]"
                     )
                 return task.reply(text)
-            if context_limit and response.input_tokens >= context_limit:
+            if (
+                context_limit
+                and response.input_tokens is not None
+                and response.input_tokens >= context_limit
+            ):
                 # Stop before the tool results grow the context further (#98).
                 emit("context_limit", input_tokens=response.input_tokens)
                 exhausted = "context"
@@ -268,6 +276,7 @@ class LiteLLMEngine:
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
 
+        emit("loop_limit", reason=exhausted)
         detail = (
             f" The last thing I tried: {last_attempt}." if last_attempt else ""
         )
@@ -327,7 +336,8 @@ class LiteLLMEngine:
         except LLMError as exc:
             turn.emit("wrap_up", ok=False, error=str(exc)[:200])
             return None
-        budget.spend(response.input_tokens + response.output_tokens)
+        turn.emit("usage", model=getattr(self.llm, "model", None), **response.usage_fields())
+        budget.spend(response.tokens_spent())
         if response.reasoning:
             turn.emit("reasoning", text=response.reasoning)
         text = response.text.strip()

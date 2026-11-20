@@ -30,9 +30,26 @@ class LLMResponse:
     text: str
     reasoning: str = ""  # think-trace from reasoning models; never part of the reply
     tool_calls: list[ToolCall] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    # None = the provider did not report it (#268); never read a missing count as 0.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
     finish_reason: str | None = None  # "length" = truncated by max_tokens (finding #27)
+
+    def tokens_spent(self) -> int:
+        """Input plus output for a token budget, counting an unreported figure
+        as 0: a budget can only spend what was reported."""
+        return (self.input_tokens or 0) + (self.output_tokens or 0)
+
+    def usage_fields(self) -> dict:
+        """The four counts, for a `usage` trace event."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+        }
 
 
 @runtime_checkable

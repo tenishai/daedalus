@@ -59,6 +59,7 @@ from daedalus.protocols import (
     ToolProvider,
     Transport,
 )
+from daedalus.run_record import RunRecorder, current_recorder
 from daedalus.task import RECALL_KEY, VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 from daedalus.tiers import (
     TIER_NAMES,
@@ -348,6 +349,9 @@ class Agent:
         the kaminos trace pane consumes the same events over SSE (/events
         on the a2a transport)."""
         event = {"type": event_type, **fields}
+        recorder = current_recorder.get()
+        if recorder is not None:
+            recorder.observe(event)
         self.events.publish(event)
         if self.on_event is not None:
             self.on_event(event)
@@ -821,10 +825,20 @@ class Agent:
         # dispatch above: a revision pass spawned on that path inherits no ledger
         # and asks unguarded, which its corroboration logic relies on.
         ask_ledger.set(AskLedger())
-        result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        # What the reply was built from, for post_draft hooks that ask for it (#268).
+        recorder = RunRecorder(self.engine_name, self.model_resolution.id)
+        token = current_recorder.set(recorder)
+        try:
+            result = await self._loop(
+                task, self._messages(task, recalled, notices=pre.notices)
+            )
+        finally:
+            current_recorder.reset(token)
         await self._publish_memory()
         if result.agent_text():
-            post = await self.enforcement.run_post_draft(result.agent_text())
+            post = await self.enforcement.run_post_draft(
+                result.agent_text(), recorder.record()
+            )
             if post.blocked:
                 # The unlawful draft is discarded, never partially sent: it
                 # must not linger in history where task_to_a2a would
@@ -1037,7 +1051,8 @@ class Agent:
         # The model-produced reply passes post_draft like a chat reply (#86). A
         # block returns the chat path's failure shape and nothing is kept in
         # history; a hook's rewrite replaces the text (the room re-validates it).
-        post = await self.enforcement.run_post_draft(reply)
+        # No run record: this lane is one summarizer call, not an agent run (#268).
+        post = await self.enforcement.run_post_draft(reply, None)
         if post.blocked:
             self._emit("learnings_blocked", detail=post.detail)
             return task.reply(

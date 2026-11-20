@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
 updated: 2026-11-01
-anchor: src/daedalus/protocols.py sha=86f493de93e25713763ab962ddbe0ee7c23ec3e5
+anchor: src/daedalus/protocols.py sha=a3e51bf6ac4f315edca578c91f47612933974555
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -13,7 +13,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage. Optional class attribute `knowledge_only = True` (read with getattr, not a Protocol member): the provider answers from the agent's own material with no credential, so its tools stay offered while answering a colleague (kobo#310); default credentialed, so a new provider is withheld there until it opts in. Only SkillsToolProvider sets it.
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`
-Data: `ToolCall(id, name, arguments)` (name = exactly what the model said), `LLMResponse(text, reasoning, tool_calls, input_tokens, output_tokens, finish_reason)`.
+Data: `ToolCall(id, name, arguments)` (name = exactly what the model said), `LLMResponse(text, reasoning, tool_calls, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, finish_reason)`; every count is `int | None`, None = the provider did not report it (#268). `tokens_spent()` counts None as 0 for a budget; LiteLLM's Anthropic input_tokens already includes the cache counts.
 Defaults: NoMemory, NoTools (call raises LookupError), NoCheckpoints, NoBudget, AllowAll (explicit opt-out only), DenyAll (THE default approver).
 OPS / FLOW: Agent.__init__ (agent.py) takes each collaborator as a kwarg; None → built from the bundle spec (_memory_from_spec, _tools_from_spec, _checkpoints_from_spec, _budget) or the no-op default. Implementations: LiteLLMClient (llm.py), TechneMemoryStore (memory/techne.py), SqliteCheckpoints (checkpoints.py), TokenBudget (budget.py), tool providers (tools/*.py, composed by tools/compose.py MultiToolProvider), CliTransport/A2aTransport/SlackTransport, Slack reaction approver (transports/slack.py).
 INVARIANTS:
