@@ -1207,6 +1207,82 @@ def test_skill_change_and_removal_converge_like_knowledge(tmp_path):
                 if s == "seed:skills/cost-report/SKILL.md"]
 
 
+# --- a skill seeds as its card when the bundle offers skills.load ------------
+
+AUDIT_SKILL = (
+    "---\nname: audit\nwhen_to_use: When proving who approved a person's access.\n---\n"
+    "# Audit\n\nStep one: read the provisioning log.\n\nStep two: find the ticket.\n"
+)
+
+
+def _one_skill(tmp_path: Path, skill_id: str, text: str) -> Path:
+    sdir = tmp_path / "skills"
+    (sdir / skill_id).mkdir(parents=True)
+    (sdir / skill_id / "SKILL.md").write_text(text)
+    return sdir
+
+
+def test_a_skill_seeds_as_its_card_not_its_body(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _one_skill(tmp_path, "audit", AUDIT_SKILL)
+    sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+         fake.store, fake.delete, skills_dir=sdir, skill_cards=True)
+    rows = [c for c, _, s in fake.rows.values() if s == "seed:skills/audit/SKILL.md"]
+    assert len(rows) == 1
+    assert rows[0].startswith("## Skill: audit\n\nWhen proving who approved a person's access.")
+    assert 'skills.load("audit")' in rows[0]
+    assert "Step one" not in rows[0]
+
+
+def test_a_card_without_frontmatter_takes_the_first_line_of_prose(tmp_path):
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _one_skill(tmp_path, "plain", "# Plain\n\nJust do the thing.\n\nThen more.\n")
+    sync(kdir, tmp_path / "techne.db", tmp_path / "seed_state.db",
+         fake.store, fake.delete, skills_dir=sdir, skill_cards=True)
+    rows = [c for c, _, s in fake.rows.values() if s == "seed:skills/plain/SKILL.md"]
+    assert "Just do the thing." in rows[0] and "Then more." not in rows[0]
+
+
+def test_switching_a_store_to_cards_reseeds_each_skill_once(tmp_path):
+    """An agent seeded with whole bodies converges at its next boot: the
+    card mode is part of the digest, so the unchanged file reads as changed
+    once, and knowledge files are not touched."""
+    kdir, fake = _bundle(tmp_path), FakeStore()
+    sdir = _skills(tmp_path)
+    state = tmp_path / "seed_state.db"
+    sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete, skills_dir=sdir)
+
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete,
+             skills_dir=sdir, skill_cards=True)
+    assert r["by_kind"]["skills"]["seeded"] == 1
+    assert r["by_kind"]["knowledge"]["seeded"] == 0
+    rows = [c for c, _, s in fake.rows.values() if s == "seed:skills/cost-report/SKILL.md"]
+    assert len(rows) == 1 and 'skills.load("cost-report")' in rows[0]
+
+    r = sync(kdir, tmp_path / "techne.db", state, fake.store, fake.delete,
+             skills_dir=sdir, skill_cards=True)
+    assert r["seeded"] == 0
+
+
+@pytest.mark.parametrize(
+    "allow, expected",
+    [(["skills.load"], True), (["skills.*"], True), (["colleagues.*"], False), ([], False)],
+)
+def test_offers_skills_load_matches_the_allowlist_like_the_runtime(tmp_path, allow, expected):
+    from seeder import offers_skills_load
+
+    (tmp_path / "agent.yaml").write_text(f"tools:\n  allow: {json.dumps(allow)}\n")
+    assert offers_skills_load(tmp_path) is expected
+
+
+def test_an_unreadable_agent_yaml_keeps_the_whole_body(tmp_path):
+    from seeder import offers_skills_load
+
+    assert offers_skills_load(tmp_path) is False
+    (tmp_path / "agent.yaml").write_text("tools: [unclosed\n")
+    assert offers_skills_load(tmp_path) is False
+
+
 def test_sync_without_skills_dir_is_byte_identical_to_before(tmp_path):
     """The knowledge-only call shape (no skills_dir) behaves exactly as it
     always has -- the parameter is additive."""

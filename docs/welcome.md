@@ -43,7 +43,9 @@ Nothing in daedalus imports cabal, kobo or kaminos; they call it.
 - **Validate a bundle in an editor or another language.** `daedalus schema` prints the
   agent.yaml JSON Schema; the repo commits it as `docs/bundle.schema.json`.
 - **Teach it skills.** `skills/<id>/SKILL.md` files are listed in the system prompt and
-  loaded on demand with the `skills.load` tool (allow it in `tools.allow`).
+  loaded on demand with the `skills.load` tool (allow it in `tools.allow`). Memory then
+  holds a short card per skill, so recall can say which skill fits a question without
+  pasting the whole skill into every prompt.
 
 ## Options
 

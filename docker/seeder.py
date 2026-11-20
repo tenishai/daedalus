@@ -18,6 +18,19 @@ frontmatter (the marketplace's version/profiles block) is stripped: it is
 catalog metadata, not procedure. A skill's support files beyond SKILL.md
 are not seeded (nothing consumes them yet); the SKILL.md is the directive.
 
+When the bundle offers `skills.load` (`offers_skills_load`), a skill seeds as
+its CARD instead: the skill's id, its one-line summary and how to load it.
+The runtime then has two routes to the same body, the skills index plus
+`skills.load` and whole-body recall, and recall paid for it on every task:
+replayed on a seven-skill audit agent's bundle, the five rows recalled per
+question carried 14,000 to 59,000 characters, 67 to 98% of it skill bodies
+the model could load anyway, and the skills took up to three of the five
+rows a learned memory could have had. A card keeps what recall is good at,
+saying which skill fits this question, in one short row. The card mode is
+folded into the file's digest (`_CARD_DIGEST_TAG`), so a store seeded the
+other way converges at the next boot like any changed file. A bundle without
+`skills.load` keeps the whole body: recall is the only route it has.
+
 bundle/intake/*.{md,txt} gets the opposite lifecycle: a one-shot append pass
 (see ingest_intake) ledgered by content-sha rather than filename. Once a
 file's sha is ledgered it is never touched again — not on content change
@@ -77,18 +90,87 @@ def type_for(filename: str) -> str:
     return TYPE_MAP.get(Path(filename).stem, "fact")
 
 
-def parse_skill_file(key: str, path: Path) -> list[str]:
+def parse_skill_file(key: str, path: Path, *, card: bool = False) -> list[str]:
     """One whole-file procedure section per SKILL.md (see the module
     docstring for why skills are never split on headings the way
-    knowledge files are). The section leads with a heading naming the
-    skill id -- the bundle directory name, taken from `key`'s middle
-    segment -- so the seeded entry self-describes in recall the same way
-    a knowledge file's own `## ` heading does."""
-    text = _FRONTMATTER.sub("", path.read_text(), count=1).strip()
+    knowledge files are), or with `card` the skill's card. The section
+    leads with a heading naming the skill id -- the bundle directory
+    name, taken from `key`'s middle segment -- so the seeded entry
+    self-describes in recall the same way a knowledge file's own `## `
+    heading does."""
+    raw = path.read_text()
+    text = _FRONTMATTER.sub("", raw, count=1).strip()
     if not text:
         return []
     skill_id = key.split("/")[1]
+    if card:
+        return [
+            f"## Skill: {skill_id}\n\n{_card_summary(raw, text)}\n\n"
+            f'This is the skill\'s card, not the skill. Call `skills.load("{skill_id}")` '
+            "to read the whole procedure before acting on it."
+        ]
     return [f"## Skill: {skill_id}\n\n{text}"]
+
+
+#: Folded into a skill's digest when it seeds as a card, so switching a store
+#: between the two shapes re-seeds the file once. Bump the version if the card's
+#: wording changes and existing stores should pick it up.
+_CARD_DIGEST_TAG = b"skill-card-v1\n"
+
+#: Same cut as the skills index line (daedalus.bundle.SUMMARY_MAX_CHARS).
+CARD_SUMMARY_MAX_CHARS = 300
+
+
+def _card_summary(raw: str, body: str) -> str:
+    """What the skill is for, on one line: the frontmatter's `when_to_use`,
+    else its `description` (the order the runtime's skills index uses), else
+    the body's first line of prose. Frontmatter that does not parse reads as
+    absent, never as a failed boot."""
+    meta: dict = {}
+    match = _FRONTMATTER.match(raw)
+    if match:
+        import yaml  # daedalus's own base dependency; deferred like techne's
+
+        block = match.group(0)[len("---\n") : -len("\n---\n")]
+        try:
+            loaded = yaml.safe_load(block)
+            meta = loaded if isinstance(loaded, dict) else {}
+        except yaml.YAMLError:
+            meta = {}
+    for key in ("when_to_use", "description"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return _one_line(value)
+    prose = next(
+        (line for line in body.splitlines() if line.strip() and not line.lstrip().startswith("#")),
+        "",
+    )
+    return _one_line(prose) if prose else "No summary given."
+
+
+def _one_line(text: str, limit: int = CARD_SUMMARY_MAX_CHARS) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[: limit - 1].rsplit(" ", 1)[0] or flat[: limit - 1]
+    return cut.rstrip(" ,;:.") + "…"
+
+
+def offers_skills_load(bundle: Path) -> bool:
+    """Whether the bundle's `tools.allow` admits `skills.load` (matched the way
+    the runtime matches it, with fnmatch). Anything unreadable is a no: the
+    whole body is the safe default, since without the tool recall is the only
+    route to a skill."""
+    from fnmatch import fnmatch
+
+    try:
+        import yaml
+
+        spec = yaml.safe_load((bundle / "agent.yaml").read_text()) or {}
+        allow = ((spec.get("tools") or {}).get("allow")) or []
+        return any(fnmatch("skills.load", str(pattern)) for pattern in allow)
+    except Exception:
+        return False
 
 
 def _render_breakdown(by_kind: dict | None) -> str:
@@ -209,6 +291,7 @@ def sync(
     list_ids_fn: Callable[[Path, str], list[int]] | None = None,
     retire_fn: Callable[[Path, list[int], int], None] | None = None,
     skills_dir: Path | None = None,
+    skill_cards: bool = False,
 ) -> dict:
     try:
         conn, state = _load_state(state_db)
@@ -304,7 +387,7 @@ def sync(
             Exception cleanup only; the caller decides what to do with the
             old entries (if any) and writes the ledger row."""
             sections = (
-                parse_skill_file(filename, path)
+                parse_skill_file(filename, path, card=skill_cards)
                 if filename.startswith(_SKILL_KEY_PREFIX)
                 else parse_knowledge_file(path)
             )
@@ -372,7 +455,10 @@ def sync(
                     delete_fn(techne_db, entry_id)
 
         for filename, path in current.items():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            content = path.read_bytes()
+            if skill_cards and filename.startswith(_SKILL_KEY_PREFIX):
+                content = _CARD_DIGEST_TAG + content
+            digest = hashlib.sha256(content).hexdigest()
             prior = state.get(filename)
 
             if prior is None:
@@ -676,6 +762,7 @@ def main(argv: list[str]) -> int:
         list_ids_fn=_ids_by_source,
         retire_fn=retire_fn,
         skills_dir=bundle / "skills",
+        skill_cards=offers_skills_load(bundle),
     )
     nothing_happened = not any(result[k] for k in ("seeded", "removed", "unchanged"))
     if not knowledge_dir.is_dir() and nothing_happened:

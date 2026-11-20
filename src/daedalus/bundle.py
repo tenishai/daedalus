@@ -682,9 +682,24 @@ def bundle_schema() -> dict:
 #: before seeding (`_FRONTMATTER` there) -- deliberately the same shape, read by
 #: two readers for two different purposes. The seeder drops it because catalog
 #: metadata is not procedure and has no business in a memory entry. Here it is
-#: the whole point: `when_to_use` is what the index in the system prompt is made
-#: of, and `requires` is what the load-time precondition check reads.
+#: the whole point: `when_to_use` (else the catalogue's `description`) is what the
+#: index in the system prompt is made of, and `requires` is what the load-time
+#: precondition check reads.
 _SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+#: The longest index line a skill gets. A catalogue description is written for a
+#: person browsing the catalogue and can run to a paragraph; the index carries one
+#: line per skill on every task. docker/seeder.py cuts its memory card the same way.
+SUMMARY_MAX_CHARS = 300
+
+
+def _one_line(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
+    """`text` on one line, cut at a word before `limit` with an ellipsis."""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[: limit - 1].rsplit(" ", 1)[0] or flat[: limit - 1]
+    return cut.rstrip(" ,;:.") + "…"
 
 
 @dataclass(frozen=True)
@@ -695,23 +710,29 @@ class Skill:
     in a system prompt and grows without bound as skills are added. One reporting
     team measured their own fourteen-skill assignment at ~183 KB (#57) -- their
     figure for their catalogue, not a property of this runtime, and cited only to
-    show the order of magnitude. Only `id` and `when_to_use` are indexed; the body
-    is fetched on demand through the `skills.load` tool. (#58)
+    show the order of magnitude. Only `id` and `summary` are indexed; the body is
+    fetched on demand through the `skills.load` tool. (#58)
     """
 
     id: str
     body: str
     name: str | None = None
     when_to_use: str | None = None
+    description: str | None = None
     requires: list[str] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
 
     @property
     def summary(self) -> str:
-        """The one index line. Falls back through when_to_use -> name -> id, so
-        a skill with no frontmatter at all is still addressable by name rather
-        than silently missing from the index."""
-        return self.when_to_use or self.name or self.id
+        """The one index line. Falls back through when_to_use -> description ->
+        name -> id. A skill written with only a name and a description (the two
+        lines kobo's skill editor asks for) used to be indexed by its name alone,
+        which says nothing about when it fits. A skill with no frontmatter at all
+        is still addressable by name."""
+        for value in (self.when_to_use, self.description, self.name):
+            if isinstance(value, str) and value.strip():
+                return _one_line(value)
+        return self.id
 
 
 def parse_skill(skill_id: str, path: Path) -> Skill:
@@ -767,6 +788,7 @@ def parse_skill(skill_id: str, path: Path) -> Skill:
         body=text.strip(),
         name=meta.get("name"),
         when_to_use=meta.get("when_to_use"),
+        description=meta.get("description"),
         requires=[str(item) for item in requires],
         meta=meta,
     )
