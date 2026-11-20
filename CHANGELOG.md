@@ -8,6 +8,22 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **The model is told where each person's Slack message was said.** A rule can now name
+  Slack channels ("only answer in these channels"), so the line above a person's turn
+  ends with the conversation: `(From Ada Lovelace <ada@example.com>, in #sre-requests.)`,
+  `in a direct message` for a 1:1 DM, `in a group message` for a group DM, and
+  `in <#C0123>` when `conversations.info` cannot name the channel (room-made apps carry
+  `channels:read` and `groups:read`). A DM's id says what it is, so it is never looked
+  up; any other channel is read once an hour, and a failed read is tried again after a
+  minute, the same as a person. Every person path names its channel: a message, a
+  reaction that wakes the agent, a pick from its choices, a slash command. The
+  `## Rules` intro now says the line names who sent a message and where, and that a rule
+  may end with lists, `(These people: ...)`, `(These emoji: ...)`, `(These channels: ...)`
+  or `(These repositories: ...)`, and is about exactly what they name: people by the
+  email in that line, channels by the channel in it, emoji by the reaction that woke the
+  agent, repositories by the ones its tools act on. The room writes a rule that names
+  things that way.
+
 - **The model is told who sent each person's Slack message.** The sender's user id rode
   on the message for the journal only, so a rule like "only answer these people" had
   nothing to be kept against. Every person's turn (a message, a reaction that wakes the
