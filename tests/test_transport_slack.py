@@ -11,6 +11,7 @@ from daedalus.transports.slack import (
     SlackReactionApprover,
     SlackTransport,
     current_slack_requester,
+    place_label,
     sender_label,
 )
 
@@ -2393,7 +2394,7 @@ async def test_a_named_emoji_asks_the_agent_about_that_message():
     await transport.handle_event(reaction("ticket::skin-tone-2", ts="80.5"), handler)
     asked = handler.tasks[0].history[0]
     assert asked.sender == "U1"
-    assert asked.sender_label == "Ada Lovelace <ada@example.com>"
+    assert asked.sender_label == f"Ada Lovelace <ada@example.com>, in <#{CH}>"
     assert asked.text == (
         "(They reacted with :ticket: to a message <@U2> wrote. The reaction is the ask: "
         "nobody wrote you a new message. The message follows.)\nthe deploy is stuck"
@@ -2530,7 +2531,21 @@ async def test_the_reacted_message_is_read_by_thread_then_by_reaction():
         async def users_info(self, user):
             return {"user": {"is_bot": user == "UBOT", "real_name": "Scout"}}
 
+        async def conversations_info(self, channel):
+            if channel == "CGONE":
+                raise RuntimeError("channel_not_found")
+            return {"channel": {
+                "D1": {"is_im": True},
+                "G1": {"is_mpim": True, "name": "mpdm-ada--grace-1"},
+                "C1": {"is_channel": True, "name": "sre-requests"},
+            }[channel]}
+
     assert (await SlackApi(Web()).message("C1", "1.5"))["thread_ts"] == "1.0"
+    assert await SlackApi(Web()).where("D1") == ("im", "")
+    assert await SlackApi(Web()).where("G1") == ("mpim", "")
+    assert await SlackApi(Web()).where("C1") == ("channel", "sre-requests")
+    assert await SlackApi(Web()).where("CGONE") is None
+    assert await SlackApi(object()).where("C1") is None
     assert (await SlackApi(Web(refuse_thread=True)).message("C1", "1.5"))["text"] == "by reaction"
     assert await SlackApi(Web()).who("UBOT") == (True, "Scout", "")
     assert await SlackApi(Web()).who("U1") == (False, "Scout", "")
@@ -2547,16 +2562,23 @@ async def test_the_reacted_message_is_read_by_thread_then_by_reaction():
 
 
 class NamingApi(AddressingApi):
-    """users.info as the transport sees it, with every lookup counted."""
+    """users.info and conversations.info as the transport sees them, with every
+    lookup counted."""
 
     def __init__(self):
         super().__init__()
         self.people: dict[str, tuple[bool | None, str, str]] = {}
         self.lookups: list[str] = []
+        self.places: dict[str, tuple[str, str] | None] = {CH: ("channel", "sre-requests")}
+        self.place_lookups: list[str] = []
 
     async def who(self, user):
         self.lookups.append(user)
         return self.people.get(user, (None, "", ""))
+
+    async def where(self, channel):
+        self.place_lookups.append(channel)
+        return self.places.get(channel)
 
 
 def make_naming(**kwargs):
@@ -2577,7 +2599,7 @@ async def test_a_persons_message_says_who_sent_it_and_keeps_their_words():
     await transport.handle_event(said("deploy status?", "300.0"), handler)
     asked = handler.tasks[0].history[0]
     assert asked.sender == "U1"
-    assert asked.sender_label == "Ada Lovelace <ada@example.com>"
+    assert asked.sender_label == "Ada Lovelace <ada@example.com>, in #sre-requests"
     assert asked.text == "deploy status?"
 
 
@@ -2589,8 +2611,8 @@ async def test_without_an_email_or_any_answer_the_label_falls_back_to_the_slack_
     await transport.handle_event(said("one", "301.0"), handler)
     await transport.handle_event(said("two", "301.1", user="U2"), handler)
     assert [t.history[0].sender_label for t in handler.tasks] == [
-        "Ada Lovelace <@U1>",
-        "<@U2>",
+        "Ada Lovelace <@U1>, in #sre-requests",
+        "<@U2>, in #sre-requests",
     ]
     assert ("301.1", "white_check_mark") in api.reacts
 
@@ -2652,6 +2674,77 @@ async def test_a_persons_reaction_is_labelled_from_the_same_lookup():
     api.message = message
     await transport.handle_event(reaction(ts="350.0"), handler)
     asked = handler.tasks[0].history[0]
-    assert asked.sender_label == "Ada Lovelace <ada@example.com>"
+    assert asked.sender_label == "Ada Lovelace <ada@example.com>, in #sre-requests"
     assert asked.text.startswith("(They reacted with :ticket: to a message <@U2> wrote.")
     assert api.lookups == ["U1"]
+
+
+# ---- where it was said (2026-11-20) ------------------------------------------
+#
+# A rule can name Slack channels, so the label ends with the conversation: the
+# channel's name, a direct message, a group message, or the channel's id when
+# conversations.info cannot name it.
+
+
+async def test_the_label_says_where_it_was_said():
+    transport, api, handler = make_naming()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    api.places["G0GROUP"] = ("mpim", "")
+    await transport.handle_event(said("in the channel", "360.0"), handler)
+    await transport.handle_event(
+        event("just us", ts="360.1", channel="D0DM", channel_type="im"), handler
+    )
+    await transport.handle_event(
+        event("all of us", ts="360.2", channel="G0GROUP", channel_type="mpim"), handler
+    )
+    assert [t.history[0].sender_label for t in handler.tasks] == [
+        "Ada Lovelace <ada@example.com>, in #sre-requests",
+        "Ada Lovelace <ada@example.com>, in a direct message",
+        "Ada Lovelace <ada@example.com>, in a group message",
+    ]
+    # A direct message's id says what it is: only the other two were looked up.
+    assert api.place_lookups == [CH, "G0GROUP"]
+
+
+def test_a_channel_that_cannot_be_named_is_given_by_its_id():
+    """conversations.info unreadable, or a name made only of the characters the
+    label uses: the channel's id, which a rule naming channels can't match, so the
+    agent can't mistake it for one."""
+    assert place_label("C0123", None) == "in <#C0123>"
+    assert place_label("C0123", ("channel", "<>()")) == "in <#C0123>"
+    assert place_label("C0123", ("channel", "ops")) == "in #ops"
+    assert place_label("D0123", ("im", "")) == "in a direct message"
+    assert place_label("G0123", ("mpim", "mpdm-a--b-1")) == "in a group message"
+
+
+async def test_a_channel_is_looked_up_once_an_hour_and_a_failed_read_again_soon(monkeypatch):
+    from daedalus.transports import slack as slack_transport
+
+    # Open to every channel the app is in, so the two below are answered.
+    api = NamingApi()
+    transport = SlackTransport(channels=[], bot_token="xoxb", app_token="xapp", api=api)
+    transport.user_id, transport.bot_id = SELF_ID, SELF_BOT
+    handler = MarkHandler()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    for n in range(3):
+        await transport.handle_event(said(f"ask {n}", f"37{n}.0"), handler)
+    assert api.place_lookups == [CH]
+
+    # A read that failed is tried again after a short wait, not after the hour.
+    monkeypatch.setattr(slack_transport, "_PLACE_RETRY_SECONDS", 0.0)
+    api.places["C0FAIL"] = None
+    for ts in ("380.0", "380.1"):
+        await transport.handle_event(
+            event(f"<@{SELF_ID}> hi", ts=ts, channel="C0FAIL", channel_type="channel"), handler
+        )
+    assert api.place_lookups == [CH, "C0FAIL", "C0FAIL"]
+    assert handler.tasks[-1].history[0].sender_label.endswith(", in <#C0FAIL>")
+
+    # And a good answer is kept no longer than its hour.
+    monkeypatch.setattr(slack_transport, "_PLACE_TTL_SECONDS", 0.0)
+    api.places["C0NEW"] = ("channel", "ops")
+    for ts in ("390.0", "390.1"):
+        await transport.handle_event(
+            event(f"<@{SELF_ID}> hi", ts=ts, channel="C0NEW", channel_type="channel"), handler
+        )
+    assert api.place_lookups == [CH, "C0FAIL", "C0FAIL", "C0NEW", "C0NEW"]
