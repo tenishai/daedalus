@@ -113,6 +113,19 @@ async def test_journal_keeps_the_sender_and_omits_it_when_unknown(tmp_path):
     assert history[1].keys() == {"role", "text"}
 
 
+async def test_journal_keeps_no_sender_label(tmp_path):
+    """The label is for the model's prompt; the summarizer attributes by the id."""
+    agent = make_agent(llm=ScriptedLLM("ok"), memory=FakeMemory(tmp_path / "techne.db"))
+    task = Task.from_text("hi")
+    task.history[0].sender = "U0ALICE"
+    task.history[0].sender_label = "Alice Doe <alice@example.com>"
+
+    await agent.handle_task(task)
+
+    history = recent(tmp_path / "journal.db")[0]["history"]
+    assert history[0] == {"role": "user", "text": "hi", "sender": "U0ALICE"}
+
+
 async def test_two_subs_sharing_a_context_id_each_keep_their_row(tmp_path):
     """#212: under auth the task's verified sub owns its journal row, so another
     sub reusing the contextId adds a row instead of replacing it."""

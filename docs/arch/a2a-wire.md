@@ -1,13 +1,13 @@
 ---
 card: arch-card:daedalus-a2a-wire
-updated: 2026-11-19
+updated: 2026-11-20
 anchor: src/daedalus/transports/a2a.py sha=008ff40cb4f919f069b7ccfb60ccca51a0ef4ec3
-anchor: src/daedalus/task.py sha=e3ad7142acfa959da0577bda4d4c59478ca9df40
+anchor: src/daedalus/task.py sha=237214206ed3155b504aa9bba88c783fc2517fda
 anchor: src/daedalus/memory/teach.py sha=2422c4be556eedd59f5f0f0aa9ec46f08dfe5d63
 ---
 # a2a-wire — the agent as a callable peer (cabal, kobo, kaminos)
 
-WHAT / SEAM: `A2aTransport` / `build_a2a_app(handler, card, events, verifier)` (transports/a2a.py), FastAPI. Envelope = `Task` (task.py): id, context_id, state (A2A TaskState), history[Message(role user|agent, text, images, sender)], metadata.
+WHAT / SEAM: `A2aTransport` / `build_a2a_app(handler, card, events, verifier)` (transports/a2a.py), FastAPI. Envelope = `Task` (task.py): id, context_id, state (A2A TaskState), history[Message(role user|agent, text, images, sender, sender_label)], metadata.
 Routes: GET /.well-known/agent-card.json, GET /healthz, GET /events (SSE: replay ≤100 then live; kaminos trace pane; behind the verifier when `auth` is set, #196), POST / (JSON-RPC message/send, tasks/get), POST /a2a/tasks (bare Task in/out; cabal DispatchRouter's federated dispatch), POST /slack/events (the Slack transport's HTTP way in, kobo#304; only when the Agent attached a SlackTransport serving over HTTP, else 404).
 OPS / FLOW: POST (and GET /events) → authorize (JwtVerifier from transport `auth` {jwks_url, issuer, audience}, a2a_auth.py; RS256 only, iss+aud pinned, 30 s leeway) → task_from_a2a (cabal puts the CURRENT message in status.message with empty history; appended unless duplicate) → stamp_verified_sub → store under the owner's sub (409 on an existing id) → handler.handle_task → task_to_a2a (reply mirrored into status.message AND history).
 Operator lanes: metadata["system_task"] ∈ {teach, knowledge, tool, learnings, guardrails} is dispatched by Agent._dispatch_system_task BEFORE enforcement and the model; any other marker → FAILED 701. teach/knowledge write techne; tool writes the enforcement overlay; guardrails replaces the whole rules list with the message text (empty = no rules), kept in `<memory.home>/guardrails/`, in the prompt from the next task (guardrails.py GUARDRAILS_MARKER); learnings returns JSON {"candidates": [...]}, each with a verified `said_by` (a `<@U...>` sender or "user" for a plain user turn; a candidate that fails verification is dropped, #165). Keys: filename, delete (memory/teach.py:92-100).
@@ -22,6 +22,7 @@ INVARIANTS:
 - With `auth` configured, GET /events needs the same bearer token as the POSTs (401 + `WWW-Authenticate: Bearer` without one, #196); the card and /healthz stay open. With no `auth` block every route is open, /events included. Default bind 127.0.0.1:9200.
 - /events redacts on the wire, not on the bus: tool_call `arguments`, tool_result `content` and reasoning `text` go out as `<field>_chars` sizes unless DAEDALUS_TRACE_CONTENT=1 (a2a.wire_event). The in-process bus keeps content, because the Slack transport's progress lines and `run -v` read it there.
 - Images are NOT carried on the wire (task_to_a2a is text only).
+- `Message.sender_label` (who sent a Slack person's turn, shown to the model by Agent._messages) never crosses the wire either way: task_from_a2a builds each Message from role and text alone, so no caller can claim a sender, and task_to_a2a sends text only. The room's chat and a colleague's ask therefore carry no label.
 - The switchboard's own /a2a/tasks takes a routing envelope {target, task}; this one takes a bare Task. Same path, different dialect.
 - Task store is an in-process dict: tasks/get and taskId continuation do not survive restart.
 - A handler that raises or is cancelled leaves its stored task FAILED with reason 704 (a2a.run_handler / mark_failed, #201), never WORKING; the response is unchanged (500 `agent error: ...` on /a2a/tasks, -32000 on JSON-RPC). A run past the bundle's task_timeout comes back as an ordinary FAILED 704 task (Agent._loop), so it answers 200.

@@ -435,7 +435,11 @@ back. Persona constant, transport variable:
   with knowledge-only tools and no borrowed credential, because some apps post
   words an outsider wrote; `full` gives it the tools a person's mention gets;
   `off` drops it. The agent's own words never wake it, a bot's words are
-  labelled as a program's in the thread's history, and two bounds end a loop:
+  labelled as a program's in the thread's history, a person's turn names who
+  sent it (the prompt shows `(From Name <email>.)` as its first line, from
+  users.info read once an hour per person; `Name <@U...>` without
+  `users:read.email`, `<@U...>` when users.info cannot be read; the law hooks
+  and recall still get the person's words alone), and two bounds end a loop:
   three bot-woken turns in a row per thread (a person speaking to the agent
   there starts the count again) and thirty an hour per sending app. A reaction
   wakes the agent only when `SLACK_WAKE_EMOJI` names its emoji (comma-separated;

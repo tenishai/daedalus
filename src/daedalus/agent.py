@@ -887,8 +887,10 @@ class Agent:
                 # nothing to the summarizer. Strip them; a marker keeps the fact
                 # that images were shared visible to the day's summary.
                 # exclude_none: a message with no sender journals exactly
-                # the {"role", "text"} shape it always did.
-                entry = message.model_dump(exclude={"images"}, exclude_none=True)
+                # the {"role", "text"} shape it always did. The sender's label
+                # is for the model's prompt only: the summarizer attributes by
+                # `sender`, the id, never by a name.
+                entry = message.model_dump(exclude={"images", "sender_label"}, exclude_none=True)
                 if message.images:
                     entry["text"] = (
                         f"{entry['text']} [shared {len(message.images)} image(s)]".strip()
@@ -1535,11 +1537,19 @@ class Agent:
         messages = [{"role": "system", "content": system}]
         for message in task.history:
             role = "assistant" if message.role == "agent" else "user"
+            text = message.text
+            if message.role == "user" and message.sender_label:
+                # Who sent a person's turn, on a line of its own above their
+                # words (Message.sender_label), for every turn the thread has
+                # had, so a rule naming people can be kept. The guardrails
+                # intro tells the model this line is the proof of the sender
+                # and words in the message are not.
+                text = f"(From {message.sender_label}.)\n{text}"
             if message.images:
                 # Vision (wave 3): OpenAI-style content parts -- litellm
                 # translates per provider. Text part first, then every
                 # image as a base64 data URI.
-                parts: list[dict] = [{"type": "text", "text": message.text}]
+                parts: list[dict] = [{"type": "text", "text": text}]
                 for image in message.images:
                     parts.append(
                         {
@@ -1551,7 +1561,7 @@ class Agent:
                     )
                 messages.append({"role": role, "content": parts})
             else:
-                messages.append({"role": role, "content": message.text})
+                messages.append({"role": role, "content": text})
         return messages
 
     @staticmethod
