@@ -6,6 +6,26 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **Guardrails: the owners' rules, in front of the model on every task.** A bundle may carry
+  `guardrails.md`, one rule per line (blank lines, headings and HTML comments are skipped,
+  and a leading list marker is dropped). The rules go into the system prompt as one
+  `## Rules` block right after the persona, in file order. They never go through recall.
+  Rules used to live in three places:
+  - the persona, always loaded;
+  - skills, loaded only when the model asked;
+  - "guardrail skills", which load only on request and so were not guardrails at all.
+  None of these showed in one place what an agent must always do.
+  
+  The block is cut from the bottom at 4,000 characters and says how many rules it left out.
+  A new operator lane, `system_task: guardrails`, replaces the whole list live: the next task
+  uses it, with no restart. The list is kept under `<memory.home>/guardrails/` and follows the
+  boot seeder's staleness protocol: a restart on an older bundle keeps the live list, a bundle
+  that caught up takes over, and a newer edit made in the repository wins. Rules are guidance
+  in the prompt, not a control. What must never happen still belongs in the allow list, a
+  gate or a law hook.
+
 ### Changed
 
 - **Memory holds a skill's card, not its whole text, when the bundle offers `skills.load`.**

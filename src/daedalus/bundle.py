@@ -21,6 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
+# Optional, at the bundle root: the owners' rules, one per line (daedalus.guardrails).
+GUARDRAILS_FILE = "guardrails.md"
+
 
 def strip_persona_comments(persona: str) -> str:
     """Remove HTML comments — author-facing notes never reach the model.
@@ -837,6 +840,9 @@ class Bundle:
     card: dict
     persona: str
     skills: dict[str, Skill] = field(default_factory=dict)
+    # guardrails.md as written, "" when absent: the runtime parses it, and the
+    # staleness protocol hashes the raw text (daedalus.guardrails).
+    guardrails: str = ""
 
     @classmethod
     def load(cls, path: str | Path, env: dict[str, str] | None = None) -> Bundle:
@@ -861,10 +867,12 @@ class Bundle:
         except json.JSONDecodeError as exc:
             raise BundleError(f"{card_file}: invalid JSON — {exc}") from exc
 
+        guardrails_file = root / GUARDRAILS_FILE
         return cls(
             path=root,
             spec=spec,
             card=card,
             persona=strip_persona_comments(persona_file.read_text()),
             skills=load_skills(root),
+            guardrails=guardrails_file.read_text() if guardrails_file.is_file() else "",
         )

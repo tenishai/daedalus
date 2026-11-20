@@ -21,6 +21,16 @@ from daedalus.engines.litellm import (
     salvage_tool_calls,  # noqa: F401  re-exported: tests import it from here
 )
 from daedalus.events import current_context as event_context
+from daedalus.guardrails import (
+    GUARDRAILS_MARKER,
+    LIVE_DIRNAME,
+    RULES_MAX_CHARS,
+    RulesBlock,
+    load_rules_text,
+    parse_rules,
+    render_rules,
+    write_live,
+)
 from daedalus.memory.learnings import LEARNINGS_MARKER
 from daedalus.memory.teach import (
     DEFAULT_OPERATOR_SUBS,
@@ -292,6 +302,9 @@ class Agent:
         # trade (see revision.COLLEAGUE_REASK_COOLDOWN_S).
         self._reask_cooldowns: dict[int, float] = {}
         self._revision_fires: set[asyncio.Task] = set()
+        # Rendered once here and again on each live write, never per task: the
+        # block only changes when the list does.
+        self._rules = self._load_rules()
         # Last, so it reports against fully-wired state. An assigned skill that
         # cannot be reached is invisible otherwise: the agent boots green and
         # simply never uses it.
@@ -400,6 +413,30 @@ class Agent:
         there, so a tool write needs nothing more than `home` being set."""
         home = self.bundle.spec.memory.home
         return Path(home).expanduser() / "tools-overlay" if home else None
+
+    def _guardrails_dir(self) -> Path | None:
+        """Where a live rules write is kept: beside tools-overlay/ on the agent's own
+        volume, for the same reason (the bundle resets on every restart). None
+        without `memory.home`; a live write then lasts until the next restart."""
+        home = self.bundle.spec.memory.home
+        return Path(home).expanduser() / LIVE_DIRNAME if home else None
+
+    def _load_rules(self) -> RulesBlock:
+        """The rules block at boot: the bundle's guardrails.md, or a newer live write
+        the bundle has not caught up with (daedalus.guardrails)."""
+        text, source = load_rules_text(self.bundle.guardrails, self._guardrails_dir())
+        block = render_rules(parse_rules(text))
+        if block.rules or block.dropped:
+            self._emit(
+                "rules_loaded", source=source, rules=len(block.rules), dropped=len(block.dropped)
+            )
+        if block.dropped:
+            log.warning(
+                "guardrails: %d rule(s) past the %d-character limit are left out",
+                len(block.dropped),
+                RULES_MAX_CHARS,
+            )
+        return block
 
     def _memory_from_spec(self) -> MemoryStore:
         spec = self.bundle.spec.memory
@@ -880,6 +917,8 @@ class Agent:
             return await self._handle_tool(task)
         if marker == LEARNINGS_MARKER:
             return await self._handle_learnings(task)
+        if marker == GUARDRAILS_MARKER:
+            return await self._handle_guardrails(task)
         self._emit("system_task_refused", marker=marker)
         return task.reply(
             f"Unknown system task {marker!r}. Refusing rather than guessing.",
@@ -1105,6 +1144,43 @@ class Agent:
             )
         self._emit("tool_stored", filename=result.filename)
         return task.reply("Tool delivered. It will be active after my next restart.")
+
+    async def _handle_guardrails(self, task: Task) -> Task:
+        """The operator guardrails lane: the agent's whole rules list, replaced now
+        and in front of the model from the next task, with no model call, rebuild
+        or restart. The room sends the full file every time, so there is no edit
+        or delete to reconcile; an empty file clears the list. Same operator gate
+        as teach and knowledge. Above the enforcement locked check on purpose, as
+        teach is: a broken orchestrator file must not also block a rule change."""
+        if not self._operator_gate(task, "guardrails"):
+            return task.reply(
+                "Rule changes are operator-only. This connection is not an operator door.",
+                state=TaskState.FAILED,
+                reason=ReasonCode.POLICY_VIOLATION,
+            )
+        text = task.user_text()
+        live_dir = self._guardrails_dir()
+        if live_dir is not None:
+            try:
+                await asyncio.to_thread(write_live, text, self.bundle.guardrails, live_dir)
+            except OSError as exc:
+                return task.reply(f"I could not keep those rules: {exc}.", state=TaskState.FAILED)
+        self._rules = render_rules(parse_rules(text))
+        kept, dropped = len(self._rules.rules), len(self._rules.dropped)
+        self._emit("rules_updated", rules=kept, dropped=dropped, persisted=live_dir is not None)
+        if not kept and not dropped:
+            reply = "Rules cleared. I have no rules from my owners now."
+        else:
+            noun = "rule" if kept == 1 else "rules"
+            reply = f"Rules updated. I follow {kept} {noun} from my next task."
+        if dropped:
+            reply += (
+                f" {dropped} more did not fit the {RULES_MAX_CHARS:,}-character limit and are"
+                " left out."
+            )
+        if live_dir is None:
+            reply += " I have no volume to keep them on, so they last until my next restart."
+        return task.reply(reply)
 
     async def resume(self, task_id: str) -> Task | None:
         """Continue a checkpointed task (budget-exhausted or crashed).
@@ -1433,7 +1509,12 @@ class Agent:
         # listed, from the same reading, because a model given today's weekday
         # still counted back to the wrong "last Tuesday" (issue #181).
         now = _utc_now().astimezone(UTC)
-        system = self.bundle.persona + f"\n\n{_CLOCK_HEADING}\n" + _clock_lines(now)
+        # The owners' rules come right after the persona, before anything recalled:
+        # standing orders, not something the model has to find (daedalus.guardrails).
+        system = self.bundle.persona
+        if self._rules.text:
+            system += f"\n\n{self._rules.text}"
+        system += f"\n\n{_CLOCK_HEADING}\n" + _clock_lines(now)
         index = self._skills_index()
         if index:
             system += index
