@@ -243,7 +243,7 @@ async def test_no_tools_dir_is_byte_identical_to_pre_enforcement(tmp_path):
     assert task.state is TaskState.COMPLETED
     assert task.agent_text() == "hello!"
     assert llm.calls[0][0]["role"] == "system"
-    assert "Recalled context" not in llm.calls[0][0]["content"]
+    assert "What you remember" not in llm.calls[0][0]["content"]
     assert "Notices" not in llm.calls[0][0]["content"]
 
 

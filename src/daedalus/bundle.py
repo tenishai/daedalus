@@ -465,6 +465,12 @@ _KNOWN_REVISION_POLICIES = ("operator",)
 class MemorySpec(_WarnExtra):
     personal: Literal["none", "techne"] = "none"
     home: str | None = None  # techne home dir; default is techne's own (~/.techne)
+    # Recall sources beyond this agent's own store (#265): names of installed
+    # `techne.recall_sources` entry points the store may consult, e.g. `daffyne` for a
+    # transcript diary mounted on the memory volume. Added to techne's
+    # recall.allowed_sources in memory at every load; nothing is written to the volume.
+    # Empty (the default) = whatever the techne home's own config.yaml allows.
+    recall_sources: list[str] = Field(default_factory=list)
     # Reserved (#111): only "none" is accepted. "outbox" used to validate and do
     # nothing, because the team sync outbox (docs/design.md section 7) was never
     # built; it is rejected below rather than silently ignored.

@@ -91,7 +91,65 @@ async def test_no_memory_default_adds_nothing():
     llm = ScriptedLLM("ok")
     agent = make_agent(llm=llm)
     await agent.handle_task(Task.from_text("hi"))
-    assert "Recalled context" not in llm.calls[0][0]["content"]
+    assert "What you remember" not in llm.calls[0][0]["content"]
+
+
+class _HitsMemory:
+    """A store with recall_hits (the TechneMemoryStore shape, #228): rows that say
+    where they came from, some with a date and a link (#265)."""
+
+    def __init__(self, hits):
+        self.hits = hits
+
+    async def recall(self, query: str, k: int = 5) -> list[str]:
+        return [h["content"] for h in self.hits]
+
+    async def recall_hits(self, query: str, k: int = 5) -> list[dict]:
+        return self.hits
+
+    async def commit(self, content: str, kind: str = "fact", tags: str = "") -> None:
+        pass
+
+
+async def test_recalled_rows_carry_their_provenance_and_the_block_says_what_it_is():
+    llm = ScriptedLLM("ok")
+    memory = _HitsMemory([
+        {"content": "the release checklist freezes CHANGELOG sections", "source": "local"},
+        {
+            "content": "the request coalescing is actually cool",
+            "source": "daffyne",
+            "ts": "2026-05-06 14:02:11",
+            "source_url": "file:///home/op/.claude/projects/x/8fb9.jsonl#L13660",
+        },
+        {"content": "pool fact", "source": "liminal_archivist"},
+    ])
+    await make_agent(llm=llm, memory=memory).handle_task(Task.from_text("coalescing?"))
+    system = llm.calls[0][0]["content"]
+    assert "## What you remember\n" in system
+    assert "someone else's words from that time" in system
+    assert "- (memory) the release checklist freezes CHANGELOG sections" in system
+    assert (
+        "- (daffyne, 2026-05-06, file:///home/op/.claude/projects/x/8fb9.jsonl#L13660) "
+        "the request coalescing is actually cool"
+    ) in system
+    assert "- (liminal_archivist) pool fact" in system
+    assert "Recalled context" not in system
+
+
+async def test_a_store_with_only_recall_renders_every_hit_as_memory():
+    llm = ScriptedLLM("ok")
+    agent = make_agent(llm=llm, memory=CannedMemory("shaz prefers short greetings"))
+    await agent.handle_task(Task.from_text("hi"))
+    system = llm.calls[0][0]["content"]
+    assert "## What you remember" in system
+    assert "- (memory) shaz prefers short greetings" in system
+
+
+async def test_hits_without_content_are_dropped_before_the_prompt():
+    llm = ScriptedLLM("ok")
+    memory = _HitsMemory([{"content": "", "source": "local"}, {"source": "daffyne"}, "junk"])
+    await make_agent(llm=llm, memory=memory).handle_task(Task.from_text("hi"))
+    assert "What you remember" not in llm.calls[0][0]["content"]
 
 
 def test_local_api_base_gets_placebo_key_without_env(tmp_path, monkeypatch):

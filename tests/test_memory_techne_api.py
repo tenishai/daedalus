@@ -75,6 +75,64 @@ async def test_recall_hits_name_the_pool_and_the_local_store(home, monkeypatch):
     assert await store.recall("zephyr runbook") == [h["content"] for h in hits]
 
 
+class DiarySource:
+    """A recall source whose rows say when and where they were said (daffyne's shape)."""
+
+    name = "diary"
+    escalation = False
+
+    def search(self, topic, limit):
+        return [{
+            "content": f"diary line about {topic}",
+            "source_url": "file:///op/x.jsonl#L7",
+            "ts": "2026-05-06 14:02:11",
+            "source": "claude-code",
+            "project": "x",
+        }]
+
+    def health(self):
+        return True
+
+
+class DiaryEntryPoint:
+    name = "diary"
+
+    def load(self):
+        return DiarySource
+
+
+async def test_remote_hits_keep_a_row_s_date_and_anchor(home, monkeypatch):
+    """#265: provenance survives to the agent; a row without it stays {content, source}."""
+    monkeypatch.setattr(rs, "entry_points", lambda group: [PoolEntryPoint(), DiaryEntryPoint()])
+    store = TechneMemoryStore(home=home, recall_sources=["diary"])
+
+    hits = await store.recall_hits("zephyr")
+
+    assert {
+        "content": "diary line about zephyr",
+        "source": "diary",
+        "ts": "2026-05-06 14:02:11",
+        "source_url": "file:///op/x.jsonl#L7",
+    } in hits
+    assert {"content": "pool fact about zephyr", "source": "liminal_archivist"} in hits
+
+
+async def test_bundle_named_recall_sources_are_allowed_without_a_config_write(home, monkeypatch):
+    """#265: the bundle's memory.recall_sources reaches techne's allowed_sources in memory.
+    The home's config.yaml allows only the pool; the diary is admitted by the bundle, and
+    the file on the volume is untouched."""
+    monkeypatch.setattr(rs, "entry_points", lambda group: [PoolEntryPoint(), DiaryEntryPoint()])
+    before = (home / "config.yaml").read_text()
+
+    without = await TechneMemoryStore(home=home).recall_hits("zephyr")
+    assert not any(h["source"] == "diary" for h in without)
+
+    with_diary = await TechneMemoryStore(home=home, recall_sources=["diary"]).recall_hits("zephyr")
+    assert any(h["source"] == "diary" for h in with_diary)
+    assert any(h["source"] == "liminal_archivist" for h in with_diary)
+    assert (home / "config.yaml").read_text() == before
+
+
 async def test_recall_keeps_full_local_content_past_the_clip(home):
     store = TechneMemoryStore(home=home)
     procedure = "## Skill: long-procedure\n\nzephyr calibration steps.\n" + ("step\n" * 300)

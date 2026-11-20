@@ -6,4 +6,5 @@ tests/
 docs/*
 !docs/welcome.md
 !docs/design.md
+!docs/diary.md
 uv.lock

@@ -8,6 +8,25 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **A transcript diary as a recall source, and recalled rows that say where they came
+  from** (#265, #169). A bundle may name installed `techne.recall_sources` entry points in
+  `memory.recall_sources: [daffyne]`; `TechneMemoryStore` adds them to techne's
+  `recall.allowed_sources` in memory on every load, so nothing is written to the memory
+  volume. `recall_hits` keeps a row's `ts` and `source_url` when the source gives them,
+  and the agent now reads hits, not bare strings: the system prompt's block is headed
+  `## What you remember`, opens with one sentence saying what a `(memory)` line is and
+  what a line with another source, a date and a link is (someone else's words from that
+  time, to cite and never claim), and each bullet carries its provenance:
+  `- (daffyne, 2026-05-06, file:///…/s1.jsonl#L13660) the request coalescing is actually
+  cool`. A store with only `recall()` renders every hit as `(memory)`. The heading replaces
+  `## Recalled context`, the unlabelled block a persona's "say I don't know yet" rule beat
+  on Gemini Flash (#169). The runtime image can carry the reader: a `diary` extra
+  (`daffyne>=0.1.0`), `--build-context daffyne=` or `--build-arg DIARY=1` on the
+  Dockerfile, `make image DIARY=1`; off by default. The entrypoint exports
+  `DAFFYNE_CONFIG=$TECHNE_HOME/daffyne.yaml` when that file is on the memory volume and
+  nothing set it, so an operator ships an index as two files beside `techne.db`. The guide
+  `daedalus guide diary` says how to seed a specialist from one.
+
 - **The model is told where each person's Slack message was said.** A rule can now name
   Slack channels ("only answer in these channels"), so the line above a person's turn
   ends with the conversation: `(From Ada Lovelace <ada@example.com>, in #sre-requests.)`,

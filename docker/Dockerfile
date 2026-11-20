@@ -39,13 +39,18 @@
 # override by name; left alone they copy nothing (see the header).
 FROM scratch AS techne
 FROM scratch AS liminal
+# The diary reader (#265), off unless `--build-context daffyne=` names a checkout or
+# `--build-arg DIARY=1` asks for it from the index.
+FROM scratch AS daffyne
 
 FROM python:3.12-slim AS build
 ARG EXTRA_INDEX_URL=""
 ARG AR_TOKEN=""
+ARG DIARY=""
 
 COPY --from=techne / /src/techne
 COPY --from=liminal / /src/liminal
+COPY --from=daffyne / /src/daffyne
 COPY . /src/daedalus
 # google-cloud-aiplatform: litellm's vertex_ai/* routes import the vertexai
 # SDK at call time — the platform's default model provider, so baked in here.
@@ -56,8 +61,9 @@ RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ 
  && if [ -f /src/liminal/pyproject.toml ]; then LIMINAL="tenish-liminal @ file:///src/liminal"; else LIMINAL="tenish-liminal>=0.4.0"; fi \
  && if [ -z "$EXTRA_INDEX_URL" ] && { [ ! -f /src/techne/pyproject.toml ] || [ ! -f /src/liminal/pyproject.toml ]; }; then \
       echo "techne/liminal: pass --build-context for each, or --build-arg EXTRA_INDEX_URL=… (see the header)" >&2; exit 1; fi \
+ && if [ -f /src/daffyne/pyproject.toml ]; then DAFFYNE="daffyne @ file:///src/daffyne"; elif [ -n "$DIARY" ]; then DAFFYNE="daffyne>=0.1.0"; else DAFFYNE=""; fi \
  && if [ -n "$AR_TOKEN" ]; then EXTRA_INDEX_URL="$(echo "$EXTRA_INDEX_URL" | sed "s#://#://oauth2accesstoken:${AR_TOKEN}@#")"; fi \
- && PIP_EXTRA_INDEX_URL="$EXTRA_INDEX_URL" pip wheel --wheel-dir /wheels "$TECHNE" "$LIMINAL" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
+ && PIP_EXTRA_INDEX_URL="$EXTRA_INDEX_URL" pip wheel --wheel-dir /wheels "$TECHNE" "$LIMINAL" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38" ${DAFFYNE:+"$DAFFYNE"}
 
 FROM python:3.12-slim
 ARG TARGETARCH=amd64
@@ -73,7 +79,9 @@ ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestre
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz litestream && rm /tmp/litestream.tar.gz
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenish-daedalus[a2a,slack,aws,claude-code]" "tenish-techne[vectors]" tenish-liminal google-cloud-aiplatform && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenish-daedalus[a2a,slack,aws,claude-code]" "tenish-techne[vectors]" tenish-liminal google-cloud-aiplatform \
+ && if ls /wheels/daffyne-*.whl >/dev/null 2>&1; then pip install --no-cache-dir --no-index --find-links=/wheels daffyne && python -c "import daffyne.techne_source"; fi \
+ && rm -rf /wheels
 # Build proof: a stale cached techne wheel once shipped an image whose
 # knowledge.py imported symbols its own database.py lacked -- every agent
 # crashlooped at seed time. Fail the BUILD, not the fleet.

@@ -37,9 +37,15 @@ class TechneMemoryStore:
         use_vectors: bool = True,
         *,
         home: str | Path | None = None,
+        recall_sources: list[str] | None = None,
     ):
         self.use_vectors = use_vectors
         self.home = Path(home).expanduser() if home else None
+        # The bundle's memory.recall_sources (#265): installed `techne.recall_sources`
+        # entry points this agent may consult, by name. Added to techne's
+        # recall.allowed_sources in memory on every config load; the memory volume
+        # is never written for it.
+        self.recall_sources = [str(name) for name in (recall_sources or [])]
         if db_path is None:
             from techne.config import techne_home
 
@@ -51,12 +57,18 @@ class TechneMemoryStore:
 
         cfg = Config.load(self.home / "config.yaml" if self.home else None)
         cfg.db_path = self.db_path
+        if self.recall_sources:
+            allowed = list(cfg.recall.allowed_sources)
+            cfg.recall.allowed_sources = allowed + [
+                name for name in self.recall_sources if name not in allowed
+            ]
         return cfg
 
     async def recall_hits(self, query: str, k: int = 5) -> list[dict]:
         """Up to k of this agent's memories, then up to k hits from other stores, as
-        {"content", "source"}: "local" for this agent's knowledge, else the store's
-        or recall source's name (e.g. "liminal_archivist" for the team pool)."""
+        {"content", "source"[, "ts", "source_url"]}: "local" for this agent's knowledge,
+        else the store's or recall source's name (e.g. "liminal_archivist" for the team
+        pool, "daffyne" for a transcript diary); ts and source_url when the row has them."""
         if not query.strip():
             return []
         try:
@@ -112,7 +124,13 @@ class TechneMemoryStore:
             source = row.get("recall_source") or row.get("store", "local")
             if source == "local" or not row.get("content"):
                 continue
-            hits.append({"content": row["content"], "source": source})
+            hit = {"content": row["content"], "source": source}
+            # Provenance a diary row carries (#265): when it was said and where.
+            # Kept only when present, so a pool row stays {content, source}.
+            for key in ("ts", "source_url"):
+                if row.get(key):
+                    hit[key] = str(row[key])
+            hits.append(hit)
             if len(hits) >= k:
                 break
         return hits
