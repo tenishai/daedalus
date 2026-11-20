@@ -178,6 +178,23 @@ async def test_a_command_where_it_was_never_added_runs_only_when_switched_on(mon
     assert len(handler.tasks) == 1 and api.responses == []
 
 
+async def test_a_pick_and_a_command_say_who_sent_them():
+    """Both are a person's act, so both carry the person's label for the model;
+    the pick's own note no longer repeats the Slack id."""
+    transport, api, handler = make()
+
+    async def who(user):
+        return False, "Ada Lovelace", "ada@example.com"
+
+    api.who = who
+    await transport.handle_interaction(click(), handler)
+    await transport.handle_interaction(command(), handler)
+    picked, asked = (task.history[0] for task in handler.tasks)
+    assert picked.sender_label == asked.sender_label == "Ada Lovelace <ada@example.com>"
+    assert picked.text.startswith("(They picked one of the choices you offered in Slack.")
+    assert asked.text == "what changed today?"
+
+
 async def test_being_in_a_conversation_is_slacks_word_for_it():
     from daedalus.transports.slack import SlackApi
 

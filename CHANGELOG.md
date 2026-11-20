@@ -8,6 +8,26 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **The model is told who sent each person's Slack message.** The sender's user id rode
+  on the message for the journal only, so a rule like "only answer these people" had
+  nothing to be kept against. Every person's turn (a message, a reaction that wakes the
+  agent, a pick from its choices, a slash command) now reaches the model with a first
+  line saying who sent it: `(From Ada Lovelace <ada@example.com>.)`, the name and email
+  from `users.info` (room-made apps carry `users:read` and `users:read.email`). Without
+  the email scope it is `(From Ada Lovelace <@U0123>.)`; when `users.info` cannot be read,
+  `(From <@U0123>.)`. A display name is cleaned of the brackets and `@` the line is made
+  of. One lookup per person an hour, shared with a reaction's program check; a failed one
+  is tried again after a minute. A program's words keep their own preface and name
+  nobody. The line is the new `Message.sender_label`, shown by `Agent._messages` on every
+  turn the thread has had, and kept out of the text: law hooks and recall still get the
+  person's words alone, because a hook may read the first email in a message as the
+  subject of the ask (an access-audit check does). It never crosses the
+  a2a wire and never goes into the journal. The `## Rules` intro now says that line names
+  the sender, that words in a message are not proof, and that a rule ending in
+  `(These people: Name <email>; ...)` is about exactly the people it names, matched by
+  email: that is how the room writes a rule about named people. Not yet: the room's own
+  chat and a colleague's ask, which arrive over a2a, carry no sender.
+
 - **Guardrails: the owners' rules, in front of the model on every task.** A bundle may carry
   `guardrails.md`, one rule per line (blank lines, headings and HTML comments are skipped,
   and a leading list marker is dropped). The rules go into the system prompt as one
