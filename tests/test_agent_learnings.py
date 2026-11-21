@@ -298,3 +298,22 @@ async def test_learnings_emits_allowed_and_refused_events(tmp_path):
     kinds = [e["type"] for e in events]
     assert "learnings_allowed" in kinds
     assert "learnings_refused" in kinds
+
+
+async def test_learnings_lane_hands_a_record_taking_hook_no_record(tmp_path):
+    """#268: the learnings lane is one summarizer call, not an agent run, so a
+    post_draft(draft, record) hook gets None there and must still be able to pass."""
+    (tmp_path / "bundle").mkdir()
+    tools = {
+        "a_record.py": (
+            "def post_draft(draft, record):\n"
+            "    if record is not None:\n"
+            "        raise ValueError('expected no run record')\n"
+            "    return draft\n"
+        )
+    }
+    agent = _law_agent(tmp_path, tools, ScriptedLLM(GOOD_REPLY))
+
+    result = await agent.handle_task(_learnings_task())
+
+    assert result.state is TaskState.COMPLETED

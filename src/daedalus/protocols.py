@@ -30,9 +30,26 @@ class LLMResponse:
     text: str
     reasoning: str = ""  # think-trace from reasoning models; never part of the reply
     tool_calls: list[ToolCall] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    # None = the provider did not report it (#268); never read a missing count as 0.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
     finish_reason: str | None = None  # "length" = truncated by max_tokens (finding #27)
+
+    def tokens_spent(self) -> int:
+        """Input plus output for a token budget, counting an unreported figure
+        as 0: a budget can only spend what was reported."""
+        return (self.input_tokens or 0) + (self.output_tokens or 0)
+
+    def usage_fields(self) -> dict:
+        """The four counts, for a `usage` trace event."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+        }
 
 
 @runtime_checkable
@@ -88,6 +105,39 @@ class ToolProvider(Protocol):
     async def tools(self) -> list[dict]: ...
 
     async def call(self, name: str, payload: dict) -> str: ...
+
+
+TOOL_OUTCOMES = ("ok", "empty", "error", "blocked")
+
+
+class ToolResult(str):
+    """A tool result's text, plus how the call ended (#268).
+
+    A str, so every caller that treats a result as text still works and a
+    provider's `call -> str` signature still holds. `outcome` is one of
+    TOOL_OUTCOMES, or None when nothing on the code path said. Agent._call_tool
+    sets it from the branch it took; a provider may set it first ("empty" for a
+    result with no content, "blocked" for a refusal). Any str operation (a `+`)
+    returns a plain str and drops it, so read it before changing the text.
+    """
+
+    outcome: str | None
+
+    def __new__(cls, text: str, outcome: str | None = None) -> ToolResult:
+        if outcome is not None and outcome not in TOOL_OUTCOMES:
+            raise ValueError(f"unknown tool outcome {outcome!r}")
+        obj = super().__new__(cls, text)
+        obj.outcome = outcome
+        return obj
+
+
+class ToolCallBlocked(Exception):
+    """A provider's server refused this one call (#268): by policy (no grant,
+    no scope, operator-only) or, for liminal, because the caller's token did
+    not authenticate (expired, bad signature, untrusted issuer, or a JWKS
+    fetch that failed on the gateway's side: liminal answers all of these with
+    the same -32001). Agent._call_tool reports it as a "blocked:" result with
+    outcome "blocked", not as a "tool error:"; the message says which."""
 
 
 class ToolProviderRefused(RuntimeError):

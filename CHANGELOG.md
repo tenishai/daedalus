@@ -6,6 +6,52 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`LLMResponse` token counts are `int | None` now, not `int`** (issue #268). None means
+  the provider reported no count; the LiteLLM adapter used to turn that into 0. Code that
+  does arithmetic on `input_tokens` or `output_tokens` raises a `TypeError` on None, so it
+  must handle None (`LLMResponse.tokens_spent()` still counts None as 0, for budgets).
+- **Write a hook that wants the run record as `post_draft(draft, record=None)`.** A
+  runtime older than this one calls every `post_draft` with one argument, so a required
+  second parameter raises there, and a hook that raises blocks every reply. Agents in one
+  room run mixed runtime versions. `record` is None on an older runtime and on the
+  learnings lane.
+
+### Added
+
+- **A `post_draft` hook can see the run behind the reply** (issue #268). A hook with a
+  second positional parameter gets a frozen `RunRecord`: the engine and model, the model
+  calls (`turns`), each tool call with its outcome (`ok`, `empty`, `error`, `blocked`, or
+  `unknown` for a Claude Code built-in) and duration, tokens per call and in total,
+  `total_input_tokens` (cached or not, whichever engine ran), Claude Code's cost, the
+  limit the run hit (`steps`, `repeats`, `context`, `budget`) and whether a reply was cut
+  at max_tokens. A total is None if any call went unreported. One-parameter hooks are
+  unchanged. What a hook returns replaces the reply in history, so text it adds is
+  replayed to the model on the next turn, sent to an agent that consulted this one, and
+  fed to the learnings summary. A check that reads the record and only logs or blocks is
+  safe; a footer is not, yet.
+- **Tool outcomes come from the code path, not from the result's first words.**
+  `Agent._call_tool` returns a `ToolResult` (a `str` with an `outcome`), and the engines
+  put it on the `tool_result` event. A real result that starts with `error:` is `ok`. A
+  gateway refusal is `blocked`: a colleague-task refusal, and liminal's policy refusal on a
+  call (JSON-RPC -32001), which a provider raises as the new `ToolCallBlocked`. liminal
+  uses -32001 for every token failure too (expired, bad signature, untrusted issuer, a
+  failed JWKS fetch), so a `blocked` call can be a gateway auth outage: read its message. A liminal
+  or MCP result is `empty` when its content blocks hold nothing, judged with liminal's
+  untrusted-result envelope set aside, and with or without the notice liminal PR 234
+  appends inside it after any blank blocks. Whitespace and zero-width text are blank.
+- **Two cache fields on `LLMResponse`:** `cache_read_input_tokens` and
+  `cache_creation_input_tokens`, read from litellm's `prompt_tokens_details`.
+- **Two trace events.** The LiteLLM engine emits `usage` for every model call (the model
+  and the four counts, budget or not) and `loop_limit` with the limit it stopped on.
+- **One usage line per finished chat task, where a pod can see it.** A new `task_usage`
+  event carries the task's totals, and `daedalus run -v` (how pods run) prints it as
+  `[usage] task: engine=… model=… turns=… input=… output=… cache_read=… cache_write=…`,
+  `unknown` where none was reported. The same text goes to an INFO log line, which prints
+  only where the host configures logging (daedalus sets up no handler). The per-call
+  `usage` events are not printed, and there is no metric.
+
 ## [0.9.0] — 2026-11-21
 
 ### Upgrading

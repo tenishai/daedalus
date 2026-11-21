@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack
 
+from daedalus.protocols import ToolResult
+
 
 class MCPError(RuntimeError):
     pass
@@ -57,6 +59,20 @@ def result_text(content) -> str:
             elif getattr(res, "blob", None) is not None:
                 parts.append(f"{head} binary, not shown")
     return "\n".join(parts) if parts else "(no text content)"
+
+
+def result_is_empty(content) -> bool:
+    """Did the server return nothing the model could use (#268)? Judged from
+    the blocks, not from result_text's "(no text content)" stand-in: empty =
+    no blocks, or only text blocks that are blank. Any other block (a
+    resource, an image) is content."""
+    for block in content or ():
+        if getattr(block, "type", None) != "text":
+            return False
+        text = getattr(block, "text", None)
+        if not isinstance(text, str) or text.strip():
+            return False
+    return True
 
 
 def _field(obj, new: str, old: str):
@@ -150,7 +166,7 @@ class MCPToolProvider:
         text = result_text(result.content)
         if _field(result, "is_error", "isError"):
             raise MCPError(text)
-        return text
+        return ToolResult(text, "empty" if result_is_empty(result.content) else "ok")
 
     async def aclose(self) -> None:
         if self._worker is None:

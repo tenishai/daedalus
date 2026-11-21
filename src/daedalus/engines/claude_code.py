@@ -95,8 +95,10 @@ class ClaudeCodeEngine:
             async def handler(arguments, name=name):
                 turn.emit("tool_call", name=name, arguments=arguments)
                 result = await turn.call_tool(name, arguments)
-                turn.emit("tool_result", name=name, content=result)
-                return {"content": [{"type": "text", "text": result}]}
+                outcome = getattr(result, "outcome", None)  # #268
+                turn.emit("tool_result", name=name, content=result,
+                          **({"outcome": outcome} if outcome else {}))
+                return {"content": [{"type": "text", "text": str(result)}]}
 
             schema = spec.get("parameters") or {"type": "object", "properties": {}}
             tools.append(sdk.tool(safe, spec.get("description", ""), schema)(handler))

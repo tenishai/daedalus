@@ -10,11 +10,35 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import time
+import unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
 
-from daedalus.protocols import ToolProviderRefused
+from daedalus.protocols import ToolCallBlocked, ToolProviderRefused, ToolResult
+
+# liminal's JSON-RPC code for a refused tools/call (liminal server/mcp_types.py).
+# It covers the policy gates (missing claims, a missing scope, an operator-only
+# tool) AND every AuthError from liminal's _authenticate, which runs before any
+# method: an expired token, a bad signature, an untrusted issuer, a failed JWKS
+# fetch. So a "blocked" call can be a gateway-side auth outage, not a missing
+# grant: read the message before granting anything.
+_UNAUTHORIZED = -32001
+
+# liminal frames a federated (untrusted) result in a nonce-tagged envelope,
+# one text block before the content and one after (liminal target/inspect.py,
+# frame_untrusted_result). The opening banner names the nonce; the close is
+# exactly this line.
+_ENVELOPE_OPEN = re.compile(r"\A\[BEGIN UNTRUSTED TOOL RESULT ([0-9A-Za-z]+) ")
+_ENVELOPE_CLOSE = "[END UNTRUSTED TOOL RESULT {nonce}]"
+# The notice liminal PR 234 puts inside the envelope when the target returned
+# nothing: "(liminal: target 'X' returned no content. ...)". Only its opening
+# words are matched, so a rewording of the rest still reads as empty. liminal
+# appends it after the target's own blocks (blank ones included), so it is
+# dropped only as the envelope's LAST inner block; real content beside it still
+# reads as content.
+_EMPTY_NOTICE = re.compile(r"\A\(liminal: target .+? returned no content\..*\)\Z", re.S)
 
 # Refresh the exchanged token this many seconds before it expires -- a
 # token that dies mid-call helps nobody.
@@ -28,6 +52,45 @@ def _is_remote_error(exc: BaseException) -> bool:
     except ImportError:
         return False
     return isinstance(exc, MCPRemoteError)
+
+
+def _blank(text: str) -> bool:
+    """Blank once whitespace and invisible format characters (zero-width,
+    bidi controls: category Cf, as liminal strips them) are gone."""
+    return not "".join(ch for ch in text if unicodedata.category(ch) != "Cf").strip()
+
+
+def _text_block(block) -> str | None:
+    if isinstance(block, dict) and block.get("type") == "text":
+        text = block.get("text")
+        return text if isinstance(text, str) else ""
+    return None
+
+
+def result_is_empty(content: list) -> bool:
+    """Did the call return nothing the model could use (#268)? Judged from the
+    content blocks, not the flattened text: liminal's envelope around a
+    federated result, and the notice liminal PR 234 puts inside it, make the
+    text non-empty when the target returned nothing.
+
+    Empty = no block left with content once the envelope pair is stripped and
+    a trailing PR 234 notice is dropped. A text block is blank when only
+    whitespace or invisible format characters are left. A non-text block (a
+    resource, an image) is content."""
+    blocks = list(content or ())
+    if len(blocks) >= 2:
+        first, last = _text_block(blocks[0]), _text_block(blocks[-1])
+        match = _ENVELOPE_OPEN.match(first or "")
+        if match and (last or "").strip() == _ENVELOPE_CLOSE.format(nonce=match.group(1)):
+            blocks = blocks[1:-1]
+            notice = _text_block(blocks[-1]) if blocks else None
+            if notice is not None and _EMPTY_NOTICE.match(notice.strip()):
+                blocks = blocks[:-1]
+    for block in blocks:
+        text = _text_block(block)
+        if text is None or not _blank(text):
+            return False
+    return True
 
 
 def _is_loopback(url: str) -> bool:
@@ -157,14 +220,23 @@ class LiminalToolProvider:
 
         refusal = consult_refusal(name)
         if refusal is not None:
-            return refusal
+            return ToolResult(refusal, "blocked")
         await self._refresh_bearer()
         client = self._ensure()
-        outcome = await client.call_tool(name, payload)
+        try:
+            outcome = await client.call_tool(name, payload)
+        except Exception as exc:
+            # The gateway's policy gates (no grant, no scope, operator-only)
+            # answer with a JSON-RPC error, which the client raises (#268).
+            if _is_remote_error(exc) and getattr(exc, "code", None) == _UNAUTHORIZED:
+                raise ToolCallBlocked(
+                    f"liminal refused {name}: {getattr(exc, 'message', None) or exc}"
+                ) from exc
+            raise
         text = outcome.text or "(no text content)"
         if outcome.is_error:
             raise RuntimeError(text)
-        return text
+        return ToolResult(text, "empty" if result_is_empty(outcome.content) else "ok")
 
     async def aclose(self) -> None:
         if self._client is not None and hasattr(self._client, "aclose"):

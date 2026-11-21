@@ -56,9 +56,12 @@ from daedalus.protocols import (
     NoCheckpoints,
     NoMemory,
     NoTools,
+    ToolCallBlocked,
     ToolProvider,
+    ToolResult,
     Transport,
 )
+from daedalus.run_record import RunRecorder, current_recorder
 from daedalus.task import RECALL_KEY, VERIFIED_SUB_KEY, ReasonCode, Task, TaskState
 from daedalus.tiers import (
     TIER_NAMES,
@@ -72,6 +75,19 @@ from daedalus.tiers import (
 from daedalus.tools import workspace
 
 log = logging.getLogger(__name__)
+
+
+def usage_text(summary: dict) -> str:
+    """`engine=… model=… turns=… input=… output=… cache_read=… cache_write=…`
+    from RunRecord.usage_summary(), for the log line and the -v printer."""
+    return " ".join(f"{key}={value}" for key, value in summary.items())
+
+
+def _log_usage(record) -> None:
+    """One INFO line per finished chat task with its token totals (#268).
+    daedalus configures no log handler, so this prints only where the host sets
+    up logging; pods see the `task_usage` event's line from the -v printer."""
+    log.info("task usage: %s", usage_text(record.usage_summary()))
 
 
 def _slack_token_present() -> bool:
@@ -348,6 +364,9 @@ class Agent:
         the kaminos trace pane consumes the same events over SSE (/events
         on the a2a transport)."""
         event = {"type": event_type, **fields}
+        recorder = current_recorder.get()
+        if recorder is not None:
+            recorder.observe(event)
         self.events.publish(event)
         if self.on_event is not None:
             self.on_event(event)
@@ -821,10 +840,23 @@ class Agent:
         # dispatch above: a revision pass spawned on that path inherits no ledger
         # and asks unguarded, which its corroboration logic relies on.
         ask_ledger.set(AskLedger())
-        result = await self._loop(task, self._messages(task, recalled, notices=pre.notices))
+        # What the reply was built from, for post_draft hooks that ask for it (#268).
+        recorder = RunRecorder(self.engine_name, self.model_resolution.id)
+        token = current_recorder.set(recorder)
+        try:
+            result = await self._loop(
+                task, self._messages(task, recalled, notices=pre.notices)
+            )
+        finally:
+            current_recorder.reset(token)
+        record = recorder.record()
+        _log_usage(record)
+        # One per task, after the recorder is reset, so the record never sees
+        # it. The -v printer renders it; the per-call `usage` events it does not.
+        self._emit("task_usage", **record.usage_summary())
         await self._publish_memory()
         if result.agent_text():
-            post = await self.enforcement.run_post_draft(result.agent_text())
+            post = await self.enforcement.run_post_draft(result.agent_text(), record)
             if post.blocked:
                 # The unlawful draft is discarded, never partially sent: it
                 # must not linger in history where task_to_a2a would
@@ -1039,7 +1071,8 @@ class Agent:
         # The model-produced reply passes post_draft like a chat reply (#86). A
         # block returns the chat path's failure shape and nothing is kept in
         # history; a hook's rewrite replaces the text (the room re-validates it).
-        post = await self.enforcement.run_post_draft(reply)
+        # No run record: this lane is one summarizer call, not an agent run (#268).
+        post = await self.enforcement.run_post_draft(reply, None)
         if post.blocked:
             self._emit("learnings_blocked", detail=post.detail)
             return task.reply(
@@ -1331,7 +1364,7 @@ class Agent:
                     arguments = workspace.bind_arguments(arguments, binds[name], task.metadata)
                 except workspace.BindError as exc:
                     self._emit("bind_refused", tool=name, error=str(exc))
-                    return f"error: {name} can't run: {exc}"
+                    return ToolResult(f"error: {name} can't run: {exc}", "error")
             # Set again on every call, from this closure: an engine may dispatch tool calls
             # on a task whose context it created before _run_engine set the workspace (the
             # Claude Code SDK's in-process MCP server), and this must not depend on that.
@@ -1430,11 +1463,14 @@ class Agent:
             return None
         return f"blocked: {name} requires approval ({gate.require}) and it was denied"
 
-    async def _call_tool(self, name: str, arguments: dict, allowed: set[str]) -> str:
+    async def _call_tool(self, name: str, arguments: dict, allowed: set[str]) -> ToolResult:
         """Every engine's tool calls come through here: tier-1 re-checked at call
-        time, then tier-2 gates, then the provider."""
+        time, then tier-2 gates, then the provider.
+
+        The result's `outcome` comes from the branch taken, never from the text
+        (#268): a real result that starts "error:" is still "ok"."""
         if name not in allowed:
-            return f"error: unknown or disallowed tool {name!r}"
+            return ToolResult(f"error: unknown or disallowed tool {name!r}", "error")
 
         gate = next(
             (g for g in self.bundle.spec.approvals.gates if fnmatch(name, g.match)), None
@@ -1442,12 +1478,21 @@ class Agent:
         if gate is not None:
             plan = {"tool": name, "arguments": arguments, "require": gate.require}
             if not await self.approver.approve(name, plan):
-                return f"blocked: {name} requires approval ({gate.require}) and it was denied"
+                return ToolResult(
+                    f"blocked: {name} requires approval ({gate.require}) and it was denied",
+                    "blocked",
+                )
 
         try:
-            return await self.tools.call(name, arguments)
+            result = await self.tools.call(name, arguments)
+        except ToolCallBlocked as exc:
+            return ToolResult(f"blocked: {exc}", "blocked")
         except Exception as exc:
-            return f"tool error: {exc}"
+            return ToolResult(f"tool error: {exc}", "error")
+        outcome = getattr(result, "outcome", None)
+        if outcome is None:
+            outcome = "ok" if str(result).strip() else "empty"
+        return ToolResult(str(result), outcome)
 
     def _skills_index(self) -> str:
         """One line per assigned skill: the id and when to use it.
