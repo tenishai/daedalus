@@ -6,6 +6,18 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-21
+
+### Upgrading
+
+- **Each skill is stored once more, as its card.** At its first boot on 0.9.0, an agent
+  whose bundle offers `skills.load` seeds every skill into memory again as its card (see
+  Changed). Nothing to do; a bundle without `skills.load` keeps the whole text.
+- **A person's Slack turn starts with a line naming who sent it and where.** The line reads
+  `users.info` and `conversations.info`, so it is fullest with `users:read`,
+  `users:read.email`, `channels:read` and `groups:read` (room-made apps carry them).
+  Without them it names the user id or the channel id instead; nothing fails.
+
 ### Added
 
 - **The model is told where each person's Slack message was said.** A rule can now name
