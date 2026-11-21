@@ -340,3 +340,34 @@ def test_a_denied_builtin_reads_blocked_in_either_order():
     before.observe({"type": "tool_call", "name": "claude.Bash", "arguments": {}})
     assert [c.outcome for c in after.record().tool_calls] == ["blocked"]
     assert [c.outcome for c in before.record().tool_calls] == ["blocked", "unknown"]
+
+
+async def test_the_verbose_printer_shows_one_usage_line_per_task(tmp_path):
+    """Pods run `daedalus run -v` with no log handler, so the INFO line is
+    dropped there; the -v printer is what reaches the pod log. One line per
+    task, from `task_usage`; the per-call `usage` events print nothing."""
+    from click.testing import CliRunner
+
+    from daedalus.cli import _print_event
+
+    llm = ScriptedLLM(
+        read_turn("1", input_tokens=100, output_tokens=10, cache_read_input_tokens=60),
+        LLMResponse(text="first", input_tokens=200, output_tokens=20),
+        LLMResponse(text="second"),
+    )
+    agent = make_agent(
+        tmp_path, hooks={}, llm=llm, tools=FakeTools([READ_SPEC], {"files.read": "x"})
+    )
+    agent.on_event = _print_event
+    runner = CliRunner()
+    with runner.isolation() as (out, _err, _):
+        await agent.handle_task(Task.from_text("one"))
+        await agent.handle_task(Task.from_text("two"))
+        printed = out.getvalue().decode()
+    lines = [line for line in printed.splitlines() if "[usage]" in line]
+    assert lines == [
+        "  [usage] task: engine=litellm model=m turns=2 input=300 output=30 "
+        "cache_read=unknown cache_write=unknown",
+        "  [usage] task: engine=litellm model=m turns=1 input=unknown output=unknown "
+        "cache_read=unknown cache_write=unknown",
+    ]

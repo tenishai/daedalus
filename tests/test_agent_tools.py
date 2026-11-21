@@ -321,9 +321,10 @@ async def test_event_stream_traces_the_whole_tool_turn(tmp_path):
     agent.on_event = events.append
     await agent.handle_task(Task.from_text("read /x"))
     kinds = [e["type"] for e in events]
-    # A usage event follows every model call (#268).
+    # A usage event follows every model call, and task_usage ends the task (#268).
     assert kinds == [
-        "tools_offered", "usage", "reasoning", "tool_call", "tool_result", "usage"
+        "tools_offered", "usage", "reasoning", "tool_call", "tool_result", "usage",
+        "task_usage",
     ]
     assert events[0] == {"type": "tools_offered", "names": ["files.read"]}
     assert events[3] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}

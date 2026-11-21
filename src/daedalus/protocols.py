@@ -132,9 +132,12 @@ class ToolResult(str):
 
 
 class ToolCallBlocked(Exception):
-    """A provider's server refused this one call by policy (#268): no grant,
-    no scope, operator-only. Agent._call_tool reports it as a "blocked:" result
-    with outcome "blocked", not as a "tool error:"."""
+    """A provider's server refused this one call (#268): by policy (no grant,
+    no scope, operator-only) or, for liminal, because the caller's token did
+    not authenticate (expired, bad signature, untrusted issuer, or a JWKS
+    fetch that failed on the gateway's side: liminal answers all of these with
+    the same -32001). Agent._call_tool reports it as a "blocked:" result with
+    outcome "blocked", not as a "tool error:"; the message says which."""
 
 
 class ToolProviderRefused(RuntimeError):

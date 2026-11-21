@@ -77,22 +77,17 @@ from daedalus.tools import workspace
 log = logging.getLogger(__name__)
 
 
+def usage_text(summary: dict) -> str:
+    """`engine=… model=… turns=… input=… output=… cache_read=… cache_write=…`
+    from RunRecord.usage_summary(), for the log line and the -v printer."""
+    return " ".join(f"{key}={value}" for key, value in summary.items())
+
+
 def _log_usage(record) -> None:
-    """One INFO line per finished chat task with its token totals (#268), so
-    the counts reach the pod log and not only the event stream and the record.
-    "unknown" where the engine reported none."""
-    u = record.usage_total
-
-    def show(value):
-        return "unknown" if value is None else value
-
-    log.info(
-        "task usage: engine=%s model=%s turns=%d input=%s output=%s "
-        "cache_read=%s cache_write=%s",
-        record.engine, record.model or "unknown", record.turns,
-        show(u.input_tokens), show(u.output_tokens),
-        show(u.cache_read_input_tokens), show(u.cache_creation_input_tokens),
-    )
+    """One INFO line per finished chat task with its token totals (#268).
+    daedalus configures no log handler, so this prints only where the host sets
+    up logging; pods see the `task_usage` event's line from the -v printer."""
+    log.info("task usage: %s", usage_text(record.usage_summary()))
 
 
 def _slack_token_present() -> bool:
@@ -856,6 +851,9 @@ class Agent:
             current_recorder.reset(token)
         record = recorder.record()
         _log_usage(record)
+        # One per task, after the recorder is reset, so the record never sees
+        # it. The -v printer renders it; the per-call `usage` events it does not.
+        self._emit("task_usage", **record.usage_summary())
         await self._publish_memory()
         if result.agent_text():
             post = await self.enforcement.run_post_draft(result.agent_text(), record)

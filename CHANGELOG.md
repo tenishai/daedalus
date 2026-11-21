@@ -35,17 +35,22 @@ Issue and pull request numbers all refer to this repository, written in full.
   `Agent._call_tool` returns a `ToolResult` (a `str` with an `outcome`), and the engines
   put it on the `tool_result` event. A real result that starts with `error:` is `ok`. A
   gateway refusal is `blocked`: a colleague-task refusal, and liminal's policy refusal on a
-  call (JSON-RPC -32001), which a provider raises as the new `ToolCallBlocked`. A liminal
+  call (JSON-RPC -32001), which a provider raises as the new `ToolCallBlocked`. liminal
+  uses -32001 for every token failure too (expired, bad signature, untrusted issuer, a
+  failed JWKS fetch), so a `blocked` call can be a gateway auth outage: read its message. A liminal
   or MCP result is `empty` when its content blocks hold nothing, judged with liminal's
   untrusted-result envelope set aside, and with or without the notice liminal PR 234
-  adds inside it.
+  appends inside it after any blank blocks. Whitespace and zero-width text are blank.
 - **Two cache fields on `LLMResponse`:** `cache_read_input_tokens` and
   `cache_creation_input_tokens`, read from litellm's `prompt_tokens_details`.
 - **Two trace events.** The LiteLLM engine emits `usage` for every model call (the model
   and the four counts, budget or not) and `loop_limit` with the limit it stopped on.
-- **One INFO log line per finished chat task with its token totals:**
-  `task usage: engine=… model=… turns=… input=… output=… cache_read=… cache_write=…`,
-  `unknown` where none was reported. There is no per-call line and no metric.
+- **One usage line per finished chat task, where a pod can see it.** A new `task_usage`
+  event carries the task's totals, and `daedalus run -v` (how pods run) prints it as
+  `[usage] task: engine=… model=… turns=… input=… output=… cache_read=… cache_write=…`,
+  `unknown` where none was reported. The same text goes to an INFO log line, which prints
+  only where the host configures logging (daedalus sets up no handler). The per-call
+  `usage` events are not printed, and there is no metric.
 
 ## [0.9.0] — 2026-11-21
 

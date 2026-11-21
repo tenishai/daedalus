@@ -483,6 +483,20 @@ async def test_an_envelope_with_blank_blocks_inside_is_empty():
     assert (await _outcome_of([_text(OPEN), _text("  \n"), _text(CLOSE)]))[1] == "empty"
 
 
+@pytest.mark.parametrize("blank", ["", "   \n", "\u200b\u200d", "\u200b \u2060"])
+async def test_blank_blocks_followed_by_the_empty_notice_are_empty(blank):
+    """liminal PR 234 keeps a target's blank text blocks and appends the
+    notice after them, so the commonest empty shape is [OPEN, blank, NOTICE,
+    CLOSE]. Zero-width-only text is blank too (liminal strips it to "" first;
+    a gateway that did not would send it as is)."""
+    content = [_text(OPEN), _text(blank), _text(NOTICE), _text(CLOSE)]
+    assert (await _outcome_of(content))[1] == "empty"
+
+
+async def test_zero_width_text_alone_in_the_envelope_is_empty():
+    assert (await _outcome_of([_text(OPEN), _text("\u200b"), _text(CLOSE)]))[1] == "empty"
+
+
 async def test_a_real_body_that_starts_with_error_is_ok():
     body = "error: 3 matches in tests/test_errors.py"
     assert (await _outcome_of([_text(OPEN), _text(body), _text(CLOSE)]))[1] == "ok"

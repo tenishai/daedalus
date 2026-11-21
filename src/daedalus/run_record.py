@@ -73,6 +73,24 @@ class RunRecord:
     # (Anthropic's raw count) does not.
     input_includes_cache: bool
 
+    def usage_summary(self) -> dict:
+        """The per-task usage line's fields (#268), "unknown" for None: one
+        source for the INFO log line and the -v printer's `[usage]` line."""
+        u = self.usage_total
+
+        def show(value):
+            return "unknown" if value is None else value
+
+        return {
+            "engine": self.engine,
+            "model": self.model or "unknown",
+            "turns": self.turns,
+            "input": show(u.input_tokens),
+            "output": show(u.output_tokens),
+            "cache_read": show(u.cache_read_input_tokens),
+            "cache_write": show(u.cache_creation_input_tokens),
+        }
+
     @property
     def total_input_tokens(self) -> int | None:
         """All input the run sent, cached or not. None when unreported."""
