@@ -1,10 +1,10 @@
 ---
 card: arch-card:daedalus-engines
-updated: 2026-11-03
+updated: 2026-11-21
 anchor: src/daedalus/engines/base.py sha=ecae4848c0b98eec961d225fa6e2311bef08b814
-anchor: src/daedalus/engines/litellm.py sha=7d49b228f5937bf130fd5c4b7e7d952591a6df13
-anchor: src/daedalus/engines/claude_code.py sha=94fe3d515632ab33d0dafa1198c5b7b226763932
-anchor: src/daedalus/engines/bridge.py sha=0ae596f5c2ff8e64cb3ca76ad2c1265b9e18d1b4
+anchor: src/daedalus/engines/litellm.py sha=42fe8e97e7f3804dc01507490b2920d449084160
+anchor: src/daedalus/engines/claude_code.py sha=735489adb4c543954116e0dafdcba66f1dfea6f9
+anchor: src/daedalus/engines/bridge.py sha=5d3731ab2998480a424b25c534d5e0794b874884
 anchor: src/daedalus/engines/scripted.py sha=b7726a7718ce00b31a1402e8903d72c970addbc8
 ---
 # engines — what runs one task turn (tenishai/agents#51)
@@ -17,7 +17,7 @@ OPS / FLOW: Agent._loop → _allowed_tools (tier 1) → drop _unapprovable tools
 - ScriptedEngine (engines/scripted.py, #227): no model. One command per message: `remember: <fact> [#tag]` → turn.memory.commit with the #words as tags, `recall: <query>` → the store's recall_hits (or recall, every hit `local`) as a JSON list of {content, source}, `call: <tool> <json>` → turn.call_tool, so refusals come from the allowlist, gates or provider, never the engine. Anything else → FAILED 704. Selecting it skips tier resolution, so a tier word needs no tiers file. For ergon's model-free lab tests; behind the env var like cabal's tck persona.
 - ToolBridge (engines/bridge.py): loopback MCP-over-HTTP server (127.0.0.1, OS port, per-run bearer, random server name) + `approve` tool for --permission-prompt-tool. NO production caller today: #107 landed it, #108 went with the SDK's in-process server instead. Only tests/test_engine_bridge.py uses it. Its mcp>=2.2 + uvicorn are the `bridge` extra (tenishai/ergon#34); `__aenter__` raises on mcp 1.x naming that extra, and the `claude-code` extra is claude-agent-sdk alone, so the engine runs on mcp 1.x or 2.x.
 INVARIANTS:
-- Engines hold NO policy. Allowlist, gates, approver live in Agent (_call_tool, _approve_native, _withheld_native) so every engine gets identical enforcement. Never gate inside an engine.
+- Engines hold NO policy. Allowlist, gates, approver live in Agent (_call_tool, _approve_native, _withheld_native) so every engine gets identical enforcement. Never gate inside an engine. An engine copies the `outcome` of what call_tool returned (protocols.ToolResult) onto its `tool_result` event, read before any text is added (LiteLLM's repeat note), and hands the SDK or MCP client a plain str (#268).
 - The engine never reaches back into the Agent; only EngineTurn fields. Why: a second engine must not depend on Agent internals.
 - Model-safe names: `_munge` = "." → "__" (litellm.py). Engines map munged → canonical before call_tool; trace events speak canonical names. ClaudeCodeEngine refuses two tools that munge to one name (ValueError → FAILED 704).
 - claude-code + model.budget.per_task_tokens → BundleError at load (agent.py): Claude Code runs the whole loop, a token budget can't stop it. Declare the gap, never degrade silently.

@@ -56,7 +56,9 @@ from daedalus.protocols import (
     NoCheckpoints,
     NoMemory,
     NoTools,
+    ToolCallBlocked,
     ToolProvider,
+    ToolResult,
     Transport,
 )
 from daedalus.run_record import RunRecorder, current_recorder
@@ -73,6 +75,24 @@ from daedalus.tiers import (
 from daedalus.tools import workspace
 
 log = logging.getLogger(__name__)
+
+
+def _log_usage(record) -> None:
+    """One INFO line per finished chat task with its token totals (#268), so
+    the counts reach the pod log and not only the event stream and the record.
+    "unknown" where the engine reported none."""
+    u = record.usage_total
+
+    def show(value):
+        return "unknown" if value is None else value
+
+    log.info(
+        "task usage: engine=%s model=%s turns=%d input=%s output=%s "
+        "cache_read=%s cache_write=%s",
+        record.engine, record.model or "unknown", record.turns,
+        show(u.input_tokens), show(u.output_tokens),
+        show(u.cache_read_input_tokens), show(u.cache_creation_input_tokens),
+    )
 
 
 def _slack_token_present() -> bool:
@@ -834,11 +854,11 @@ class Agent:
             )
         finally:
             current_recorder.reset(token)
+        record = recorder.record()
+        _log_usage(record)
         await self._publish_memory()
         if result.agent_text():
-            post = await self.enforcement.run_post_draft(
-                result.agent_text(), recorder.record()
-            )
+            post = await self.enforcement.run_post_draft(result.agent_text(), record)
             if post.blocked:
                 # The unlawful draft is discarded, never partially sent: it
                 # must not linger in history where task_to_a2a would
@@ -1346,7 +1366,7 @@ class Agent:
                     arguments = workspace.bind_arguments(arguments, binds[name], task.metadata)
                 except workspace.BindError as exc:
                     self._emit("bind_refused", tool=name, error=str(exc))
-                    return f"error: {name} can't run: {exc}"
+                    return ToolResult(f"error: {name} can't run: {exc}", "error")
             # Set again on every call, from this closure: an engine may dispatch tool calls
             # on a task whose context it created before _run_engine set the workspace (the
             # Claude Code SDK's in-process MCP server), and this must not depend on that.
@@ -1445,11 +1465,14 @@ class Agent:
             return None
         return f"blocked: {name} requires approval ({gate.require}) and it was denied"
 
-    async def _call_tool(self, name: str, arguments: dict, allowed: set[str]) -> str:
+    async def _call_tool(self, name: str, arguments: dict, allowed: set[str]) -> ToolResult:
         """Every engine's tool calls come through here: tier-1 re-checked at call
-        time, then tier-2 gates, then the provider."""
+        time, then tier-2 gates, then the provider.
+
+        The result's `outcome` comes from the branch taken, never from the text
+        (#268): a real result that starts "error:" is still "ok"."""
         if name not in allowed:
-            return f"error: unknown or disallowed tool {name!r}"
+            return ToolResult(f"error: unknown or disallowed tool {name!r}", "error")
 
         gate = next(
             (g for g in self.bundle.spec.approvals.gates if fnmatch(name, g.match)), None
@@ -1457,12 +1480,21 @@ class Agent:
         if gate is not None:
             plan = {"tool": name, "arguments": arguments, "require": gate.require}
             if not await self.approver.approve(name, plan):
-                return f"blocked: {name} requires approval ({gate.require}) and it was denied"
+                return ToolResult(
+                    f"blocked: {name} requires approval ({gate.require}) and it was denied",
+                    "blocked",
+                )
 
         try:
-            return await self.tools.call(name, arguments)
+            result = await self.tools.call(name, arguments)
+        except ToolCallBlocked as exc:
+            return ToolResult(f"blocked: {exc}", "blocked")
         except Exception as exc:
-            return f"tool error: {exc}"
+            return ToolResult(f"tool error: {exc}", "error")
+        outcome = getattr(result, "outcome", None)
+        if outcome is None:
+            outcome = "ok" if str(result).strip() else "empty"
+        return ToolResult(str(result), outcome)
 
     def _skills_index(self) -> str:
         """One line per assigned skill: the id and when to use it.

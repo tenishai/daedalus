@@ -107,6 +107,36 @@ class ToolProvider(Protocol):
     async def call(self, name: str, payload: dict) -> str: ...
 
 
+TOOL_OUTCOMES = ("ok", "empty", "error", "blocked")
+
+
+class ToolResult(str):
+    """A tool result's text, plus how the call ended (#268).
+
+    A str, so every caller that treats a result as text still works and a
+    provider's `call -> str` signature still holds. `outcome` is one of
+    TOOL_OUTCOMES, or None when nothing on the code path said. Agent._call_tool
+    sets it from the branch it took; a provider may set it first ("empty" for a
+    result with no content, "blocked" for a refusal). Any str operation (a `+`)
+    returns a plain str and drops it, so read it before changing the text.
+    """
+
+    outcome: str | None
+
+    def __new__(cls, text: str, outcome: str | None = None) -> ToolResult:
+        if outcome is not None and outcome not in TOOL_OUTCOMES:
+            raise ValueError(f"unknown tool outcome {outcome!r}")
+        obj = super().__new__(cls, text)
+        obj.outcome = outcome
+        return obj
+
+
+class ToolCallBlocked(Exception):
+    """A provider's server refused this one call by policy (#268): no grant,
+    no scope, operator-only. Agent._call_tool reports it as a "blocked:" result
+    with outcome "blocked", not as a "tool error:"."""
+
+
 class ToolProviderRefused(RuntimeError):
     """A provider's server answered and refused this caller (daedalus#156).
 

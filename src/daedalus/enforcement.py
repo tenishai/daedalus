@@ -14,6 +14,16 @@ nothing said so -- a hook author who returned a denial was not denying and
 was not told. Unrecognised keys are logged and ignored; #51 argues for
 refusing them instead.
 
+A post_draft hook that wants the run record (#268, daedalus.run_record) is
+written `def post_draft(draft, record=None):`. Keep the default: a runtime
+older than #268 calls every post_draft with one argument, so a required second
+parameter raises there, a hook that raises blocks every reply, and agents in
+one room run mixed runtime versions. record is None on such a runtime and on
+the learnings lane. What a hook returns replaces the reply in history, so text
+it adds is replayed to the model next turn, sent to an agent that consulted
+this one, and fed to the learnings summary: a check that reads the record and
+only logs or blocks, returning the draft unchanged, is safe; a footer is not.
+
 Boot-only loading, image tools first (arc3d Task 5): `load` also accepts an
 `overlay_dir` -- the persistent, fast-lane-delivered tool directory on the
 agent's own volume (daedalus.agent.Agent._tool_overlay_dir). Image tools
@@ -283,7 +293,7 @@ class Enforcement:
     async def run_post_draft(self, draft: str, record=None) -> PostDraftResult:
         """`record` is the RunRecord of the run that produced `draft` (#268), or
         None where there was no agent run (the learnings lane). A hook defined as
-        `post_draft(draft, record)` receives it; `post_draft(draft)` does not."""
+        `post_draft(draft, record=None)` receives it; `post_draft(draft)` does not."""
         text = draft
         for filename, mod in self._modules:
             hook = getattr(mod, "post_draft", None)

@@ -9,7 +9,7 @@ from pathlib import Path
 from daedalus.agent import Agent
 from daedalus.bundle import Bundle
 from daedalus.enforcement import _wants_run_record
-from daedalus.protocols import LLMResponse, ToolCall
+from daedalus.protocols import LLMResponse, ToolCall, ToolCallBlocked, ToolResult
 from daedalus.run_record import RunRecorder, tool_outcome
 from daedalus.task import ReasonCode, Task, TaskState
 from tests.fakes import FakeTools, ScriptedLLM
@@ -112,6 +112,110 @@ async def test_empty_and_refused_tool_results_have_their_own_outcomes(tmp_path):
     assert "calls=files.read:empty,nope__missing:error" in task.agent_text()
 
 
+class OutcomeTools(FakeTools):
+    """FakeTools whose files.read answers with a fixed value, or raises it."""
+
+    def __init__(self, answer):
+        super().__init__([READ_SPEC])
+        self.answer = answer
+
+    async def call(self, name, payload):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+async def _outcome_through_agent(tmp_path, answer) -> str:
+    llm = ScriptedLLM(read_turn("1"), "done")
+    agent = make_agent(
+        tmp_path, hooks={"a_footer.py": FOOTER_HOOK}, llm=llm, tools=OutcomeTools(answer)
+    )
+    task = await agent.handle_task(Task.from_text("q"))
+    return task.agent_text().split("calls=")[1].split(" ")[0]
+
+
+async def test_a_real_result_that_starts_with_error_reads_ok(tmp_path):
+    """The outcome comes from the code path (#268): the provider returned it, so
+    it is a result, whatever its first word."""
+    answer = "error: 3 matches in tests/test_errors.py"
+    assert await _outcome_through_agent(tmp_path, answer) == "files.read:ok"
+
+
+async def test_a_providers_own_outcome_is_kept(tmp_path):
+    """A provider that saw an empty result (the gateway's envelope makes the
+    text non-empty) says so, and the record keeps it."""
+    answer = ToolResult("[BEGIN ...][END ...]", "empty")
+    assert await _outcome_through_agent(tmp_path, answer) == "files.read:empty"
+
+
+async def test_a_policy_refusal_from_a_provider_reads_blocked(tmp_path):
+    answer = ToolCallBlocked("liminal refused files.read: scope 'files:read' required")
+    assert await _outcome_through_agent(tmp_path, answer) == "files.read:blocked"
+
+
+async def test_a_provider_exception_reads_error(tmp_path):
+    assert await _outcome_through_agent(tmp_path, RuntimeError("boom")) == "files.read:error"
+
+
+async def test_a_repeated_call_keeps_its_outcome_under_the_repeat_note(tmp_path):
+    """The LiteLLM engine appends a note to a repeated call's result, and a str
+    `+` drops ToolResult.outcome: it is read before the note."""
+    llm = ScriptedLLM(read_turn("1"), read_turn("2"), "done")
+    agent = make_agent(
+        tmp_path, hooks={"a_footer.py": FOOTER_HOOK}, llm=llm,
+        tools=OutcomeTools("error: 3 matches in tests/test_errors.py"),
+        tools_extra="  max_repeats: 3\n",
+    )
+    task = await agent.handle_task(Task.from_text("q"))
+    assert "calls=files.read:ok,files.read:ok " in task.agent_text()
+
+
+async def test_a_hook_written_with_record_none_gets_the_record(tmp_path):
+    """The recommended form (docs/arch/approvals.md): an older runtime calls it
+    with one argument, this one passes the record."""
+    hook = (
+        "def post_draft(draft, record=None):\n"
+        "    return draft if record is None else f'{draft} turns={record.turns}'\n"
+    )
+    agent = make_agent(
+        tmp_path, hooks={"a_hook.py": hook}, llm=ScriptedLLM("hi"), tools=FakeTools([READ_SPEC])
+    )
+    task = await agent.handle_task(Task.from_text("q"))
+    assert task.agent_text() == "hi turns=1"
+
+
+async def test_a_finished_task_logs_its_usage_once(tmp_path, caplog):
+    llm = ScriptedLLM(
+        read_turn("1", input_tokens=100, output_tokens=10, cache_read_input_tokens=60,
+                  cache_creation_input_tokens=5),
+        LLMResponse(text="answer", input_tokens=200, output_tokens=20,
+                    cache_read_input_tokens=150, cache_creation_input_tokens=0),
+    )
+    agent = make_agent(
+        tmp_path, hooks={}, llm=llm, tools=FakeTools([READ_SPEC], {"files.read": "x"})
+    )
+    with caplog.at_level("INFO", logger="daedalus.agent"):
+        await agent.handle_task(Task.from_text("q"))
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("task usage")]
+    assert lines == [
+        "task usage: engine=litellm model=m turns=2 input=300 output=30 "
+        "cache_read=210 cache_write=5"
+    ]
+
+
+async def test_unreported_usage_logs_as_unknown(tmp_path, caplog):
+    agent = make_agent(
+        tmp_path, hooks={}, llm=ScriptedLLM(LLMResponse(text="answer")),
+        tools=FakeTools([READ_SPEC]),
+    )
+    with caplog.at_level("INFO", logger="daedalus.agent"):
+        await agent.handle_task(Task.from_text("q"))
+    assert (
+        "task usage: engine=litellm model=m turns=1 input=unknown output=unknown "
+        "cache_read=unknown cache_write=unknown"
+    ) in [r.getMessage() for r in caplog.records]
+
+
 async def test_a_one_parameter_hook_still_works_beside_a_record_taking_one(tmp_path):
     hooks = {
         "a_shout.py": "def post_draft(draft):\n    return draft.upper()\n",
@@ -211,3 +315,28 @@ def test_tool_outcome_reads_the_agents_own_prefixes():
     assert tool_outcome("blocked: files.write requires approval (plan_approval)") == "blocked"
     assert tool_outcome("error: unknown or disallowed tool 'x'") == "error"
     assert tool_outcome("tool error: boom") == "error"
+
+
+def test_an_event_outcome_wins_over_the_text():
+    recorder = RunRecorder("litellm", "m")
+    recorder.observe({"type": "tool_call", "name": "github.search", "arguments": {}})
+    recorder.observe({
+        "type": "tool_result", "name": "github.search",
+        "content": "error: 3 matches", "outcome": "ok",
+    })
+    assert recorder.record().tool_calls[0].outcome == "ok"
+
+
+def test_a_denied_builtin_reads_blocked_in_either_order():
+    """Claude Code traces a built-in's tool_call from the assistant message, and
+    a gate's refusal (Agent._approve_native) as permission_denied; the order of
+    the two is the SDK's."""
+    after = RunRecorder("claude-code", "m")
+    after.observe({"type": "tool_call", "name": "claude.Bash", "arguments": {}})
+    after.observe({"type": "permission_denied", "name": "claude.Bash"})
+    before = RunRecorder("claude-code", "m")
+    before.observe({"type": "permission_denied", "name": "claude.Bash"})
+    before.observe({"type": "tool_call", "name": "claude.Bash", "arguments": {}})
+    before.observe({"type": "tool_call", "name": "claude.Bash", "arguments": {}})
+    assert [c.outcome for c in after.record().tool_calls] == ["blocked"]
+    assert [c.outcome for c in before.record().tool_calls] == ["blocked", "unknown"]

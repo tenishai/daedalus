@@ -188,3 +188,17 @@ async def test_the_agent_gates_engine_native_tools(tmp_path):
     yes = make_agent(tmp_path / "b", allow=["files.read"], gates=gates, approver=yes_approver)
     assert await yes._approve_native("Bash", {"command": "ls"}) is None
     assert yes_approver.asked[0][0] == "Bash"
+
+
+async def test_a_tool_call_passes_the_call_tool_outcome_to_the_trace(tmp_path):
+    """#268: the run record reads the outcome the code path set, not the text."""
+    from daedalus.protocols import ToolResult
+
+    async def call_tool(name, arguments):
+        return ToolResult("", "empty")
+
+    events = []
+    async with ToolBridge(_turn(tmp_path, call_tool=call_tool, events=events)) as bridge:
+        async with _client(bridge) as session:
+            await session.call_tool("files__read", {})
+    assert events[-1] == ("tool_result", {"name": "files.read", "content": "", "outcome": "empty"})

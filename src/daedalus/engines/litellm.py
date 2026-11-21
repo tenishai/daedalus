@@ -268,9 +268,13 @@ class LiteLLMEngine:
                     if name is not None
                     else f"error: unknown or disallowed tool {call.name!r}"
                 )
+                # How the call ended, from the code path (#268). Read before the
+                # repeat note: a str `+` drops it.
+                outcome = getattr(result, "outcome", None) if name is not None else "error"
                 if max_repeats and n > 1:
                     result += _REPEAT_NOTE
-                emit("tool_result", name=canonical, content=result)
+                emit("tool_result", name=canonical, content=result,
+                     **({"outcome": outcome} if outcome else {}))
                 last_attempt = f"{canonical} -> {result[:200]}"
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}

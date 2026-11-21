@@ -1,7 +1,7 @@
 ---
 card: arch-card:daedalus-protocols
-updated: 2026-11-01
-anchor: src/daedalus/protocols.py sha=a3e51bf6ac4f315edca578c91f47612933974555
+updated: 2026-11-21
+anchor: src/daedalus/protocols.py sha=8293b6ed232925c6dcc5246537de3909e1a52ddf
 ---
 # protocols — the collaborator seams optional extras implement
 
@@ -10,7 +10,7 @@ WHAT / SEAM: src/daedalus/protocols.py, all `runtime_checkable` Protocols:
 - `Handler.handle_task(Task) -> Task` — the entire agent contract; transports only see this
 - `Transport.serve(handler)`
 - `MemoryStore.recall(query, k=5) -> list[str]`, `.commit(content, kind="fact", tags="")`; optional, unannotated: `.recall_hits(query, k) -> list[{content, source}]` and `.publish() -> dict`, called once at task end, from handle_task or resume, by Agent._publish_memory (#228)
-- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage. Optional class attribute `knowledge_only = True` (read with getattr, not a Protocol member): the provider answers from the agent's own material with no credential, so its tools stay offered while answering a colleague (kobo#310); default credentialed, so a new provider is withheld there until it opts in. Only SkillsToolProvider sets it.
+- `ToolProvider.tools() -> list[dict]`, `.call(name, payload) -> str`; `.call` may return a `ToolResult` (a str subclass with `.outcome`: ok, empty, error, blocked) to say how the call ended, and may raise `ToolCallBlocked` for a server's policy refusal of that one call; Agent._call_tool turns both into the result's outcome (#268). `tools()` raises `ToolProviderRefused` when the provider's server answered and refused this caller (#156), as distinct from an outage. Optional class attribute `knowledge_only = True` (read with getattr, not a Protocol member): the provider answers from the agent's own material with no credential, so its tools stay offered while answering a colleague (kobo#310); default credentialed, so a new provider is withheld there until it opts in. Only SkillsToolProvider sets it.
 - `CheckpointStore.save/load/drop(task_id)`; `Budget.spend(tokens)`, `.remaining() -> int|None` (None = unlimited)
 - `Approver.approve(action, plan) -> bool`
 Data: `ToolCall(id, name, arguments)` (name = exactly what the model said), `LLMResponse(text, reasoning, tool_calls, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, finish_reason)`; every count is `int | None`, None = the provider did not report it (#268). `tokens_spent()` counts None as 0 for a budget; LiteLLM's Anthropic input_tokens already includes the cache counts.

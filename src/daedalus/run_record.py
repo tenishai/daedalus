@@ -7,6 +7,7 @@ same thing for the LiteLLM loop and the Claude Code engine.
 
 A hook module may only import the standard library, so a hook reads the record
 by attribute and never imports this module.
+Write the hook `post_draft(draft, record=None)`; enforcement.py says why.
 
 Usage is None when the provider did not report it. A total is None when any
 model call in the run went unreported: a partial sum would read as a smaller
@@ -86,8 +87,10 @@ class RunRecord:
 
 
 def tool_outcome(content: str) -> str:
-    """Classify a tool result string by the prefixes Agent._call_tool and the
-    tool providers produce (docs/arch/approvals.md)."""
+    """Guess a tool result's outcome from its text. Only a fallback, for a
+    tool_result event that carries no `outcome` (an engine or test that emits
+    one without going through Agent._call_tool): every engine passes the
+    outcome the code path set (protocols.ToolResult), and that wins."""
     text = content.strip()
     if not text or text == "(no text content)":
         return "empty"
@@ -117,18 +120,36 @@ class RunRecorder:
         self._finished: dict | None = None
         self._limit: str | None = None
         self._truncated = False
+        self._denied: list[str] = []  # refusals traced before their tool_call
 
     def observe(self, event: dict) -> None:
         kind = event.get("type")
         if kind == "tool_call":
-            self._calls.append([event.get("name", ""), "unknown", time.monotonic(), None])
+            name = event.get("name", "")
+            outcome = "unknown"
+            if name in self._denied:  # the refusal was traced before the call
+                self._denied.remove(name)
+                outcome = "blocked"
+            self._calls.append([name, outcome, time.monotonic(), None])
         elif kind == "tool_result":
             name = event.get("name", "")
             for call in self._calls:  # oldest unanswered call with this name
                 if call[0] == name and call[3] is None and call[1] == "unknown":
-                    call[1] = tool_outcome(str(event.get("content", "")))
+                    call[1] = event.get("outcome") or tool_outcome(
+                        str(event.get("content", ""))
+                    )
                     call[3] = time.monotonic() - call[2]
                     break
+        elif kind == "permission_denied":
+            # A built-in the engine runs itself, refused by a gate
+            # (Agent._approve_native). It never gets a tool_result.
+            name = event.get("name", "")
+            for call in self._calls:
+                if call[0] == name and call[3] is None and call[1] == "unknown":
+                    call[1] = "blocked"
+                    break
+            else:
+                self._denied.append(name)
         elif kind == "usage":
             self._usage.append(Usage(**{f: event.get(f) for f in _USAGE_FIELDS}))
         elif kind == "engine_finished":

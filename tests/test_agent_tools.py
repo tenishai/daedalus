@@ -1103,3 +1103,35 @@ def test_mcp_result_text_includes_embedded_resources():
         "[resource repo://acme/infra/contents/logo.png (image/png)] binary, not shown"
     )
     assert result_text([]) == "(no text content)"
+
+
+async def test_mcp_call_marks_its_outcome_from_the_blocks():
+    """#268: empty is judged from the content blocks, not from result_text's
+    "(no text content)" stand-in, and a body starting "error:" is a result."""
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from daedalus.tools.mcp import MCPToolProvider
+
+    class Session:
+        def __init__(self, content):
+            self.content = content
+
+        async def call_tool(self, tool, payload):
+            return NS(content=self.content, isError=False)
+
+    async def outcome(content):
+        provider = MCPToolProvider([{"name": "files", "command": ["true"]}])
+        provider._worker, provider._ready = object(), asyncio.Event()
+        provider._ready.set()
+        provider._sessions["files"] = Session(content)
+        result = await provider.call("files.read", {})
+        return str(result), result.outcome
+
+    assert await outcome([]) == ("(no text content)", "empty")
+    assert (await outcome([NS(type="text", text="  ")]))[1] == "empty"
+    assert (await outcome([NS(type="text", text="error: 2 hits")]))[1] == "ok"
+    resource = NS(type="resource", resource=NS(uri="f://a", mimeType="", text=""))
+    assert (await outcome([resource]))[1] == "ok"
+    # An image says nothing to the model as text, but it is content.
+    assert await outcome([NS(type="image", data="...")]) == ("(no text content)", "ok")
