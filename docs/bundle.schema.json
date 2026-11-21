@@ -1085,5 +1085,5 @@
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/tenishai/daedalus/blob/main/docs/bundle.schema.json",
-  "version": "0.8.0"
+  "version": "0.9.0"
 }

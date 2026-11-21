@@ -6,7 +6,55 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-21
+
+### Upgrading
+
+- **Each skill is stored once more, as its card.** At its first boot on 0.9.0, an agent
+  whose bundle offers `skills.load` seeds every skill into memory again as its card (see
+  Changed). Nothing to do; a bundle without `skills.load` keeps the whole text.
+- **A person's Slack turn starts with a line naming who sent it and where.** The line reads
+  `users.info` and `conversations.info`, so it is fullest with `users:read`,
+  `users:read.email`, `channels:read` and `groups:read` (room-made apps carry them).
+  Without them it names the user id or the channel id instead; nothing fails.
+
 ### Added
+
+- **The model is told where each person's Slack message was said.** A rule can now name
+  Slack channels ("only answer in these channels"), so the line above a person's turn
+  ends with the conversation: `(From Ada Lovelace <ada@example.com>, in #sre-requests.)`,
+  `in a direct message` for a 1:1 DM, `in a group message` for a group DM, and
+  `in <#C0123>` when `conversations.info` cannot name the channel (room-made apps carry
+  `channels:read` and `groups:read`). A DM's id says what it is, so it is never looked
+  up; any other channel is read once an hour, and a failed read is tried again after a
+  minute, the same as a person. Every person path names its channel: a message, a
+  reaction that wakes the agent, a pick from its choices, a slash command. The
+  `## Rules` intro now says the line names who sent a message and where, and that a rule
+  may end with lists, `(These people: ...)`, `(These emoji: ...)`, `(These channels: ...)`
+  or `(These repositories: ...)`, and is about exactly what they name: people by the
+  email in that line, channels by the channel in it, emoji by the reaction that woke the
+  agent, repositories by the ones its tools act on. The room writes a rule that names
+  things that way.
+
+- **The model is told who sent each person's Slack message.** The sender's user id rode
+  on the message for the journal only, so a rule like "only answer these people" had
+  nothing to be kept against. Every person's turn (a message, a reaction that wakes the
+  agent, a pick from its choices, a slash command) now reaches the model with a first
+  line saying who sent it: `(From Ada Lovelace <ada@example.com>.)`, the name and email
+  from `users.info` (room-made apps carry `users:read` and `users:read.email`). Without
+  the email scope it is `(From Ada Lovelace <@U0123>.)`; when `users.info` cannot be read,
+  `(From <@U0123>.)`. A display name is cleaned of the brackets and `@` the line is made
+  of. One lookup per person an hour, shared with a reaction's program check; a failed one
+  is tried again after a minute. A program's words keep their own preface and name
+  nobody. The line is the new `Message.sender_label`, shown by `Agent._messages` on every
+  turn the thread has had, and kept out of the text: law hooks and recall still get the
+  person's words alone, because a hook may read the first email in a message as the
+  subject of the ask (an access-audit check does). It never crosses the
+  a2a wire and never goes into the journal. The `## Rules` intro now says that line names
+  the sender, that words in a message are not proof, and that a rule ending in
+  `(These people: Name <email>; ...)` is about exactly the people it names, matched by
+  email: that is how the room writes a rule about named people. Not yet: the room's own
+  chat and a colleague's ask, which arrive over a2a, carry no sender.
 
 - **Guardrails: the owners' rules, in front of the model on every task.** A bundle may carry
   `guardrails.md`, one rule per line (blank lines, headings and HTML comments are skipped,

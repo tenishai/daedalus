@@ -71,6 +71,13 @@ class Message(BaseModel):
     # to give. The learnings lane attributes candidates only to these ids,
     # never to a name the model read out of the text.
     sender: str | None = None
+    # Who sent a person's turn, for the model to read: "Name <email>", or the
+    # Slack id when users.info cannot say more. Agent._messages puts it on a line
+    # of its own above the text, so the text stays the person's own words for
+    # the law hooks and recall (a hook may read the first email in a message as
+    # the subject of the ask). Set only by the Slack transport, for a person;
+    # task_from_a2a never sets it, so nothing on the wire can claim a sender.
+    sender_label: str | None = None
 
 
 class Task(BaseModel):

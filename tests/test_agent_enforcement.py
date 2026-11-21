@@ -12,7 +12,7 @@ import pytest
 
 from daedalus.agent import Agent
 from daedalus.bundle import Bundle
-from daedalus.task import Message, ReasonCode, Task, TaskState
+from daedalus.task import ImagePart, Message, ReasonCode, Task, TaskState
 from tests.fakes import CannedMemory, ScriptedLLM
 
 
@@ -61,6 +61,84 @@ async def test_no_notices_adds_nothing(tmp_path):
     agent = make_agent(tmp_path, llm=llm)
     await agent.handle_task(Task.from_text("hi"))
     assert "Notices" not in llm.calls[0][0]["content"]
+
+
+# ---- who sent a turn: the model reads it, the hooks and recall do not --------
+
+
+class _QueryMemory:
+    def __init__(self):
+        self.queries: list[str] = []
+
+    async def recall(self, query: str, k: int = 5) -> list[str]:
+        self.queries.append(query)
+        return []
+
+    async def commit(self, content: str, kind: str = "fact") -> None:
+        pass
+
+
+async def test_a_labelled_turn_is_read_by_the_model_and_not_by_the_hooks(tmp_path):
+    """A person's Slack turn carries who sent it (Message.sender_label). The
+    model reads it as the message's first line, on every later turn too. The
+    law hooks and recall get the person's own words: a hook may take the first
+    email in a message as the subject of the ask."""
+    llm = ScriptedLLM("first", "second")
+    memory = _QueryMemory()
+    tools = {
+        "a_witness.py": (
+            "def pre_task(message):\n"
+            "    return {'notices': ['hook saw: ' + message]}\n"
+        )
+    }
+    agent = make_agent(tmp_path, tools=tools, llm=llm, memory=memory)
+    task = Task(
+        history=[
+            Message(
+                role="user",
+                text="audit jdoe@example.com",
+                sender="U1",
+                sender_label="Ada Lovelace <ada@example.com>",
+            )
+        ]
+    )
+    task = await agent.handle_task(task)
+    task.history.append(Message(role="user", text="and since May?", sender="U2"))
+    await agent.handle_task(task)
+
+    first, second = llm.calls
+    assert first[1]["content"] == "(From Ada Lovelace <ada@example.com>.)\naudit jdoe@example.com"
+    assert "hook saw: audit jdoe@example.com" in first[0]["content"]
+    assert "ada@" not in first[0]["content"]
+    assert memory.queries == ["audit jdoe@example.com", "and since May?"]
+    # Every turn the thread has had keeps its line; a turn with no label has none.
+    assert [m["content"] for m in second[1:]] == [
+        "(From Ada Lovelace <ada@example.com>.)\naudit jdoe@example.com",
+        "first",
+        "and since May?",
+    ]
+
+
+async def test_a_labelled_turn_with_an_image_says_who_sent_it_in_its_text_part(tmp_path):
+    llm = ScriptedLLM("ok")
+    agent = make_agent(tmp_path, llm=llm)
+    task = Task(
+        history=[
+            Message(
+                role="user",
+                text="what is this?",
+                images=[ImagePart(data="QUFB", media_type="image/png")],
+                sender_label="Ada Lovelace <ada@example.com>",
+            )
+        ]
+    )
+    await agent.handle_task(task)
+    parts = llm.calls[0][1]["content"]
+    assert parts[0] == {
+        "type": "text",
+        "text": "(From Ada Lovelace <ada@example.com>.)\nwhat is this?",
+    }
+    assert parts[1]["type"] == "image_url"
 
 
 # ---- post_draft transforms the final reply ----------------------------------

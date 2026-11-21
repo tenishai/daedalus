@@ -192,6 +192,38 @@ _ON = frozenset({"1", "on", "true", "yes"})
 _REACTION_TURNS_PER_HOUR = 60
 #: Slack names the two thumbs `+1` and `-1` in events; people type these.
 _EMOJI_ALIASES = {"thumbsup": "+1", "thumbsdown": "-1"}
+# Who sent a person's message (2026-11-20). The model was never told: the user
+# id rode on the Message for journaling only, so an owner's rule about named
+# people ("only answer these people") had nothing to be kept against. Each
+# person's turn now carries a label, `Name <email>` from users.info, which
+# Agent._messages puts on a line of its own above their words:
+# `(From Ada Lovelace <ada@example.com>.)`. Without an email (users:read.email
+# missing) it is `Name <@U...>`; when users.info cannot be read, `<@U...>`. A
+# program's words keep their own preface and get no label. One users.info per
+# person per hour, shared with a reaction's program check: a failed read is
+# tried again after a minute.
+#
+# Where it was said, too (2026-11-20): a rule can name Slack channels ("only
+# answer in these channels"), so the label ends with the conversation:
+# `(From Ada Lovelace <ada@example.com>, in #sre-requests.)`, `in a direct
+# message` for a 1:1 DM, `in a group message` for a group DM, and `in <#C...>`
+# when conversations.info cannot name the channel. A DM's id says what it is,
+# so it is never looked up; any other channel is read once an hour, a failed
+# read again after a minute, the same as a person.
+_PERSON_TTL_SECONDS = 3600.0
+_PERSON_RETRY_SECONDS = 60.0
+_PLACE_TTL_SECONDS = 3600.0
+_PLACE_RETRY_SECONDS = 60.0
+#: What conversations.info says a conversation is, for `place_label`.
+PLACE_DM = "im"
+PLACE_GROUP_DM = "mpim"
+PLACE_CHANNEL = "channel"
+#: Characters a display name may not bring into the label: the person sets the
+#: name, so the brackets and the @ the label is made of are taken out of it.
+_LABEL_DROPS = re.compile(r"[<>()\[\]@\x00-\x1f\x7f]")
+_EMAIL_SHAPE = re.compile(r"[^\s<>()@]+@[^\s<>()@]+\.[^\s<>()@]+")
+#: A display name past this is cut: one line names a person, not a paragraph.
+_LABEL_NAME_MAX = 80
 # Buttons, menus and a slash command (2026-11-14). Slack sends none of these as
 # events. A click on something the agent posted is a `block_actions` payload;
 # `/its-name words` is a slash command. Over HTTP the room's relay forwards a
@@ -233,6 +265,42 @@ def _app_name(event: dict) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return str(event.get("bot_id"))
+
+
+def sender_label(user: str, name: str, email: str) -> str:
+    """How the model is told who sent a person's message (Message.sender_label):
+    `Name <email>`, else `Name <@U...>`, else `<@U...>`. The email is the
+    workspace's own record and the part a rule is matched on; the name is the
+    person's to set, so it is cleaned of the characters the label uses."""
+    clean = " ".join(_LABEL_DROPS.sub(" ", name or "").split())[:_LABEL_NAME_MAX].strip()
+    address = (email or "").strip()
+    if not _EMAIL_SHAPE.fullmatch(address):
+        address = ""
+    if clean and address:
+        return f"{clean} <{address}>"
+    if address:
+        return f"<{address}>"
+    if clean:
+        return f"{clean} <@{user}>"
+    return f"<@{user}>"
+
+
+def place_label(channel: str, found: tuple[str, str] | None) -> str:
+    """Where a person's message was said, for the end of their label: `in #name`,
+    `in a direct message`, `in a group message`, or `in <#C...>` when the channel
+    could not be named. `found` is (kind, name) from conversations.info, or None
+    when it could not be read. A name is cleaned of the characters the label is
+    made of, like a display name."""
+    if found is not None:
+        kind, name = found
+        if kind == PLACE_DM:
+            return "in a direct message"
+        if kind == PLACE_GROUP_DM:
+            return "in a group message"
+        clean = "".join(_LABEL_DROPS.sub(" ", name or "").split())[:_LABEL_NAME_MAX]
+        if clean:
+            return f"in #{clean.lstrip('#')}"
+    return f"in <#{channel}>"
 
 
 def _emoji_name(raw: object) -> str:
@@ -712,19 +780,48 @@ class SlackApi:
         found = response.get("message") if hasattr(response, "get") else None
         return found if isinstance(found, dict) else None
 
-    async def who(self, user: str) -> tuple[bool | None, str]:
-        """(is a program, the name Slack shows) for a user id; (None, "") when
-        users.info cannot be read, which the transport takes as "may be a
-        program" and never as "a person"."""
+    async def who(self, user: str) -> tuple[bool | None, str, str]:
+        """(is a program, the name Slack shows, the email) for a user id;
+        (None, "", "") when users.info cannot be read, which the transport takes
+        as "may be a program" and never as "a person". The email is "" when the
+        app lacks users:read.email or the account has none (a program's)."""
         try:
             response = await self._web.users_info(user=user)
         except Exception:  # noqa: BLE001
-            return None, ""
+            return None, "", ""
         info = response.get("user") if hasattr(response, "get") else None
         if not isinstance(info, dict):
-            return None, ""
-        name = info.get("real_name") or info.get("name") or ""
-        return bool(info.get("is_bot")), name if isinstance(name, str) else ""
+            return None, "", ""
+        profile = info.get("profile") if isinstance(info.get("profile"), dict) else {}
+        name = next(
+            (
+                found
+                for found in (info.get("real_name"), profile.get("display_name"), info.get("name"))
+                if isinstance(found, str) and found.strip()
+            ),
+            "",
+        )
+        email = profile.get("email")
+        return bool(info.get("is_bot")), name, email if isinstance(email, str) else ""
+
+    async def where(self, channel: str) -> tuple[str, str] | None:
+        """(kind, name) for a conversation id, from conversations.info: kind is
+        PLACE_DM, PLACE_GROUP_DM or PLACE_CHANNEL (a public or private channel),
+        name is "" for either DM. None when it cannot be read (no channels:read
+        or groups:read, or Slack said no)."""
+        try:
+            response = await self._web.conversations_info(channel=channel)
+        except Exception:  # noqa: BLE001
+            return None
+        info = response.get("channel") if hasattr(response, "get") else None
+        if not isinstance(info, dict):
+            return None
+        if info.get("is_im"):
+            return PLACE_DM, ""
+        if info.get("is_mpim"):
+            return PLACE_GROUP_DM, ""
+        name = info.get("name")
+        return PLACE_CHANNEL, name if isinstance(name, str) else ""
 
     async def download_file(self, url: str) -> bytes:
         """Fetch a Slack file's bytes. files.url_private requires the bot
@@ -1110,6 +1207,15 @@ class SlackTransport:
         # When each recent turn a person's reaction started was admitted
         # (monotonic seconds), for the hourly bound.
         self._reaction_window: list[float] = []
+        # user id -> (good until, (is a program, name, email)), least recently
+        # used first: what users.info said, for _PERSON_TTL_SECONDS (a failed
+        # read for _PERSON_RETRY_SECONDS). Bounded like `_seen`.
+        self._people: OrderedDict[str, tuple[float, tuple[bool | None, str, str]]] = (
+            OrderedDict()
+        )
+        # channel id -> (good until, what conversations.info said), the same
+        # way: _PLACE_TTL_SECONDS, a failed read for _PLACE_RETRY_SECONDS.
+        self._places: OrderedDict[str, tuple[float, tuple[str, str] | None]] = OrderedDict()
         # Workspace id for streaming into channels (auth.test at serve time).
         self.team_id: str | None = None
         # Own Slack user id (auth.test at serve time). None = unknown: the
@@ -1339,11 +1445,12 @@ class SlackTransport:
             files=[],
             sender=user,
             preface=(
-                f"(<@{user}> picked one of the choices you offered in Slack.{asked}\n"
+                f"(They picked one of the choices you offered in Slack.{asked}\n"
                 "Their pick follows; it is their answer, not a new question.)"
             ),
             asked_by=None,
             adopt=thread == ts,
+            person=True,
         )
 
     async def _handle_command(self, payload: dict, handler: Handler) -> None:
@@ -1393,6 +1500,7 @@ class SlackTransport:
             preface=None,
             asked_by=None,
             adopt=True,
+            person=True,
         )
 
     def listening_line(self) -> str:
@@ -1586,6 +1694,7 @@ class SlackTransport:
             # A person spoke to the agent here: the run of bot-woken turns is over.
             self._bot_turns.pop((channel, thread), None)
         sender = event.get("user")
+        sender = sender if isinstance(sender, str) and sender else None
         await self._turn(
             handler,
             channel=channel,
@@ -1593,10 +1702,11 @@ class SlackTransport:
             thread=thread,
             text=text,
             files=files,
-            sender=sender if isinstance(sender, str) else None,
+            sender=sender,
             # The thread's history is read again on every later turn, a person's
-            # included, and the model is not shown who sent what: say that these
-            # words are a program's, so they are never mistaken for a person's.
+            # included. A person's turn says who sent it through its label; a
+            # program's says in its words that they are a program's, so they are
+            # never mistaken for a person's.
             preface=(
                 f"(From the Slack app {_app_name(event)}, not a person.)" if from_bot else None
             ),
@@ -1604,6 +1714,7 @@ class SlackTransport:
                 _app_name(event) if from_bot and self.bot_mentions == BOTS_KNOWLEDGE else None
             ),
             adopt=thread == ts and self._addressed_to_us(event),
+            person=not from_bot,
         )
 
     async def _handle_reaction(self, event: dict, handler: Handler) -> None:
@@ -1649,7 +1760,7 @@ class SlackTransport:
             )
             return
         thread = message.get("thread_ts") or ts
-        program, shown = await self._api.who(reactor)
+        program, shown, _email = await self._who(reactor)
         asked_by: str | None = None
         if program is False:
             now = time.monotonic()
@@ -1665,7 +1776,8 @@ class SlackTransport:
             self._reaction_window = [*recent, now]
             # A person asked the agent here: the run of bot-woken turns is over.
             self._bot_turns.pop((channel, thread), None)
-            who = f"<@{reactor}>"
+            # Named by their label, on the line above (Agent._messages).
+            who = "They"
         else:
             if program is None:
                 logger.warning(
@@ -1704,6 +1816,7 @@ class SlackTransport:
             asked_by=asked_by,
             adopt=thread == ts,
             empty="(the message has no text)",
+            person=program is False,
         )
 
     async def _turn(
@@ -1720,17 +1833,24 @@ class SlackTransport:
         asked_by: str | None,
         adopt: bool,
         empty: str = "(image)",
+        person: bool = False,
     ) -> None:
         """One admitted ask, from its first reaction to the reply: `ts` is the
         message the marks go on, `thread` where the answer lands. `preface` is
         put above the words when they are not simply a person's message to the
-        agent; `asked_by` names a program whose ask runs knowledge-only."""
+        agent; `asked_by` names a program whose ask runs knowledge-only;
+        `person` says `sender` is a person, whose label the turn carries for
+        the model (a program's turn has none)."""
         # React immediately -- before any (possibly slow, sequential) image
         # downloads below -- so the sender sees SOMETHING within
         # milliseconds instead of after every attachment finishes fetching
         # (finding: a 4-image message left the sender staring at silence
         # for as long as the downloads took).
         await self._api.react(channel, ts, "eyes")
+        # After the mark, like the downloads: a person's first message in an
+        # hour waits on one users.info (and a channel's on one
+        # conversations.info), and the eyes should not.
+        label = await self._label(sender, channel) if person and sender else None
         images, notes = await self._gather_images(files)
         if notes:
             text = "\n".join(filter(None, [text, *notes]))
@@ -1761,7 +1881,13 @@ class SlackTransport:
         # it, failing identically each time (thread bricked).
         history_len = len(task.history)
         task.history.append(
-            Message(role="user", text=text, images=images or None, sender=sender)
+            Message(
+                role="user",
+                text=text,
+                images=images or None,
+                sender=sender,
+                sender_label=label,
+            )
         )
         task.state = TaskState.SUBMITTED
 
@@ -1874,6 +2000,56 @@ class SlackTransport:
 
         if task.reason_code in {ReasonCode.HUMAN_INPUT_REQUIRED, ReasonCode.ESCALATION}:
             await self._escalate(task, channel)
+
+    async def _who(self, user: str) -> tuple[bool | None, str, str]:
+        """(is a program, name, email) for a user id, read from users.info at
+        most once per _PERSON_TTL_SECONDS (a failed read again after
+        _PERSON_RETRY_SECONDS). A read that cannot be made at all is (None, "",
+        ""), which a reaction takes as "may be a program", never "a person"."""
+        now = time.monotonic()
+        cached = self._people.get(user)
+        if cached is not None and cached[0] > now:
+            self._people.move_to_end(user)
+            return cached[1]
+        try:
+            found = await self._api.who(user)
+        except Exception:  # noqa: BLE001 -- an api without users.info names nobody
+            found = (None, "", "")
+        ttl = _PERSON_RETRY_SECONDS if found[0] is None else _PERSON_TTL_SECONDS
+        self._people[user] = (now + ttl, found)
+        self._people.move_to_end(user)
+        while len(self._people) > _SEEN_CAP:
+            self._people.popitem(last=False)
+        return found
+
+    async def _where(self, channel: str) -> tuple[str, str] | None:
+        """What conversations.info says `channel` is, at most once per
+        _PLACE_TTL_SECONDS (a failed read again after _PLACE_RETRY_SECONDS). A
+        1:1 DM's id starts with D and is never looked up."""
+        if channel.startswith("D"):
+            return PLACE_DM, ""
+        now = time.monotonic()
+        cached = self._places.get(channel)
+        if cached is not None and cached[0] > now:
+            self._places.move_to_end(channel)
+            return cached[1]
+        try:
+            found = await self._api.where(channel)
+        except Exception:  # noqa: BLE001 -- an api without conversations.info names no channel
+            found = None
+        ttl = _PLACE_RETRY_SECONDS if found is None else _PLACE_TTL_SECONDS
+        self._places[channel] = (now + ttl, found)
+        self._places.move_to_end(channel)
+        while len(self._places) > _SEEN_CAP:
+            self._places.popitem(last=False)
+        return found
+
+    async def _label(self, user: str, channel: str) -> str:
+        """The person's label for the model (`sender_label`), ending with where
+        they said it (`place_label`)."""
+        _program, name, email = await self._who(user)
+        place = place_label(channel, await self._where(channel))
+        return f"{sender_label(user, name, email)}, {place}"
 
     def _remember_thread(self, key: tuple, task: Task) -> None:
         self._threads[key] = task

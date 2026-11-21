@@ -11,6 +11,8 @@ from daedalus.transports.slack import (
     SlackReactionApprover,
     SlackTransport,
     current_slack_requester,
+    place_label,
+    sender_label,
 )
 
 CH = "C0MAIN"
@@ -2353,13 +2355,13 @@ class ReactingApi(AddressingApi):
     def __init__(self):
         super().__init__()
         self.messages: dict[tuple[str, str], dict] = {}
-        self.people: dict[str, tuple[bool | None, str]] = {}
+        self.people: dict[str, tuple[bool | None, str, str]] = {}
 
     async def message(self, channel, ts):
         return self.messages.get((channel, ts))
 
     async def who(self, user):
-        return self.people.get(user, (False, ""))
+        return self.people.get(user, (False, "", ""))
 
 
 def make_reacting(emoji="ticket", **kwargs):
@@ -2381,18 +2383,20 @@ def reaction(
 
 
 async def test_a_named_emoji_asks_the_agent_about_that_message():
-    """The message is read, the reactor is the requester, the marks go on the
-    message and the answer in its thread. Slack's spelling of an emoji (skin
-    tone and all) matches the plain name."""
+    """The message is read, the reactor is the requester and is named by their
+    label, the marks go on the message and the answer in its thread. Slack's
+    spelling of an emoji (skin tone and all) matches the plain name."""
     transport, api, handler = make_reacting()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
     api.messages[(CH, "80.5")] = {
         "ts": "80.5", "thread_ts": "80.0", "user": "U2", "text": "the deploy is stuck",
     }
     await transport.handle_event(reaction("ticket::skin-tone-2", ts="80.5"), handler)
     asked = handler.tasks[0].history[0]
     assert asked.sender == "U1"
+    assert asked.sender_label == f"Ada Lovelace <ada@example.com>, in <#{CH}>"
     assert asked.text == (
-        "(<@U1> reacted with :ticket: to a message <@U2> wrote. The reaction is the ask: "
+        "(They reacted with :ticket: to a message <@U2> wrote. The reaction is the ask: "
         "nobody wrote you a new message. The message follows.)\nthe deploy is stuck"
     )
     assert ("80.5", "eyes") in api.reacts and ("80.5", "white_check_mark") in api.reacts
@@ -2454,7 +2458,7 @@ async def test_a_programs_reaction_is_answered_as_a_programs_mention_is():
     from daedalus.tools.colleagues import ASKED_BY_KEY, DEPTH_KEY
 
     transport, api, handler = make_reacting()
-    api.people[ASKER_USER] = (True, "Scout")
+    api.people[ASKER_USER] = (True, "Scout", "")
     api.messages[(CH, "84.0")] = {"ts": "84.0", "user": "U2", "text": "disk is full"}
     api.messages[(CH, "84.1")] = {"ts": "84.1", "user": "U2", "text": "again"}
     await transport.handle_event(reaction(ts="84.0", user=ASKER_USER), handler)
@@ -2462,12 +2466,13 @@ async def test_a_programs_reaction_is_answered_as_a_programs_mention_is():
     assert handler.tasks[0].history[0].text.startswith(
         "(The Slack app Scout, not a person, reacted with :ticket: to a message <@U2> wrote."
     )
-    api.people["UWHO"] = (None, "")
+    assert handler.tasks[0].history[0].sender_label is None
+    api.people["UWHO"] = (None, "", "")
     await transport.handle_event(reaction(ts="84.1", user="UWHO"), handler)
     assert handler.marks[1][ASKED_BY_KEY] == "UWHO"
 
     transport, api, handler = make_reacting(bot_mentions="off")
-    api.people[ASKER_USER] = (True, "Scout")
+    api.people[ASKER_USER] = (True, "Scout", "")
     api.messages[(CH, "84.0")] = {"ts": "84.0", "user": "U2", "text": "disk is full"}
     await transport.handle_event(reaction(ts="84.0", user=ASKER_USER), handler)
     assert handler.tasks == []
@@ -2526,8 +2531,220 @@ async def test_the_reacted_message_is_read_by_thread_then_by_reaction():
         async def users_info(self, user):
             return {"user": {"is_bot": user == "UBOT", "real_name": "Scout"}}
 
+        async def conversations_info(self, channel):
+            if channel == "CGONE":
+                raise RuntimeError("channel_not_found")
+            return {"channel": {
+                "D1": {"is_im": True},
+                "G1": {"is_mpim": True, "name": "mpdm-ada--grace-1"},
+                "C1": {"is_channel": True, "name": "sre-requests"},
+            }[channel]}
+
     assert (await SlackApi(Web()).message("C1", "1.5"))["thread_ts"] == "1.0"
+    assert await SlackApi(Web()).where("D1") == ("im", "")
+    assert await SlackApi(Web()).where("G1") == ("mpim", "")
+    assert await SlackApi(Web()).where("C1") == ("channel", "sre-requests")
+    assert await SlackApi(Web()).where("CGONE") is None
+    assert await SlackApi(object()).where("C1") is None
     assert (await SlackApi(Web(refuse_thread=True)).message("C1", "1.5"))["text"] == "by reaction"
-    assert await SlackApi(Web()).who("UBOT") == (True, "Scout")
-    assert await SlackApi(Web()).who("U1") == (False, "Scout")
-    assert await SlackApi(object()).who("U1") == (None, "")
+    assert await SlackApi(Web()).who("UBOT") == (True, "Scout", "")
+    assert await SlackApi(Web()).who("U1") == (False, "Scout", "")
+    assert await SlackApi(object()).who("U1") == (None, "", "")
+
+
+# ---- who sent it (2026-11-20) ------------------------------------------------
+#
+# The model was never told who sent a person's message: the user id rode on the
+# Message for the journal only, so an owner's rule about named people had nothing
+# to be kept against. Each person's turn now carries a label from users.info,
+# `Name <email>`, which the prompt shows as the message's first line (test_agent's
+# prompt tests); a program's turn carries none. One lookup per person an hour.
+
+
+class NamingApi(AddressingApi):
+    """users.info and conversations.info as the transport sees them, with every
+    lookup counted."""
+
+    def __init__(self):
+        super().__init__()
+        self.people: dict[str, tuple[bool | None, str, str]] = {}
+        self.lookups: list[str] = []
+        self.places: dict[str, tuple[str, str] | None] = {CH: ("channel", "sre-requests")}
+        self.place_lookups: list[str] = []
+
+    async def who(self, user):
+        self.lookups.append(user)
+        return self.people.get(user, (None, "", ""))
+
+    async def where(self, channel):
+        self.place_lookups.append(channel)
+        return self.places.get(channel)
+
+
+def make_naming(**kwargs):
+    api = NamingApi()
+    transport = SlackTransport(CH, bot_token="xoxb", app_token="xapp", api=api, **kwargs)
+    transport.user_id, transport.bot_id = SELF_ID, SELF_BOT
+    return transport, api, MarkHandler()
+
+
+def said(text, ts, user="U1"):
+    """A person's message that mentions the agent in a channel."""
+    return event(f"<@{SELF_ID}> {text}", ts=ts, channel_type="channel", user=user)
+
+
+async def test_a_persons_message_says_who_sent_it_and_keeps_their_words():
+    transport, api, handler = make_naming()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    await transport.handle_event(said("deploy status?", "300.0"), handler)
+    asked = handler.tasks[0].history[0]
+    assert asked.sender == "U1"
+    assert asked.sender_label == "Ada Lovelace <ada@example.com>, in #sre-requests"
+    assert asked.text == "deploy status?"
+
+
+async def test_without_an_email_or_any_answer_the_label_falls_back_to_the_slack_id():
+    """No users:read.email: the name and the Slack id. users.info unreadable:
+    the Slack id alone. Either way the turn is answered."""
+    transport, api, handler = make_naming()
+    api.people["U1"] = (False, "Ada Lovelace", "")
+    await transport.handle_event(said("one", "301.0"), handler)
+    await transport.handle_event(said("two", "301.1", user="U2"), handler)
+    assert [t.history[0].sender_label for t in handler.tasks] == [
+        "Ada Lovelace <@U1>, in #sre-requests",
+        "<@U2>, in #sre-requests",
+    ]
+    assert ("301.1", "white_check_mark") in api.reacts
+
+
+def test_a_display_name_cannot_pass_itself_off_as_the_label():
+    """The person sets their display name; the workspace sets the email. The
+    characters the label is made of are taken out of the name, and an email
+    Slack did not give in its own shape is not used."""
+    assert sender_label("U9", "Ada Lovelace <ada@example.com>", "bob@example.com") == (
+        "Ada Lovelace ada example.com <bob@example.com>"
+    )
+    assert sender_label("U9", "Bob\n(admin)", "not an email") == "Bob admin <@U9>"
+    assert sender_label("U9", "", "bob@example.com") == "<bob@example.com>"
+    assert sender_label("U9", "  ", "") == "<@U9>"
+
+
+async def test_users_info_is_read_once_per_person_and_a_failed_read_again_soon(monkeypatch):
+    from daedalus.transports import slack as slack_transport
+
+    transport, api, handler = make_naming()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    for n in range(3):
+        await transport.handle_event(said(f"ask {n}", f"31{n}.0"), handler)
+    assert api.lookups == ["U1"]
+
+    # A read that failed is tried again after a short wait, not after the hour.
+    monkeypatch.setattr(slack_transport, "_PERSON_RETRY_SECONDS", 0.0)
+    await transport.handle_event(said("first", "320.0", user="U2"), handler)
+    await transport.handle_event(said("second", "320.1", user="U2"), handler)
+    assert api.lookups == ["U1", "U2", "U2"]
+
+    # And a good answer is kept no longer than its hour.
+    monkeypatch.setattr(slack_transport, "_PERSON_TTL_SECONDS", 0.0)
+    api.people["U3"] = (False, "Grace Hopper", "grace@example.com")
+    await transport.handle_event(said("first", "330.0", user="U3"), handler)
+    await transport.handle_event(said("second", "330.1", user="U3"), handler)
+    assert api.lookups == ["U1", "U2", "U2", "U3", "U3"]
+
+
+async def test_a_programs_message_names_no_person():
+    """A program's words keep their own preface and look nobody up."""
+    transport, api, handler = make_naming()
+    await transport.handle_event(bot_mention("status?", ts="340.0"), handler)
+    asked = handler.tasks[0].history[0]
+    assert asked.sender_label is None
+    assert asked.text == "(From the Slack app Scout, not a person.)\nstatus?"
+    assert api.lookups == []
+
+
+async def test_a_persons_reaction_is_labelled_from_the_same_lookup():
+    """The program check and the label share one users.info."""
+    transport, api, handler = make_naming(wake_emoji="ticket")
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    api.messages = {(CH, "350.0"): {"ts": "350.0", "user": "U2", "text": "stuck"}}
+
+    async def message(channel, ts):
+        return api.messages.get((channel, ts))
+
+    api.message = message
+    await transport.handle_event(reaction(ts="350.0"), handler)
+    asked = handler.tasks[0].history[0]
+    assert asked.sender_label == "Ada Lovelace <ada@example.com>, in #sre-requests"
+    assert asked.text.startswith("(They reacted with :ticket: to a message <@U2> wrote.")
+    assert api.lookups == ["U1"]
+
+
+# ---- where it was said (2026-11-20) ------------------------------------------
+#
+# A rule can name Slack channels, so the label ends with the conversation: the
+# channel's name, a direct message, a group message, or the channel's id when
+# conversations.info cannot name it.
+
+
+async def test_the_label_says_where_it_was_said():
+    transport, api, handler = make_naming()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    api.places["G0GROUP"] = ("mpim", "")
+    await transport.handle_event(said("in the channel", "360.0"), handler)
+    await transport.handle_event(
+        event("just us", ts="360.1", channel="D0DM", channel_type="im"), handler
+    )
+    await transport.handle_event(
+        event("all of us", ts="360.2", channel="G0GROUP", channel_type="mpim"), handler
+    )
+    assert [t.history[0].sender_label for t in handler.tasks] == [
+        "Ada Lovelace <ada@example.com>, in #sre-requests",
+        "Ada Lovelace <ada@example.com>, in a direct message",
+        "Ada Lovelace <ada@example.com>, in a group message",
+    ]
+    # A direct message's id says what it is: only the other two were looked up.
+    assert api.place_lookups == [CH, "G0GROUP"]
+
+
+def test_a_channel_that_cannot_be_named_is_given_by_its_id():
+    """conversations.info unreadable, or a name made only of the characters the
+    label uses: the channel's id, which a rule naming channels can't match, so the
+    agent can't mistake it for one."""
+    assert place_label("C0123", None) == "in <#C0123>"
+    assert place_label("C0123", ("channel", "<>()")) == "in <#C0123>"
+    assert place_label("C0123", ("channel", "ops")) == "in #ops"
+    assert place_label("D0123", ("im", "")) == "in a direct message"
+    assert place_label("G0123", ("mpim", "mpdm-a--b-1")) == "in a group message"
+
+
+async def test_a_channel_is_looked_up_once_an_hour_and_a_failed_read_again_soon(monkeypatch):
+    from daedalus.transports import slack as slack_transport
+
+    # Open to every channel the app is in, so the two below are answered.
+    api = NamingApi()
+    transport = SlackTransport(channels=[], bot_token="xoxb", app_token="xapp", api=api)
+    transport.user_id, transport.bot_id = SELF_ID, SELF_BOT
+    handler = MarkHandler()
+    api.people["U1"] = (False, "Ada Lovelace", "ada@example.com")
+    for n in range(3):
+        await transport.handle_event(said(f"ask {n}", f"37{n}.0"), handler)
+    assert api.place_lookups == [CH]
+
+    # A read that failed is tried again after a short wait, not after the hour.
+    monkeypatch.setattr(slack_transport, "_PLACE_RETRY_SECONDS", 0.0)
+    api.places["C0FAIL"] = None
+    for ts in ("380.0", "380.1"):
+        await transport.handle_event(
+            event(f"<@{SELF_ID}> hi", ts=ts, channel="C0FAIL", channel_type="channel"), handler
+        )
+    assert api.place_lookups == [CH, "C0FAIL", "C0FAIL"]
+    assert handler.tasks[-1].history[0].sender_label.endswith(", in <#C0FAIL>")
+
+    # And a good answer is kept no longer than its hour.
+    monkeypatch.setattr(slack_transport, "_PLACE_TTL_SECONDS", 0.0)
+    api.places["C0NEW"] = ("channel", "ops")
+    for ts in ("390.0", "390.1"):
+        await transport.handle_event(
+            event(f"<@{SELF_ID}> hi", ts=ts, channel="C0NEW", channel_type="channel"), handler
+        )
+    assert api.place_lookups == [CH, "C0FAIL", "C0FAIL", "C0NEW", "C0NEW"]

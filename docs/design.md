@@ -1,7 +1,7 @@
 # Daedalus — design
 
 **Status: IMPLEMENTED AND RELEASED.** This began as a pre-implementation design
-doc and is kept as the architectural rationale, not as a plan. daedalus 0.8.0 has
+doc and is kept as the architectural rationale, not as a plan. daedalus 0.9.0 has
 shipped; §8 was written against live behaviour. Where this document and the code
 disagree, the code is right — `src/daedalus/protocols.py` is the authority on the
 Protocol seams.
@@ -435,7 +435,13 @@ back. Persona constant, transport variable:
   with knowledge-only tools and no borrowed credential, because some apps post
   words an outsider wrote; `full` gives it the tools a person's mention gets;
   `off` drops it. The agent's own words never wake it, a bot's words are
-  labelled as a program's in the thread's history, and two bounds end a loop:
+  labelled as a program's in the thread's history, a person's turn names who
+  sent it and where (the prompt shows `(From Name <email>, in #channel.)` as its
+  first line, from users.info read once an hour per person and conversations.info
+  once an hour per channel; `Name <@U...>` without `users:read.email`, `<@U...>`
+  when users.info cannot be read; `in a direct message` or `in a group message`
+  for a DM, `in <#C...>` when the channel cannot be named; the law hooks and
+  recall still get the person's words alone), and two bounds end a loop:
   three bot-woken turns in a row per thread (a person speaking to the agent
   there starts the count again) and thirty an hour per sending app. A reaction
   wakes the agent only when `SLACK_WAKE_EMOJI` names its emoji (comma-separated;
