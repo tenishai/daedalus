@@ -1,0 +1,31 @@
+# A specialist seeded from a transcript diary (#265). The memory volume carries three
+# files: techne.db (what this agent learns), daffyne.duckdb (an index of the operator's own
+# sessions about the subject, built with kinds [text, thinking] and redact on) and
+# daffyne.yaml (its config; the runtime entrypoint exports DAFFYNE_CONFIG when it is there).
+# `recall_sources` names the installed reader; techne consults it on every question, and
+# each row reaches the model with its date and file anchor. See `daedalus guide diary`.
+name: diarist
+card: agent-card.json
+persona: persona.md
+
+model:
+  id: ${DIARIST_MODEL:-anthropic/claude-sonnet-4-5}
+  max_tokens: 2048
+
+transports:
+  - kind: cli
+
+tools:
+  provider: none
+  allow: []
+
+memory:
+  personal: techne
+  home: /techne
+  recall_sources: [daffyne]
+
+approvals:
+  ceiling:
+    write: false
+  escalation:
+    route: cli

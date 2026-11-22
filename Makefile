@@ -20,7 +20,10 @@ AR_IMAGE ?=  # e.g. <location>-docker.pkg.dev/<project>/<repo>/daedalus-runtime
 # AR_TOKEN for a private Artifact Registry index) to build without them.
 INDEX_URL ?=
 AR_TOKEN ?=
+# DIARY=1 adds the daffyne recall source (#265): a sibling checkout, or the index when INDEX_URL is set.
+DIARY ?=
 DEPS := $(if $(INDEX_URL),--build-arg EXTRA_INDEX_URL=$(INDEX_URL) --build-arg AR_TOKEN=$(AR_TOKEN),--build-context techne=../techne --build-context liminal=../liminal)
+DEPS += $(if $(DIARY),$(if $(INDEX_URL),--build-arg DIARY=1,--build-context daffyne=../daffyne),)
 
 image:
 	docker build --platform linux/amd64 -f docker/Dockerfile $(DEPS) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .

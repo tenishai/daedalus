@@ -2,10 +2,12 @@ import warnings
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from daedalus.bundle import AgentSpec, Bundle, BundleError, interpolate
 
 GOLDEN = Path(__file__).parent / "golden" / "greeter"
+DIARIST = Path(__file__).parent / "golden" / "diarist"
 
 
 def test_golden_bundle_loads(monkeypatch):
@@ -39,6 +41,19 @@ def test_golden_bundle_round_trips(monkeypatch):
     """load -> serialize -> load again -> identical spec."""
     monkeypatch.delenv("GREETER_MODEL", raising=False)
     spec = Bundle.load(GOLDEN).spec
+    assert AgentSpec.model_validate(spec.model_dump()) == spec
+
+
+def test_diarist_golden_names_its_diary_and_round_trips(monkeypatch):
+    """#265: the worked example of a specialist seeded from a transcript diary."""
+    monkeypatch.delenv("DIARIST_MODEL", raising=False)
+    bundle = Bundle.load(DIARIST)
+    spec = bundle.spec
+    assert spec.name == "diarist"
+    assert spec.memory.personal == "techne"
+    assert spec.memory.home == "/techne"
+    assert spec.memory.recall_sources == ["daffyne"]
+    assert "Never speak a diary row as your own" in bundle.persona
     assert AgentSpec.model_validate(spec.model_dump()) == spec
 
 
@@ -125,6 +140,18 @@ def test_transport_extras_are_options_not_warnings(tmp_path):
         bundle = Bundle.load(tmp_path)
     assert bundle.spec.transports[0].options() == {"channel": "#ops"}
     assert not caught
+
+
+def test_memory_recall_sources_default_empty_and_take_names():
+    """#265: a bundle names the installed recall sources its store may consult."""
+    base = {"name": "x", "card": "c.json", "persona": "p.md", "model": {"id": "m"}}
+    assert AgentSpec.model_validate(base).memory.recall_sources == []
+    spec = AgentSpec.model_validate(
+        {**base, "memory": {"personal": "techne", "recall_sources": ["daffyne"]}}
+    )
+    assert spec.memory.recall_sources == ["daffyne"]
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate({**base, "memory": {"recall_sources": "daffyne"}})
 
 
 def test_memory_team_outbox_is_rejected_with_a_clear_message():

@@ -103,6 +103,31 @@ def _utc_now() -> datetime:
 # English names by index, not strftime("%A"), which follows the pod's locale.
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _CLOCK_HEADING = "## Clock"
+# Recalled memory is framed as what it is (#169: an unlabelled "Recalled context"
+# block lost to a persona's "say I don't know yet" rule on Gemini Flash) and each row
+# says where it came from (#265: a diary row is someone else's words from the past,
+# with a date and a file anchor, and must never be spoken as the agent's own).
+_RECALL_HEADING = "## What you remember"
+_RECALL_INTRO = (
+    "Facts you were taught or learned earlier, and rows from the diaries you were given. "
+    "A line marked (memory) is something you know: treat it as known and say it is "
+    "remembered. A line marked with another source, a date and a link is someone else's "
+    "words from that time: cite it with its date, never claim it as your own experience."
+)
+
+
+def _provenance(hit: dict) -> str:
+    """`(memory)` for this agent's own knowledge; `(<source>, <date>, <url>)` for a row
+    another store or a recall source returned, with the date and link when it has them."""
+    source = str(hit.get("source") or "local")
+    parts = ["memory" if source == "local" else source]
+    when = str(hit.get("ts") or "")[:10]
+    if when:
+        parts.append(when)
+    url = hit.get("source_url")
+    if url:
+        parts.append(str(url))
+    return "(" + ", ".join(parts) + ")"
 # Issue #184: with the answer in the list above, a model still counted back from
 # the wrong day when a relative date sat inside a task, unless it wrote today's date first.
 _CLOCK_INSTRUCTIONS = (
@@ -469,8 +494,19 @@ class Agent:
                 ) from exc
             from daedalus.memory.techne import TechneMemoryStore
 
-            return TechneMemoryStore(home=spec.home)
+            return TechneMemoryStore(home=spec.home, recall_sources=spec.recall_sources)
         return NoMemory()
+
+    async def _recall(self, query: str) -> list[dict]:
+        """Hits with where each came from: the store's recall_hits when it has one
+        (protocols card: optional, unannotated), else its recall list, every hit local.
+        Rows without content are dropped; nothing here raises into handle_task."""
+        recall_hits = getattr(self.memory, "recall_hits", None)
+        if recall_hits is not None:
+            found = await recall_hits(query)
+        else:
+            found = [{"content": c, "source": "local"} for c in await self.memory.recall(query)]
+        return [hit for hit in found if isinstance(hit, dict) and hit.get("content")]
 
     async def _publish_memory(self) -> None:
         """Send this task's tagged facts to the team pool, once, at task end (#228).
@@ -833,7 +869,7 @@ class Agent:
         query = task.metadata.get(RECALL_KEY)
         if not (isinstance(query, str) and query.strip()):
             query = task.user_text()
-        recalled = await self.memory.recall(query)
+        recalled = await self._recall(query)
         if recalled:
             self._emit("recall", count=len(recalled))
         # The per-answer colleague limits (#149) start HERE, after the system-task
@@ -1543,7 +1579,7 @@ class Agent:
             )
 
     def _messages(
-        self, task: Task, recalled: list[str], notices: list[str] | None = None
+        self, task: Task, recalled: list[dict], notices: list[str] | None = None
     ) -> list[dict]:
         # The model has no clock of its own: without this line one agent said it
         # didn't know the date and another invented one (issue #171). Read when the
@@ -1566,7 +1602,9 @@ class Agent:
         if index:
             system += index
         if recalled:
-            system += "\n\n## Recalled context\n" + "\n".join(f"- {item}" for item in recalled)
+            system += f"\n\n{_RECALL_HEADING}\n{_RECALL_INTRO}\n" + "\n".join(
+                f"- {_provenance(hit)} {hit['content']}" for hit in recalled
+            )
         # Where the conversation is happening, when a transport says so. The
         # Slack transport stamps its wake mode (an enum, never free text: task
         # metadata rides in from the wire on a2a, so only a known value turns

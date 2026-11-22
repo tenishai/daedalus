@@ -1,0 +1,12 @@
+{
+  "name": "diarist",
+  "description": "A golden-test specialist that answers from a transcript diary of past sessions.",
+  "version": "0.1.0",
+  "skills": [
+    {
+      "id": "recall-history",
+      "name": "Recall history",
+      "description": "Answers what was said and decided before, with the date and the file anchor."
+    }
+  ]
+}

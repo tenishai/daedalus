@@ -592,6 +592,13 @@
           "default": null,
           "title": "Home"
         },
+        "recall_sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recall Sources",
+          "type": "array"
+        },
         "team": {
           "const": "none",
           "default": "none",

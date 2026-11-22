@@ -22,6 +22,7 @@ _DIR = Path(__file__).parent
 MANIFEST: dict[str, str] = {
     "welcome": "What daedalus is, what it can do for you, every option and why you'd pick it.",
     "design": "The design rationale: bundle schema, engines, transports, approvals.",
+    "diary": "Seeding a specialist from a transcript diary: build the index, mount it, name it.",
 }
 
 
