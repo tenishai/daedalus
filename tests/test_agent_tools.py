@@ -227,6 +227,35 @@ def test_the_withheld_note_is_added_once():
     assert messages[0]["content"] == "persona"  # the caller's list is not mutated
 
 
+async def test_a_wildcard_gate_with_no_approver_withholds_every_tool(tmp_path):
+    """#268: a read-only agent can keep every tool behind a `*` gate. With no approver
+    wired (DenyAll), the pattern is matched by fnmatch and every tool is withheld,
+    not offered and refused."""
+    llm = ScriptedLLM("nothing to use")
+    tools = FakeTools([READ_SPEC, WRITE_SPEC])
+    gates = "    - match: '*'\n      require: plan_approval\n"
+    agent = make_agent(tmp_path, allow=["files.*"], gates=gates, llm=llm, tools=tools)
+    events: list[dict] = []
+    agent.on_event = events.append
+    await agent.handle_task(Task.from_text("hi"))
+    assert llm.tools_seen[0] is None  # nothing offered
+    assert {"type": "tools_withheld", "names": ["files.read", "files.write"]} in events
+
+
+async def test_a_wired_approver_makes_every_gate_approvable(tmp_path):
+    """#268, documented in docs/arch/approvals.md: the approver is per agent, not
+    per gate. Once one is wired, a `*` gate withholds nothing; each call asks."""
+    llm = ScriptedLLM("done")
+    gates = "    - match: '*'\n      require: plan_approval\n"
+    agent = make_agent(
+        tmp_path, allow=["files.*"], gates=gates, llm=llm,
+        tools=FakeTools([READ_SPEC, WRITE_SPEC]), approver=RecordingApprover(False),
+    )
+    await agent.handle_task(Task.from_text("hi"))
+    offered = [t["function"]["name"] for t in llm.tools_seen[0]]
+    assert offered == ["files__read", "files__write"]
+
+
 async def test_gate_approved_executes_and_approver_saw_the_plan(tmp_path):
     llm = ScriptedLLM(
         tool_turn(ToolCall(id="1", name="files__write", arguments={"path": "/a"})),
@@ -292,10 +321,14 @@ async def test_event_stream_traces_the_whole_tool_turn(tmp_path):
     agent.on_event = events.append
     await agent.handle_task(Task.from_text("read /x"))
     kinds = [e["type"] for e in events]
-    assert kinds == ["tools_offered", "reasoning", "tool_call", "tool_result"]
+    # A usage event follows every model call, and task_usage ends the task (#268).
+    assert kinds == [
+        "tools_offered", "usage", "reasoning", "tool_call", "tool_result", "usage",
+        "task_usage",
+    ]
     assert events[0] == {"type": "tools_offered", "names": ["files.read"]}
-    assert events[2] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}
-    assert events[3]["content"] == "contents"
+    assert events[3] == {"type": "tool_call", "name": "files.read", "arguments": {"path": "/x"}}
+    assert events[4]["content"] == "contents"
 
 
 async def test_salvaged_calls_emit_a_salvage_event(tmp_path):
@@ -1071,3 +1104,35 @@ def test_mcp_result_text_includes_embedded_resources():
         "[resource repo://acme/infra/contents/logo.png (image/png)] binary, not shown"
     )
     assert result_text([]) == "(no text content)"
+
+
+async def test_mcp_call_marks_its_outcome_from_the_blocks():
+    """#268: empty is judged from the content blocks, not from result_text's
+    "(no text content)" stand-in, and a body starting "error:" is a result."""
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from daedalus.tools.mcp import MCPToolProvider
+
+    class Session:
+        def __init__(self, content):
+            self.content = content
+
+        async def call_tool(self, tool, payload):
+            return NS(content=self.content, isError=False)
+
+    async def outcome(content):
+        provider = MCPToolProvider([{"name": "files", "command": ["true"]}])
+        provider._worker, provider._ready = object(), asyncio.Event()
+        provider._ready.set()
+        provider._sessions["files"] = Session(content)
+        result = await provider.call("files.read", {})
+        return str(result), result.outcome
+
+    assert await outcome([]) == ("(no text content)", "empty")
+    assert (await outcome([NS(type="text", text="  ")]))[1] == "empty"
+    assert (await outcome([NS(type="text", text="error: 2 hits")]))[1] == "ok"
+    resource = NS(type="resource", resource=NS(uri="f://a", mimeType="", text=""))
+    assert (await outcome([resource]))[1] == "ok"
+    # An image says nothing to the model as text, but it is content.
+    assert await outcome([NS(type="image", data="...")]) == ("(no text content)", "ok")

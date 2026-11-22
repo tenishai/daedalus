@@ -138,7 +138,10 @@ class ToolBridge:
             name = spec["name"] if spec else params.name
             self.turn.emit("tool_call", name=name, arguments=arguments)
             text = await self.turn.call_tool(name, arguments)
-            self.turn.emit("tool_result", name=name, content=text)
+            outcome = getattr(text, "outcome", None)  # #268
+            self.turn.emit("tool_result", name=name, content=text,
+                           **({"outcome": outcome} if outcome else {}))
+            text = str(text)
         return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
     async def _decide(self, arguments: dict[str, Any]) -> dict:

@@ -8,7 +8,7 @@ import json
 import click
 
 import daedalus
-from daedalus.agent import Agent
+from daedalus.agent import Agent, usage_text
 from daedalus.bundle import BundleError
 from daedalus.llm import LLMError
 from daedalus.scaffold import create_bundle
@@ -142,6 +142,10 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [memory] recalled {event['count']} item(s)")
     elif kind == "budget":
         click.echo(f"  [budget] -{event['spent']} tokens, {event['remaining']} remaining")
+    elif kind == "task_usage":
+        # One line per chat task (#268); the per-call `usage` events stay unprinted.
+        fields = {k: v for k, v in event.items() if k != "type"}
+        click.echo(f"  [usage] task: {usage_text(fields)}")
     elif kind == "truncated":
         click.echo(f"  [truncated] reply cut by max_tokens ({event['max_tokens']})")
     elif kind in _OPERATOR_GATE_EVENTS and "sub" in event:

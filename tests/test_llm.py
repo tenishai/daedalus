@@ -233,3 +233,55 @@ async def test_a_finished_reply_logs_nothing(sent, caplog):
     with caplog.at_level(logging.INFO, logger="daedalus.llm"):
         await client.complete([{"role": "user", "content": "one line"}])
     assert not [r for r in caplog.records if "reply truncated" in r.getMessage()]
+
+
+# ---- usage is reported honestly (#268) ------------------------------------
+
+
+async def test_missing_usage_is_none_not_zero(sent):
+    response = _response()
+    response.usage = None
+    sent.reply["response"] = response
+    result = await LiteLLMClient("openai/gpt-x").complete([{"role": "user", "content": "q"}])
+    assert result.input_tokens is None and result.output_tokens is None
+    assert result.cache_read_input_tokens is None
+    assert result.tokens_spent() == 0
+
+
+async def test_cache_counts_come_from_prompt_tokens_details(sent):
+    response = _response()
+    response.usage.prompt_tokens_details = SimpleNamespace(
+        cached_tokens=700, cache_write_tokens=200
+    )
+    sent.reply["response"] = response
+    result = await LiteLLMClient("openai/gpt-x").complete([{"role": "user", "content": "q"}])
+    assert result.input_tokens == 10
+    assert result.cache_read_input_tokens == 700
+    assert result.cache_creation_input_tokens == 200
+
+
+async def test_anthropic_usage_through_real_litellm_is_a_breakdown_not_an_addition(sent):
+    """Pins the litellm behaviour llm.py's comment relies on (Prudence, PR 269): for
+    Anthropic, prompt_tokens already includes cache reads and writes, and the cache
+    counts arrive in prompt_tokens_details. A litellm upgrade that changed either
+    would make the run record double-count or lose cache tokens."""
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    response = _response()
+    response.usage = AnthropicConfig().calculate_usage(
+        {
+            "input_tokens": 50,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 200,
+        },
+        None,
+    )
+    sent.reply["response"] = response
+    result = await LiteLLMClient("anthropic/claude-sonnet-5-5").complete(
+        [{"role": "user", "content": "q"}]
+    )
+    assert result.input_tokens == 1250  # 50 uncached + 1000 read + 200 written
+    assert result.output_tokens == 7
+    assert result.cache_read_input_tokens == 1000
+    assert result.cache_creation_input_tokens == 200

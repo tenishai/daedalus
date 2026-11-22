@@ -14,6 +14,16 @@ nothing said so -- a hook author who returned a denial was not denying and
 was not told. Unrecognised keys are logged and ignored; #51 argues for
 refusing them instead.
 
+A post_draft hook that wants the run record (#268, daedalus.run_record) is
+written `def post_draft(draft, record=None):`. Keep the default: a runtime
+older than #268 calls every post_draft with one argument, so a required second
+parameter raises there, a hook that raises blocks every reply, and agents in
+one room run mixed runtime versions. record is None on such a runtime and on
+the learnings lane. What a hook returns replaces the reply in history, so text
+it adds is replayed to the model next turn, sent to an agent that consulted
+this one, and fed to the learnings summary: a check that reads the record and
+only logs or blocks, returning the draft unchanged, is safe; a footer is not.
+
 Boot-only loading, image tools first (arc3d Task 5): `load` also accepts an
 `overlay_dir` -- the persistent, fast-lane-delivered tool directory on the
 agent's own volume (daedalus.agent.Agent._tool_overlay_dir). Image tools
@@ -28,6 +38,7 @@ than silently replacing or running alongside the hook it collides with."""
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -124,15 +135,35 @@ def _timed_out() -> int:
     return _TIMEOUTS
 
 
-async def _call_hook(hook, argument):
-    """Run `hook(argument)` on the hook pool under HOOK_TIMEOUT_S.
+def _wants_run_record(hook) -> bool:
+    """Does this post_draft take a second positional argument, the run record
+    (#268)? A one-parameter hook keeps working unchanged. A signature that
+    cannot be read counts as one parameter."""
+    try:
+        params = inspect.signature(hook).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in params:
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= 2
+
+
+async def _call_hook(hook, *arguments):
+    """Run `hook(*arguments)` on the hook pool under HOOK_TIMEOUT_S.
 
     The thread is NOT cancelled on timeout -- nothing can cancel a running
     thread in Python -- so the hook body runs to completion on a pool that
     exists to contain exactly that."""
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
-        loop.run_in_executor(_HOOK_POOL, hook, argument), HOOK_TIMEOUT_S
+        loop.run_in_executor(_HOOK_POOL, hook, *arguments), HOOK_TIMEOUT_S
     )
 
 
@@ -259,14 +290,18 @@ class Enforcement:
                 return PreTaskResult(True, notices, f"blocked by {filename}: {reason}")
         return PreTaskResult(False, notices, "")
 
-    async def run_post_draft(self, draft: str) -> PostDraftResult:
+    async def run_post_draft(self, draft: str, record=None) -> PostDraftResult:
+        """`record` is the RunRecord of the run that produced `draft` (#268), or
+        None where there was no agent run (the learnings lane). A hook defined as
+        `post_draft(draft, record=None)` receives it; `post_draft(draft)` does not."""
         text = draft
         for filename, mod in self._modules:
             hook = getattr(mod, "post_draft", None)
             if not callable(hook):
                 continue
+            arguments = (text, record) if _wants_run_record(hook) else (text,)
             try:
-                result = await _call_hook(hook, text)
+                result = await _call_hook(hook, *arguments)
             except TimeoutError:
                 log.warning(
                     "post_draft hook %s exceeded %.1fs and was abandoned; its thread "

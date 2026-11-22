@@ -396,3 +396,23 @@ async def test_a_missing_cli_names_where_it_looked(tmp_path, binary, words):
     assert task.state is TaskState.FAILED
     assert words in task.agent_text()
     assert "--engine litellm" in task.agent_text()
+
+
+async def test_a_tool_handler_passes_the_call_tool_outcome_to_the_trace(tmp_path):
+    """#268: the run record reads the outcome the code path set, not the text."""
+    from daedalus.protocols import ToolResult
+
+    events = []
+    turn = _turn(tmp_path, events=events)
+
+    async def call_tool(name, arguments):
+        return ToolResult("error: 2 hits in errors.py", "ok")
+
+    turn.call_tool = call_tool
+    tools, _ = ClaudeCodeEngine(ClaudeCodeSpec())._our_tools(turn, sdk)
+    out = await tools[0].handler({})
+    assert type(out["content"][0]["text"]) is str
+    assert events[-1] == (
+        "tool_result",
+        {"name": "files.read", "content": "error: 2 hits in errors.py", "outcome": "ok"},
+    )

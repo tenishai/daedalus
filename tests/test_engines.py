@@ -109,7 +109,8 @@ async def test_the_litellm_engine_runs_a_turn_on_its_own(tmp_path):
     )
     assert task.agent_text() == "done"
     assert seen == ["files.read"]
-    assert events == ["tool_call", "tool_result"]
+    # A usage event follows each model call, with no budget set (#268).
+    assert events == ["usage", "tool_call", "tool_result", "usage"]
 
 
 async def test_the_bridge_refuses_mcp_1x_naming_its_extra(monkeypatch):
