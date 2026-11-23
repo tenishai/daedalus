@@ -112,6 +112,45 @@ _REPEAT_NOTE = (
 )
 
 
+_NOT_RUN_SIBLING = (
+    "not run: another call in this reply was malformed, so none of them ran. "
+    "Send the corrected calls again."
+)
+
+
+def malformed_reasons(
+    tool_calls: list[ToolCall], resolve, offered: dict[str, set[str]]
+) -> list[str | None]:
+    """Why each call is malformed (tools.retry_malformed), None where it is fine.
+
+    Malformed means the call can't be run as written: it names no offered tool,
+    its arguments didn't parse as JSON (llm.py keeps them as {"_raw": text}), or
+    it leaves out an argument the tool's listed schema requires. A call that runs
+    and fails is not malformed; that is the tool's answer.
+    """
+    reasons: list[str | None] = []
+    for call in tool_calls:
+        name = resolve(call.name)
+        if name is None:
+            reasons.append(
+                f"unknown tool {call.name!r}; the tools you can call are "
+                + ", ".join(sorted(offered))
+            )
+            continue
+        if set(call.arguments) == {"_raw"}:
+            reasons.append(
+                f"the arguments for {call.name} are not valid JSON: "
+                f"{str(call.arguments['_raw'])[:200]!r}"
+            )
+            continue
+        missing = sorted(offered.get(_munge(name), set()) - set(call.arguments))
+        reasons.append(
+            f"{call.name} is missing required argument(s): {', '.join(missing)}"
+            if missing else None
+        )
+    return reasons
+
+
 def _arguments_key(arguments: dict) -> str:
     """Canonical form of a call's arguments, so key order doesn't hide a repeat."""
     return json.dumps(arguments, sort_keys=True, default=str)
@@ -170,6 +209,40 @@ class LiteLLMEngine:
             return matches[0] if len(matches) == 1 else None
 
         budget = turn.budget
+        retry_malformed = spec.tools.retry_malformed
+        offered = {
+            _munge(tool["name"]): set((tool.get("parameters") or {}).get("required") or ())
+            for tool in allowed
+        }
+
+        async def ask(sent: list[dict]):
+            """One model call with its usage, budget and trace events, and text
+            salvage. Returns (response, tool calls, cut by max_tokens)."""
+            response = await self.llm.complete(sent, tools=llm_tools)
+            # One event per model call, budget or not (#268): the run record and
+            # log-summed token totals both read it.
+            emit("usage", model=getattr(self.llm, "model", None), **response.usage_fields())
+            truncated = response.finish_reason == "length"
+            if truncated:
+                # Silent truncation looks like a complete reply to every
+                # surface downstream (finding #27, born as kobo #1/#4) —
+                # trace it AND mark the reply so operators see the cut.
+                emit("truncated", max_tokens=spec.model.max_tokens)
+            budget.spend(response.tokens_spent())
+            if budget.remaining() is not None:
+                emit(
+                    "budget",
+                    spent=response.tokens_spent(),
+                    remaining=budget.remaining(),
+                )
+            if response.reasoning:
+                emit("reasoning", text=response.reasoning)
+            tool_calls = response.tool_calls
+            if not tool_calls and llm_tools and salvage_enabled(spec):
+                tool_calls = salvage_tool_calls(response.text, set(by_munged))
+                if tool_calls:
+                    emit("salvage", count=len(tool_calls))
+            return response, tool_calls, truncated
 
         last_attempt = ""
         context_limit = spec.tools.context_tokens
@@ -197,30 +270,27 @@ class LiteLLMEngine:
                     state=TaskState.FAILED,
                     reason=ReasonCode.BUDGET_EXHAUSTED,
                 )
-            response = await self.llm.complete(messages, tools=llm_tools)
-            # One event per model call, budget or not (#268): the run record and
-            # log-summed token totals both read it.
-            emit("usage", model=getattr(self.llm, "model", None), **response.usage_fields())
-            truncated = response.finish_reason == "length"
-            if truncated:
-                # Silent truncation looks like a complete reply to every
-                # surface downstream (finding #27, born as kobo #1/#4) —
-                # trace it AND mark the reply so operators see the cut.
-                emit("truncated", max_tokens=spec.model.max_tokens)
-            budget.spend(response.tokens_spent())
-            if budget.remaining() is not None:
-                emit(
-                    "budget",
-                    spent=response.tokens_spent(),
-                    remaining=budget.remaining(),
-                )
-            if response.reasoning:
-                emit("reasoning", text=response.reasoning)
-            tool_calls = response.tool_calls
-            if not tool_calls and llm_tools and salvage_enabled(spec):
-                tool_calls = salvage_tool_calls(response.text, set(by_munged))
-                if tool_calls:
-                    emit("salvage", count=len(tool_calls))
+            response, tool_calls, truncated = await ask(messages)
+            # tools.retry_malformed: a reply whose calls name no offered tool or carry
+            # arguments that don't parse is asked again off the record. The history
+            # the model reads next holds only the reply that was finally used.
+            # 0 (the default) = never: the reply is used as it came.
+            for attempt in range(1, retry_malformed + 1):
+                reasons = malformed_reasons(tool_calls, resolve, offered)
+                if not any(reasons) or budget.remaining() == 0:
+                    break
+                emit("malformed_retry", attempt=attempt,
+                     reasons=[why for why in reasons if why])
+                scratch = [*messages, _assistant_message(response.text, tool_calls)]
+                scratch += [
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": f"error: {why}" if why else _NOT_RUN_SIBLING,
+                    }
+                    for call, why in zip(tool_calls, reasons, strict=True)
+                ]
+                response, tool_calls, truncated = await ask(scratch)
             if not tool_calls:
                 await turn.checkpoints.drop(task.id)
                 text = response.text

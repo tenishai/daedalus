@@ -1,8 +1,8 @@
 ---
 card: arch-card:daedalus-bundle
-updated: 2026-11-21
-anchor: src/daedalus/bundle.py sha=c35fddfffe68f819dfa53ce3b3265e9b7397540d
-anchor: docs/bundle.schema.json sha=bc05872b9c9af2295ef0a599b2774dbe77873bbe
+updated: 2026-11-22
+anchor: src/daedalus/bundle.py sha=bfb6349a4d3c265d08845b4503f674d767e6af24
+anchor: docs/bundle.schema.json sha=a1d5360a333e3506e96f795840812fb3f05f9d5b
 ---
 # bundle — agent.yaml schema and the bundle directory
 
@@ -21,6 +21,7 @@ INVARIANTS:
 - tools.builtin groups are `files` and `exec`; exec loads only with approvals.ceiling.exec: true (agent.py), anything else is a BundleError. The field stays an untyped dict (agent.py passes each block as provider kwargs); its schema `description` is where an author sees the refused files roots (tools/builtin.py _refused_root, #199). request_timeout, salvage_text_calls and task_timeout carry descriptions too.
 - Per-task workspaces (#247): `tools.workspace.parent` plus a builtin root written as the literal `{workspace}` or `{workspace}/sub` (not a ${VAR}: filled per task, never at load). Task metadata `daedalus_workspace` names ONE folder under the parent (regex `[A-Za-z0-9][A-Za-z0-9._-]*`, resolved after symlinks, must exist); anything else fails the task 701 before any tool is listed (agent.py _run_engine). The token without a parent, a parent that isn't a directory (checked at load whenever it is set, since the Claude Code engine runs in the workspace), or a sub-root with `..` fail at load; a parent gone after load fails the task 701. tools/workspace.py holds the resolver and WorkspaceToolProvider, which builds the real files/exec provider per workspace from a contextvar (cached, 32 entries).
 - `tools.bind` (#247): {tool: {argument: dotted.metadata.path}}. Agent._run_engine_turn hides bound arguments from the listing the engine gets and overwrites them on every call, before the gates; a missing or empty value fails the call, never falls back to the model's value. A bind key matching no offered tool emits `bind_unmatched` per turn.
+- tools.retry_malformed (int, default 0, 0..5, litellm engine): off-the-record re-asks for unrunnable tool calls; 0 = off.
 - tools.salvage_text_calls (#200): None = on only when model.api_base is set; salvage reads only JSON inside <tool_call>/<tools> tags (engines/litellm.py).
 - Fields validated at load so a typo fails the bundle: slack `approvers` (list of U…/W… user ids), slack `wake` (mention|thread|channel; every slack block must agree), github.branch_prefix (a valid git ref component, default "daedalus"), memory.team (only "none"; "outbox" is refused because it was never built).
 - The schema lets `${VAR}` / `${VAR:-default}` placeholders stand in for enum, integer, number and boolean leaves (#132), so an editor accepts what interpolate() will expand.
