@@ -1,9 +1,14 @@
 name: test
 
-# test and fork-pr together cover every push to main and every PR (fork-pr
-# runs whatever test's guard excludes) -- no private deps, no secret required.
-# techne runs under test's guard too and installs tenish-techne from the tenish
-# index with the TENISH_INDEX_TOKEN secret (#48); fork PRs never see it.
+# Every job runs on a GitHub-hosted runner: a public repo must never let a pull
+# request reach a self-hosted machine (agora discussion 71, rule 4). The `ci`
+# job at the end is the one check the branch ruleset requires; it passes only
+# when every test leg passed, so a skipped or cancelled leg never counts.
+#
+# Until 2026-11-23 `test` ran on a self-hosted pool (hosted Actions had stopped
+# on a billing failure, 2026-09-23) behind a same-repo guard, with `fork-pr` as
+# the hosted complement. Public repos get hosted minutes free, so there is one
+# `test` job for everyone and no guard to delete.
 on:
   push:
     branches: [main]
@@ -11,18 +16,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  # SELF-HOSTED (2026-09-23): hosted Actions stopped on a billing failure, so this job runs
-  # on a self-hosted runner pool labelled daedalus-ci.
-  # The `if:` below is DEFENCE IN DEPTH for honest fork PRs, not a security boundary:
-  # for `pull_request` GitHub runs the PR's own copy of this file, so a fork can
-  # delete the guard (see the ATTACKER-EDITABLE block in tenishai/techne's test.yml).
-  # The real controls: this repo is private, "Run workflows from fork pull requests"
-  # is off (checked 2026-09-23), and the runner stops before the go-public flip.
   test:
-    runs-on: [self-hosted, linux, x64, daedalus-ci]
-    timeout-minutes: 20  # one small runner; a hung job starves it
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         # Three legs, listed outright: two `include` entries for one python-version would
         # merge into one leg, not add a second. 3.12 with claude-code and bridge runs the
@@ -41,18 +39,9 @@ jobs:
             constraint: "mcp<2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      # The runner CONTAINER persists between jobs (same machine name across legs), so
-      # a shared interpreter plus a bare `pip install` would let one job's packages
-      # satisfy the next job's imports (liminal#103 r1). A fresh venv per job, first on
-      # PATH, keeps each run to what it installed itself.
-      # uv-managed Python, not actions/setup-python (#133): setup-python's builds on this
-      # runner load libpython only through the LD_LIBRARY_PATH it exports, and exec.run
-      # hands commands a clean environment, so every test_tools_exec test that runs
-      # sys.executable exited 127. uv's builds run without it, like a normal install.
-      - name: Fresh venv for this job
-        run: |
-          uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
-          echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[${{ matrix.extras }}]" ${{ matrix.constraint != '' && format('"{0}"', matrix.constraint) || '' }}
       - run: ruff check src tests docker conftest.py
       # Stdlib only. Fails when an anchored file changed without its arch card (#206).
@@ -60,72 +49,38 @@ jobs:
       - run: pytest -q
 
   # ---- techne: full suite with tenish-techne from the tenish index ------------
-  # techne's repo is private, and this workflow's GITHUB_TOKEN reads only this repo,
-  # so a sibling checkout fails with Not Found (#48). The `techne` extra installs
-  # tenish-techne from pypi.tenish.ai instead, the wheel users get, with the
-  # read-only ergon-ci index token (repo secret TENISH_INDEX_TOKEN), as ergon's
-  # smoke job does. uv's default first-index strategy takes tenish-techne only from
-  # the tenish index, so a same-named package on PyPI can't win. Same guard as the
-  # test job: fork PRs get no secrets and run fork-pr instead. Dependabot PRs pass
-  # the guard but see only Dependabot secrets, so the same token is also stored as
-  # a Dependabot secret named TENISH_INDEX_TOKEN.
+  # The `techne` extra installs tenish-techne from pypi.tenish.ai with the read-only
+  # ergon-ci index token (repo secret TENISH_INDEX_TOKEN), as ergon's smoke job does.
+  # A pull request from a fork gets no secrets, so this leg runs on pushes to main
+  # and on demand, not as a pull-request gate, and `ci` does not need it. Once
+  # techne is public the install can drop the token and this leg joins `ci`.
   #
   # DAEDALUS_REQUIRE_TECHNE=1 turns the techne-path files' module-level
   # `pytest.importorskip(...)` from a quiet skip into a hard failure (conftest.py):
   # this leg exists to run those tests, so a broken or missing install must fail the
   # build rather than report them skipped (#48).
   techne:
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, linux, x64, daedalus-ci]
-    timeout-minutes: 20  # one small runner; a hung job starves it
-    strategy:
-      matrix:
-        python-version: ["3.12"]
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      # Same fresh-venv and uv-managed-Python reasoning as the test job above
-      # (liminal#103 r1, #133).
-      - name: Fresh venv for this job
-        run: |
-          uv venv --clear --seed --managed-python --python "${{ matrix.python-version }}" "$GITHUB_WORKSPACE/.venv-ci"
-          echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
-
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install (techne from the tenish index)
         env:
           UV_INDEX_TENISH_USERNAME: ergon-ci
           UV_INDEX_TENISH_PASSWORD: ${{ secrets.TENISH_INDEX_TOKEN }}
         run: |
-          uv pip install --python "$GITHUB_WORKSPACE/.venv-ci/bin/python" \
-            --index tenish=https://pypi.tenish.ai/simple/ -e ".[dev,techne]"
+          uv pip install --system --index tenish=https://pypi.tenish.ai/simple/ -e ".[dev,techne]"
           python -c "import importlib.metadata as m; print('tenish-techne', m.version('tenish-techne'))"
-
-      - name: Ruff lint
-        run: ruff check src tests docker conftest.py
-
+      - run: ruff check src tests docker conftest.py
       - name: Pytest (full suite, techne required)
         env:
           DAEDALUS_REQUIRE_TECHNE: "1"
         run: pytest -q
-
-  # ---- fork-pr: the complement of test's guard, on a hosted runner -----------
-  fork-pr:
-    runs-on: ubuntu-latest
-    # Techne's spelling (#590): the literal negation, so an event nobody named still
-    # gets a hosted run instead of an empty Checks tab.
-    if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e .[dev]
-      - run: ruff check src tests docker conftest.py
-      - run: python3 scripts/check_arch_cards.py
-      - run: pytest -q
 
   # ---- dco: every commit a PR adds is signed off (CONTRIBUTING.md) -------------
   # Hosted runner, every pull request including forks. It checks out nothing and runs
@@ -189,3 +144,13 @@ jobs:
             exit 1
           fi
           echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors$( [ "$skipped" -gt 0 ] && printf ' (%s skipped as bot commits)' "$skipped" )"
+
+  # ---- ci: the summary the branch ruleset requires ------------------------------
+  # `if: always()` so it reports even when a leg fails; it then fails unless every
+  # leg of `test` succeeded (needs.test.result is the matrix's combined result).
+  ci:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = "success"
