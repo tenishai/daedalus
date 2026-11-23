@@ -69,7 +69,7 @@ task_timeout: 600                      # seconds per task, tool calls included;
 model:
   id: anthropic/claude-sonnet-4-5      # any LiteLLM route string, or a tier word
                                         # (fast | balanced | best, §1.2a)
-  # api_base: http://10.0.0.15:8000/v1 # optional — local OpenAI-compatible servers
+  # api_base: http://localhost:8000/v1 # optional — local OpenAI-compatible servers
   max_tokens: 8192                     # the visible reply's ceiling (§2.3)
   thinking:                            # apart from max_tokens (#240); litellm engine
     mode: auto                         # auto | off | on
