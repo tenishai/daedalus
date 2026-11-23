@@ -32,7 +32,9 @@ def test_every_job_runs_on_a_github_hosted_runner():
     assert jobs
     for name, job in jobs.items():
         labels = _labels(job)
-        assert labels == ["ubuntu-latest"], f"job {name!r} runs on {labels}; a public repo's CI must not reach a self-hosted runner"
+        assert labels == ["ubuntu-latest"], (
+            f"job {name!r} runs on {labels}; a public repo's CI must not reach a self-hosted runner"
+        )
 
 
 def test_the_ci_job_needs_test_and_fails_unless_it_succeeded():
