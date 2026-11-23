@@ -7,7 +7,7 @@ name = "tenish-daedalus"
 dynamic = ["version"]
 description = "Agent construction kit — an agent is a directory."
 readme = "README.md"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "tenish" }]
 dependencies = [
