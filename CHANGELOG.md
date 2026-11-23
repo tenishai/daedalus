@@ -6,6 +6,10 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Changed
+
+- **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.
+
 ### Upgrading
 
 - **`LLMResponse` token counts are `int | None` now, not `int`** (issue #268). None means
