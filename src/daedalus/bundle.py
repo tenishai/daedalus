@@ -113,6 +113,30 @@ class ThinkingSpec(_WarnExtra):
         return value
 
 
+class SamplingSpec(_WarnExtra):
+    """Sampling sent with every model call (litellm engine only). Every field is
+    optional, and an unset one is not sent, so the model's server keeps its own
+    default for it. Open models publish different values for thinking and
+    non-thinking modes; `model.sampling_by_thinking` carries those."""
+
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    top_k: int | None = Field(default=None, ge=1)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
+    repetition_penalty: float | None = Field(default=None, gt=0)
+
+
+def _yaml_bool_keys(value):
+    # The same YAML 1.1 trap as ThinkingSpec.mode: `off:` as a mapping key loads as False.
+    if isinstance(value, dict):
+        return {
+            ("off" if k is False else "on" if k is True else k): v for k, v in value.items()
+        }
+    return value
+
+
 class ModelSpec(_WarnExtra):
     # A concrete model id, or (after ${VAR} expansion) one of the tier words
     # fast/balanced/best, resolved through DAEDALUS_TIERS (daedalus.tiers,
@@ -149,6 +173,25 @@ class ModelSpec(_WarnExtra):
     api_base: str | None = None  # OpenAI-compatible endpoints (vLLM, ollama, LM Studio)
     api_key_env: str | None = None  # env var holding a real key; never the key itself
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
+    # Sampling for every call, then the entry for the bundle's explicit thinking mode
+    # on top, field by field (after pi's resolveSamplingParams). None, the default,
+    # sends nothing, exactly as before. A tier entry fills either when the bundle is
+    # silent. The litellm engine only; Claude Code chooses its own.
+    sampling: SamplingSpec | None = Field(
+        default=None,
+        description="Sampling sent with every call (litellm engine only); unset fields "
+        "are not sent.",
+    )
+    sampling_by_thinking: dict[Literal["on", "off"], SamplingSpec] | None = Field(
+        default=None,
+        description="Sampling for thinking.mode on or off, applied over `sampling`. "
+        "Not used when thinking.mode is auto.",
+    )
+
+    @field_validator("sampling_by_thinking", mode="before")
+    @classmethod
+    def _sampling_keys_are_words(cls, value):
+        return _yaml_bool_keys(value)
 
     @model_validator(mode="after")
     def _id_required(self):

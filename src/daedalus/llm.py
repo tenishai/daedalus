@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from daedalus.protocols import LLMResponse, ToolCall
 
 if TYPE_CHECKING:
-    from daedalus.bundle import ThinkingSpec
+    from daedalus.bundle import SamplingSpec, ThinkingSpec
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +121,58 @@ def thinking_kwargs(
     return {}, max_tokens
 
 
+#: Sampling fields litellm passes as top-level kwargs on every route it maps them for.
+_TOP_LEVEL_SAMPLING = ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+#: Fields litellm's OpenAI-compatible route drops at top level; they ride in extra_body,
+#: which vLLM, llama.cpp, SGLang and OpenRouter read.
+_BODY_SAMPLING = ("top_k", "min_p", "repetition_penalty")
+
+
+def sampling_kwargs(
+    model: str,
+    sampling: SamplingSpec | None,
+    by_thinking: dict[str, SamplingSpec] | None,
+    thinking: ThinkingSpec | None,
+) -> dict:
+    """The litellm kwargs for a model's sampling: `sampling`, then the entry for an
+    explicit thinking mode on top, field by field (after pi's resolveSamplingParams,
+    packages/ai/src/api/simple-options.ts). Unset fields are not sent, so nothing set
+    means {} and the request is byte-for-byte what it was before sampling existed.
+
+    Claude routes refuse it: the Claude API rejects temperature, top_p and top_k on
+    current models (and with extended thinking on older ones), so a bundle setting
+    them would fail on every call. Refusing at load says so once, where it can be
+    fixed, instead of 400s at run time."""
+    merged: dict = {}
+    for spec in (sampling, (by_thinking or {}).get(thinking.mode) if thinking else None):
+        if spec is not None:
+            merged.update(spec.model_dump(exclude_none=True))
+    if not merged:
+        return {}
+    if _thinking_family(model) == "anthropic":
+        from daedalus.bundle import BundleError
+
+        raise BundleError(
+            f"model.sampling sets {', '.join(sorted(merged))} for {model}, and the Claude "
+            "API rejects sampling parameters on current models; remove model.sampling "
+            "for Claude routes"
+        )
+    kwargs = {k: merged[k] for k in _TOP_LEVEL_SAMPLING if k in merged}
+    body = {k: merged[k] for k in _BODY_SAMPLING if k in merged}
+    if body:
+        kwargs["extra_body"] = body
+    return kwargs
+
+
+def _merge_kwargs(base: dict, extra: dict) -> dict:
+    """`base` with `extra` laid over it; the two extra_body dicts are combined, not
+    replaced, so thinking's chat_template_kwargs and sampling's top_k both go."""
+    merged = {**base, **extra}
+    if "extra_body" in base and "extra_body" in extra:
+        merged["extra_body"] = {**base["extra_body"], **extra["extra_body"]}
+    return merged
+
+
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _SPECIAL_TOKEN = re.compile(r"<\|[^|>]{1,32}\|>")
@@ -184,12 +236,16 @@ class LiteLLMClient:
         api_key: str | None = None,
         timeout: float | None = None,
         thinking: ThinkingSpec | None = None,
+        sampling: SamplingSpec | None = None,
+        sampling_by_thinking: dict[str, SamplingSpec] | None = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
         # What the provider is told about thinking, and the max_tokens that goes with
         # it (#240): fixed per client, like everything else here.
         self.thinking_kwargs, self.max_tokens_sent = thinking_kwargs(model, thinking, max_tokens)
+        # Fixed per client too; {} when the bundle sets no sampling.
+        self.sampling_kwargs = sampling_kwargs(model, sampling, sampling_by_thinking, thinking)
         # Seconds per call (#201). None leaves litellm's own default, 6000 s.
         self.timeout = timeout
         self.api_base = api_base
@@ -208,12 +264,15 @@ class LiteLLMClient:
         except ImportError as exc:  # pragma: no cover
             raise LLMError("litellm is not installed — pip install tenish-daedalus") from exc
 
-        kwargs: dict = {
-            "model": self.model,
-            "messages": cache_marked(messages, self.model),
-            "max_tokens": self.max_tokens_sent,
-            **self.thinking_kwargs,
-        }
+        kwargs: dict = _merge_kwargs(
+            {
+                "model": self.model,
+                "messages": cache_marked(messages, self.model),
+                "max_tokens": self.max_tokens_sent,
+                **self.thinking_kwargs,
+            },
+            self.sampling_kwargs,
+        )
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if self.api_key:

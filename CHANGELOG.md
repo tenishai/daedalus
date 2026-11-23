@@ -20,6 +20,16 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **`model.sampling` and `model.sampling_by_thinking` set a model's sampling** (litellm
+  engine only). Until now daedalus sent no sampling parameters, so a hosted or local
+  model ran at its server's defaults. Set fields are sent (`temperature`, `top_p`,
+  `presence_penalty`, `frequency_penalty` at top level; `top_k`, `min_p`,
+  `repetition_penalty` in `extra_body`, merged with thinking's `chat_template_kwargs`);
+  unset ones are not. `sampling_by_thinking.on` / `.off` apply over `sampling` when
+  `model.thinking.mode` is that word, after pi's model-then-thinking-level merge. A tiers
+  entry may carry both, the bundle winning; a claude-code tier entry may not. Claude
+  routes refuse sampling at load. Absent, the request is unchanged.
+
 - **A `post_draft` hook can see the run behind the reply** (issue #268). A hook with a
   second positional parameter gets a frozen `RunRecord`: the engine and model, the model
   calls (`turns`), each tool call with its outcome (`ok`, `empty`, `error`, `blocked`, or
