@@ -127,3 +127,14 @@ def test_retry_malformed_is_bounded(tmp_path):
 
     with pytest.raises((BundleError, ValueError)):
         make_agent(tmp_path, allow=["files.read"], tools_extra="  retry_malformed: 6\n")
+
+
+async def test_the_trace_names_the_fault_but_never_carries_the_arguments(tmp_path):
+    # /events redacts content only for tool_call, tool_result and reasoning, so a retry
+    # event must not quote what the model wrote: it can hold whatever the agent read.
+    secret = call("files__read", {"_raw": '{"path": "/etc/hunter2-token'}, cid="bad")
+    events = []
+    await run(tmp_path, "  retry_malformed: 1\n", secret, GOOD, events=events)
+    (retry,) = [e for e in events if e["type"] == "malformed_retry"]
+    assert retry["faults"] == [{"name": "files__read", "fault": "invalid_json", "chars": 28}]
+    assert "hunter2" not in repr(retry)

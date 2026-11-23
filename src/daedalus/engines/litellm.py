@@ -151,6 +151,23 @@ def malformed_reasons(
     return reasons
 
 
+def malformed_faults(tool_calls: list[ToolCall], reasons: list[str | None]) -> list[dict]:
+    """The trace's view of malformed_reasons: the call's name and the kind of fault,
+    plus the size of unparsed arguments, and nothing the model wrote in them."""
+    faults = []
+    for call, why in zip(tool_calls, reasons, strict=True):
+        if why is None:
+            continue
+        if why.startswith("unknown tool"):
+            faults.append({"name": call.name, "fault": "unknown_tool"})
+        elif set(call.arguments) == {"_raw"}:
+            faults.append({"name": call.name, "fault": "invalid_json",
+                           "chars": len(str(call.arguments["_raw"]))})
+        else:
+            faults.append({"name": call.name, "fault": "missing_arguments"})
+    return faults
+
+
 def _arguments_key(arguments: dict) -> str:
     """Canonical form of a call's arguments, so key order doesn't hide a repeat."""
     return json.dumps(arguments, sort_keys=True, default=str)
@@ -279,8 +296,12 @@ class LiteLLMEngine:
                 reasons = malformed_reasons(tool_calls, resolve, offered)
                 if not any(reasons) or budget.remaining() == 0:
                     break
+                # The trace says what kind of fault each call had, never its text:
+                # a bad-JSON reason quotes the raw arguments, which can hold whatever
+                # the agent read, and /events redacts content only for the event
+                # types in transports/a2a.py _CONTENT_FIELDS.
                 emit("malformed_retry", attempt=attempt,
-                     reasons=[why for why in reasons if why])
+                     faults=malformed_faults(tool_calls, reasons))
                 scratch = [*messages, _assistant_message(response.text, tool_calls)]
                 scratch += [
                     {
