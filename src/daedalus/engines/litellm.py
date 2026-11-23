@@ -131,35 +131,95 @@ def _to_openai(spec: dict) -> dict:
 _STUB_PREFIX = "[earlier result removed to save context: "
 
 
-def compact_tool_results(messages: list[dict], *, keep_recent: int, min_chars: int) -> tuple:
-    """Stub every tool result but the newest keep_recent (tools.compact).
+# Lines worth keeping when a result is stubbed: the one line that mattered in a long
+# build or test log (architect pattern b1df1649ab83d416). Broad on purpose, capped below.
+_ERROR_LINE = re.compile(
+    r"error|fail|exception|traceback|panic|fatal|denied|refused|timed out|assert"
+    r"|segfault|undefined reference|cannot find|not found|warning",
+    re.I,
+)
+_ERROR_LINES_MAX, _ERROR_LINE_CHARS = 12, 300
+#: Rough characters per token, for the stop-when-under-target check. The prompt's real
+#: size comes back on the next call's usage; this only decides when to stop stubbing.
+_CHARS_PER_TOKEN = 4
 
-    Each stubbed result keeps its message slot and tool_call_id, and says which call
-    it answered and how long it was, so the model can repeat the call if it still
-    needs the content. Results of min_chars or fewer, results already stubbed, and
-    non-text results are left alone. A stubbed message is replaced, not edited, so
-    anything else holding the old dict sees no change. Returns (count, chars removed).
+
+def _error_lines(content: str) -> list[str]:
+    kept = [line.strip()[:_ERROR_LINE_CHARS] for line in content.splitlines()
+            if _ERROR_LINE.search(line)]
+    return kept[:_ERROR_LINES_MAX]
+
+
+def _read_key(name: str, arguments: str):
+    """(tool, path) for a call that reads a file, else None: the key that makes an
+    earlier read of the same file a stale view (architect pattern 0486f0e9971c61be)."""
+    if not name.endswith("read"):
+        return None
+    try:
+        path = json.loads(arguments or "{}").get("path")
+    except (ValueError, AttributeError):
+        return None
+    return (name, path) if isinstance(path, str) and path else None
+
+
+def compact_tool_results(
+    messages: list[dict], *, keep_recent: int, min_chars: int, target_chars: int | None = None
+) -> tuple:
+    """Stub old tool results (tools.compact) until target_chars are removed.
+
+    Candidates are the tool results older than the newest keep_recent, longer than
+    min_chars, text, and not already stubbed. Stale file views go first: a read of a
+    file that is read again later is the version the model should not rely on. Then
+    the rest, oldest first. With target_chars None every candidate is stubbed.
+
+    Each stub keeps its message slot and tool_call_id, names the call and its size so
+    the model can make it again, and carries up to 12 error-looking lines from the
+    result, so a failing test's message outlives its log. A stubbed message is
+    replaced, not edited, so anything else holding the old dict sees no change.
+    Returns (count, chars removed).
     """
-    calls = {}
+    calls, order = {}, []
     for message in messages:
         for call in message.get("tool_calls") or ():
             function = call.get("function", {})
-            calls[call.get("id")] = (function.get("name", "?"), function.get("arguments", ""))
+            entry = (function.get("name", "?"), function.get("arguments", ""))
+            calls[call.get("id")] = entry
+            order.append((call.get("id"), _read_key(*entry)))
+    later_reads, stale = set(), set()
+    for call_id, key in reversed(order):
+        if key is not None:
+            if key in later_reads:
+                stale.add(call_id)
+            later_reads.add(key)
+
     tool_slots = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
-    count = removed = 0
+    candidates = []
     for i in tool_slots[: max(len(tool_slots) - keep_recent, 0)]:
         content = messages[i].get("content")
         if not isinstance(content, str) or len(content) <= min_chars:
             continue
         if content.startswith(_STUB_PREFIX):
             continue
-        name, arguments = calls.get(messages[i].get("tool_call_id"), ("?", ""))
+        candidates.append(i)
+    candidates.sort(key=lambda i: (messages[i].get("tool_call_id") not in stale, i))
+
+    count = removed = 0
+    for i in candidates:
+        if target_chars is not None and removed >= target_chars:
+            break
+        content = messages[i]["content"]
+        call_id = messages[i].get("tool_call_id")
+        name, arguments = calls.get(call_id, ("?", ""))
         if len(arguments) > 200:
             arguments = arguments[:200] + "..."
+        why = " (a later read of the same file replaced it)" if call_id in stale else ""
         stub = (
-            f"{_STUB_PREFIX}{name} {arguments} returned {len(content)} characters. "
+            f"{_STUB_PREFIX}{name} {arguments} returned {len(content)} characters{why}. "
             "Make the call again if you still need them.]"
         )
+        errors = _error_lines(content)
+        if errors:
+            stub += "\nError-looking lines it contained:\n" + "\n".join(errors)
         messages[i] = {**messages[i], "content": stub}
         count += 1
         removed += len(content) - len(stub)
@@ -325,8 +385,17 @@ class LiteLLMEngine:
                 and response.input_tokens is not None
                 and response.input_tokens >= compact.at_tokens
             ):
+                # Stop stubbing once the prompt is estimated back under target_ratio
+                # of at_tokens, so a compaction removes a block at once and then lets
+                # the prompt grow again: the cache prefix changes once per compaction,
+                # not every step (architect pattern a11f2890707d55bb).
+                target_tokens = int(compact.at_tokens * compact.target_ratio)
+                over = max(response.input_tokens - target_tokens, 0)
                 count, removed = compact_tool_results(
-                    messages, keep_recent=compact.keep_recent, min_chars=compact.min_chars
+                    messages,
+                    keep_recent=compact.keep_recent,
+                    min_chars=compact.min_chars,
+                    target_chars=over * _CHARS_PER_TOKEN,
                 )
                 if count:
                     emit(

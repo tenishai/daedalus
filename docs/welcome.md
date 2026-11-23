@@ -211,10 +211,13 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.
 - **`tools.compact`** (`at_tokens`, `keep_recent` default 4, `min_chars` default 1000,
-  litellm engine only): once a prompt reaches `at_tokens`, older tool results are replaced
-  by a one-line stub naming the call, so a long task stays under `context_tokens`. Cost:
-  the model has to repeat a call to see a stubbed result again, and the prompt cache
-  breaks once at each compaction. Absent, every result is resent on every call.
+  `target_ratio` default 0.5, litellm engine only): once a prompt reaches `at_tokens`,
+  older tool results are replaced by a one-line stub naming the call until the prompt is
+  estimated under `target_ratio` of `at_tokens`, so a long task stays under
+  `context_tokens`. Stale file views (a file read again later) go first, then the oldest
+  results, and a stub keeps up to 12 error-looking lines of what it replaced. Cost: the
+  model has to repeat a call to see a stubbed result again, and the prompt cache breaks
+  once at each compaction. Absent, every result is resent on every call.
 - **`model.budget.per_task_tokens`**: a token budget per task (litellm engine only).
 
 Both timeouts must be positive; a bundle can raise them, not turn them off.

@@ -413,6 +413,15 @@ class CompactSpec(_WarnExtra):
         ge=0,
         description="Results this short or shorter are kept whole (a stub would not save).",
     )
+    target_ratio: float = Field(
+        default=0.5,
+        gt=0,
+        lt=1,
+        description=(
+            "Stop stubbing once the prompt is estimated under this share of at_tokens. "
+            "Stale file views go first, then the oldest results."
+        ),
+    )
 
 
 class ToolsSpec(_WarnExtra):

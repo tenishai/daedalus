@@ -430,6 +430,22 @@
           "title": "Min Chars",
           "description": "Results this short or shorter are kept whole (a stub would not save).",
           "default": 1000
+        },
+        "target_ratio": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Target Ratio",
+          "description": "Stop stubbing once the prompt is estimated under this share of at_tokens. Stale file views go first, then the oldest results.",
+          "default": 0.5
         }
       },
       "required": [

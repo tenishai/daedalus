@@ -26,8 +26,12 @@ Issue and pull request numbers all refer to this repository, written in full.
   naming the call and how much it returned, so the model can make the call again. Message
   order and tool call ids are kept, so any OpenAI-compatible server accepts the result,
   and a `compact` trace event says what was removed. `at_tokens` must sit below
-  `tools.context_tokens`. Absent, nothing changes: every result is resent on every call,
-  as before. The prompt cache breaks once at each compaction.
+  `tools.context_tokens`. Stubbing goes stale file views first (a file read again later),
+  then the oldest results, and stops once the prompt is estimated under `target_ratio`
+  (default 0.5) of `at_tokens`. A stub keeps up to 12 error-looking lines from what it
+  replaced, so a failing test's message outlives its log. Absent, nothing changes: every
+  result is resent on every call, as before. The prompt cache breaks once at each
+  compaction.
 
 - **A `post_draft` hook can see the run behind the reply** (issue #268). A hook with a
   second positional parameter gets a frozen `RunRecord`: the engine and model, the model

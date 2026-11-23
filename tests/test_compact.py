@@ -117,3 +117,63 @@ def test_compact_replaces_messages_and_is_idempotent():
     assert original["content"] == BIG  # the old dict is untouched; the slot was replaced
     assert messages[2]["tool_call_id"] == "a" and messages[3]["content"] == BIG
     assert compact_tool_results(messages, keep_recent=1, min_chars=0) == (0, 0)
+
+
+def _history(*calls):
+    """A user message, then one assistant call and its tool result per (id, name, path,
+    content) tuple."""
+    messages = [{"role": "user", "content": "go"}]
+    for call_id, name, path, content in calls:
+        messages.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": call_id, "type": "function",
+             "function": {"name": name, "arguments": f'{{"path": "{path}"}}'}}]})
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+    return messages
+
+
+def _content(messages, call_id):
+    return next(m["content"] for m in messages
+                if m.get("role") == "tool" and m["tool_call_id"] == call_id)
+
+
+def test_a_stale_view_of_a_file_goes_before_an_older_unique_one():
+    messages = _history(
+        ("a", "files__read", "/only-once", BIG),
+        ("b", "files__read", "/twice", BIG),
+        ("c", "files__read", "/twice", BIG),   # the newer read of /twice
+        ("d", "exec__run", "", "ok"),
+    )
+    # Room for one stub: it must be the stale /twice view, not the older /only-once.
+    count, _ = compact_tool_results(messages, keep_recent=1, min_chars=100, target_chars=1)
+    assert count == 1
+    assert _content(messages, "b").startswith("[earlier result removed")
+    assert "later read of the same file" in _content(messages, "b")
+    assert _content(messages, "a") == BIG and _content(messages, "c") == BIG
+
+
+def test_stubbing_stops_once_the_target_is_removed():
+    messages = _history(*[(f"r{i}", "files__read", f"/f{i}", BIG) for i in range(5)])
+    count, removed = compact_tool_results(messages, keep_recent=1, min_chars=100,
+                                          target_chars=6000)
+    assert count == 2 and removed >= 6000          # oldest two, then stop
+    assert _content(messages, "r2") == BIG
+
+
+def test_a_stub_keeps_the_error_lines():
+    log = "\n".join(["compiling crate"] * 300 + [
+        "test review::tests::tainted ... FAILED",
+        "thread 'main' panicked at crates/core/src/review.rs:340",
+    ] + ["noise"] * 300)
+    messages = _history(("t", "exec__run", "", log), ("u", "exec__run", "", "ok"))
+    compact_tool_results(messages, keep_recent=1, min_chars=100)
+    stub = _content(messages, "t")
+    assert "review::tests::tainted ... FAILED" in stub
+    assert "panicked at crates/core/src/review.rs:340" in stub
+    assert "compiling crate" not in stub
+
+
+def test_the_error_lines_are_capped():
+    log = "\n".join(f"error number {i}" for i in range(100))
+    messages = _history(("t", "exec__run", "", log), ("u", "exec__run", "", "ok"))
+    compact_tool_results(messages, keep_recent=1, min_chars=100)
+    assert _content(messages, "t").count("error number") == 12
