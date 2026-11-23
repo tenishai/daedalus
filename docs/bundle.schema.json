@@ -383,6 +383,61 @@
       "title": "ColleaguesSpec",
       "type": "object"
     },
+    "CompactSpec": {
+      "additionalProperties": true,
+      "description": "tools.compact: stub out old tool results once the prompt grows (litellm engine).\n\nAbsent (the default), the loop sends every tool result back on every call, as it\nalways has. Set, a call whose prompt reaches at_tokens replaces each tool result\nolder than the newest keep_recent, and longer than min_chars, with a one-line stub\nnaming the call. Message order and tool_call ids are kept, so any OpenAI-compatible\nserver accepts the result. The prompt cache breaks once at each compaction.",
+      "properties": {
+        "at_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "At Tokens",
+          "description": "Compact once a model call's prompt reaches this many input tokens."
+        },
+        "keep_recent": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Keep Recent",
+          "description": "The newest tool results, which are never stubbed.",
+          "default": 4
+        },
+        "min_chars": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Min Chars",
+          "description": "Results this short or shorter are kept whole (a stub would not save).",
+          "default": 1000
+        }
+      },
+      "required": [
+        "at_tokens"
+      ],
+      "title": "CompactSpec",
+      "type": "object"
+    },
     "EngineSpec": {
       "additionalProperties": true,
       "properties": {
@@ -929,6 +984,17 @@
           ],
           "default": null,
           "title": "Context Tokens"
+        },
+        "compact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "max_repeats": {
           "anyOf": [

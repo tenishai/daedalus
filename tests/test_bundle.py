@@ -22,6 +22,8 @@ def test_golden_bundle_loads(monkeypatch):
     assert spec.model.budget.per_task_tokens == 50000
     assert [t.kind for t in spec.transports] == ["cli"]
     assert spec.tools.provider == "none"
+    assert spec.tools.compact.at_tokens == 40000 and spec.tools.compact.keep_recent == 4
+    assert spec.tools.compact.min_chars == 1000
     assert spec.memory.personal == "none"
     assert spec.approvals.ceiling.write is False
     assert spec.approvals.gates[0].match == "files.write"

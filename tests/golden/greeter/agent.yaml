@@ -18,6 +18,9 @@ transports:
 tools:
   provider: none
   allow: []
+  compact:                # stub old tool results once a prompt reaches at_tokens
+    at_tokens: 40000      # (litellm engine; absent = never)
+    keep_recent: 4
 
 memory:
   personal: none

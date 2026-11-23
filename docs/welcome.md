@@ -210,6 +210,11 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
 - **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.
+- **`tools.compact`** (`at_tokens`, `keep_recent` default 4, `min_chars` default 1000,
+  litellm engine only): once a prompt reaches `at_tokens`, older tool results are replaced
+  by a one-line stub naming the call, so a long task stays under `context_tokens`. Cost:
+  the model has to repeat a call to see a stubbed result again, and the prompt cache
+  breaks once at each compaction. Absent, every result is resent on every call.
 - **`model.budget.per_task_tokens`**: a token budget per task (litellm engine only).
 
 Both timeouts must be positive; a bundle can raise them, not turn them off.

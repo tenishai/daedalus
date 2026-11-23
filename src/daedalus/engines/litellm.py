@@ -128,6 +128,44 @@ def _to_openai(spec: dict) -> dict:
     }
 
 
+_STUB_PREFIX = "[earlier result removed to save context: "
+
+
+def compact_tool_results(messages: list[dict], *, keep_recent: int, min_chars: int) -> tuple:
+    """Stub every tool result but the newest keep_recent (tools.compact).
+
+    Each stubbed result keeps its message slot and tool_call_id, and says which call
+    it answered and how long it was, so the model can repeat the call if it still
+    needs the content. Results of min_chars or fewer, results already stubbed, and
+    non-text results are left alone. A stubbed message is replaced, not edited, so
+    anything else holding the old dict sees no change. Returns (count, chars removed).
+    """
+    calls = {}
+    for message in messages:
+        for call in message.get("tool_calls") or ():
+            function = call.get("function", {})
+            calls[call.get("id")] = (function.get("name", "?"), function.get("arguments", ""))
+    tool_slots = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    count = removed = 0
+    for i in tool_slots[: max(len(tool_slots) - keep_recent, 0)]:
+        content = messages[i].get("content")
+        if not isinstance(content, str) or len(content) <= min_chars:
+            continue
+        if content.startswith(_STUB_PREFIX):
+            continue
+        name, arguments = calls.get(messages[i].get("tool_call_id"), ("?", ""))
+        if len(arguments) > 200:
+            arguments = arguments[:200] + "..."
+        stub = (
+            f"{_STUB_PREFIX}{name} {arguments} returned {len(content)} characters. "
+            "Make the call again if you still need them.]"
+        )
+        messages[i] = {**messages[i], "content": stub}
+        count += 1
+        removed += len(content) - len(stub)
+    return count, removed
+
+
 def _assistant_message(text: str, tool_calls: list[ToolCall]) -> dict:
     return {
         "role": "assistant",
@@ -279,6 +317,24 @@ class LiteLLMEngine:
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
+            # tools.compact: once this prompt reached at_tokens, stub the old results
+            # before the next call sends them all again. Unset = never.
+            compact = spec.tools.compact
+            if (
+                compact is not None
+                and response.input_tokens is not None
+                and response.input_tokens >= compact.at_tokens
+            ):
+                count, removed = compact_tool_results(
+                    messages, keep_recent=compact.keep_recent, min_chars=compact.min_chars
+                )
+                if count:
+                    emit(
+                        "compact",
+                        input_tokens=response.input_tokens,
+                        results=count,
+                        chars_removed=removed,
+                    )
 
         emit("loop_limit", reason=exhausted)
         detail = (
