@@ -431,6 +431,18 @@ class ToolsSpec(_WarnExtra):
     # for the best partial answer from what was found. The task stays FAILED with
     # the same reason code either way, so callers keying on state see no change.
     on_exhausted: Literal["stop", "wrap_up"] = "stop"
+    # A reply cut off by max_tokens with no tool call in it (litellm engine): "reply"
+    # returns it marked "[reply truncated ...]", as before; "fail" returns the same
+    # text as a FAILED task (702), so a caller can't take it for finished work;
+    # "continue" asks the model to carry on, bounded by max_steps. A cut-off reply
+    # that does carry tool calls never runs them, whatever this says.
+    on_truncated: Literal["reply", "fail", "continue"] = Field(
+        default="reply",
+        description=(
+            "A reply cut off by max_tokens with no tool call: reply (as before), "
+            "fail (FAILED, reason 702), or continue (ask the model to carry on)."
+        ),
+    )
     # Count the loop as exhausted once a model call's prompt reaches this many input
     # tokens, e.g. below a small local server's memory ceiling. None = no limit.
     # A task stopped here fails with 702 like an exhausted budget, but re-funding

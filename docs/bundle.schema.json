@@ -913,6 +913,25 @@
           "title": "On Exhausted",
           "default": "stop"
         },
+        "on_truncated": {
+          "anyOf": [
+            {
+              "enum": [
+                "reply",
+                "fail",
+                "continue"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "On Truncated",
+          "description": "A reply cut off by max_tokens with no tool call: reply (as before), fail (FAILED, reason 702), or continue (ask the model to carry on).",
+          "default": "reply"
+        },
         "context_tokens": {
           "anyOf": [
             {
