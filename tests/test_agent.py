@@ -100,7 +100,7 @@ def test_local_api_base_gets_placebo_key_without_env(tmp_path, monkeypatch):
     demands a key that vLLM ignores."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     (tmp_path / "agent.yaml").write_text(
-        "name: x\nmodel:\n  id: openai/local\n  api_base: http://10.0.0.15:8001/v1\n"
+        "name: x\nmodel:\n  id: openai/local\n  api_base: http://localhost:8001/v1\n"
     )
     (tmp_path / "agent-card.json").write_text("{}")
     (tmp_path / "persona.md").write_text("persona")
@@ -123,13 +123,13 @@ def test_api_key_env_reads_real_key_and_no_base_means_no_placebo(tmp_path, monke
 
 def test_model_api_base_flows_into_default_llm(tmp_path):
     (tmp_path / "agent.yaml").write_text(
-        "name: x\nmodel:\n  id: openai/some-local-model\n  api_base: http://10.0.0.15:8000/v1\n"
+        "name: x\nmodel:\n  id: openai/some-local-model\n  api_base: http://localhost:8000/v1\n"
     )
     (tmp_path / "agent-card.json").write_text("{}")
     (tmp_path / "persona.md").write_text("persona")
     agent = Agent.load(tmp_path)  # no llm override — default LiteLLMClient is built
     assert agent.llm.model == "openai/some-local-model"
-    assert agent.llm.api_base == "http://10.0.0.15:8000/v1"
+    assert agent.llm.api_base == "http://localhost:8000/v1"
 
 
 def test_a2a_transport_wires_with_card_and_options(tmp_path):
@@ -306,7 +306,7 @@ async def test_consulted_colleague_omitted_from_draft_gets_appended():
                 ledger.append("gemini-one")
             return await super().complete(messages, tools)
 
-    agent = make_agent(llm=ConsultingLLM("The PSA range is 10.140.9.0/24."))
+    agent = make_agent(llm=ConsultingLLM("The PSA range is 192.0.2.0/24."))
     task = await agent.handle_task(Task.from_text("what's our PSA range?"))
     assert "(consulted: gemini-one)" in task.agent_text()
 
@@ -321,7 +321,7 @@ async def test_consulted_colleague_already_named_is_left_alone():
                 ledger.append("gemini-one")
             return await super().complete(messages, tools)
 
-    agent = make_agent(llm=ConsultingLLM("gemini-one says the range is 10.140.9.0/24."))
+    agent = make_agent(llm=ConsultingLLM("gemini-one says the range is 192.0.2.0/24."))
     task = await agent.handle_task(Task.from_text("what's our PSA range?"))
     assert "consulted:" not in task.agent_text()
 
