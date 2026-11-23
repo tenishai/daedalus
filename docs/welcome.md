@@ -207,6 +207,19 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
   on a fast tier that answers tool-shaped one-liners; reach for a bigger budget when a
   reasoning model's replies arrive cut. Write a bare `off` or quote it; both are read as
   the word.
+- **`model.sampling`** and **`model.sampling_by_thinking`** (litellm engine only):
+  sampling sent with every call: `temperature`, `top_p`, `top_k`, `min_p`,
+  `presence_penalty`, `frequency_penalty`, `repetition_penalty`. Unset fields are not
+  sent, so the server keeps its own default; with neither block the request is unchanged.
+  `sampling_by_thinking` holds an `on` and an `off` entry applied over `sampling` when
+  `model.thinking.mode` is set to that word (not under `auto`). Open models publish
+  different values per mode. For Qwen3.6, the recommendations published in Unsloth's and
+  Groq's docs are thinking on `{temperature: 0.6, top_p: 0.95, top_k: 20}` for precise
+  coding and thinking off `{temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty:
+  1.5}`. `top_k`, `min_p` and `repetition_penalty` ride in the request body
+  (`extra_body`), which vLLM, llama.cpp, SGLang and OpenRouter read. Claude routes refuse
+  any sampling at load, because the Claude API rejects sampling parameters on current
+  models. A tiers entry may carry both blocks; the bundle's own block wins.
 - **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.

@@ -25,9 +25,10 @@ Resolution rules (`daedalus.agent._resolve_model`):
 - A tier word is looked up in DAEDALUS_TIERS; a deployment that doesn't offer it
   refuses to load.
 - Limits that belong to a model (context_tokens, max_repeats, max_tokens,
-  request_timeout, thinking) come from the tier entry only where the bundle hasn't set
-  them. This is where a deployment raises the reply ceiling or sets the thinking budget
-  for every bundle on a tier (tenishai/daedalus#240): the bundle default stays 8192.
+  request_timeout, thinking, sampling, sampling_by_thinking) come from the tier entry
+  only where the bundle hasn't set them. This is where a deployment raises the reply
+  ceiling or sets the thinking budget for every bundle on a tier (tenishai/daedalus#240):
+  the bundle default stays 8192.
 - The resolved model is always recorded, because a tier floats the way an alias does:
   which tier, which engine, which id.
 """
@@ -40,9 +41,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from daedalus.bundle import ThinkingSpec
+from daedalus.bundle import SamplingSpec, ThinkingSpec, _yaml_bool_keys
 
 TIER_NAMES: tuple[str, ...] = ("fast", "balanced", "best")  # lowest to highest
 Tier = Literal["fast", "balanced", "best"]
@@ -65,6 +66,21 @@ class TierEntry(BaseModel):
     request_timeout: float | None = Field(default=None, gt=0)  # seconds per model call
     context_tokens: int | None = Field(default=None, gt=0)
     max_repeats: int | None = Field(default=None, ge=2)
+    # Fill model.sampling / model.sampling_by_thinking when the bundle is silent.
+    sampling: SamplingSpec | None = None
+    sampling_by_thinking: dict[Literal["on", "off"], SamplingSpec] | None = None
+
+    @field_validator("sampling_by_thinking", mode="before")
+    @classmethod
+    def _sampling_keys_are_words(cls, value):
+        return _yaml_bool_keys(value)
+
+    @model_validator(mode="after")
+    def _sampling_needs_litellm(self):
+        # Claude Code runs its own model calls, so sampling here would do nothing.
+        if self.engine == "claude-code" and (self.sampling or self.sampling_by_thinking):
+            raise ValueError("sampling is for litellm tiers; the claude-code engine ignores it")
+        return self
 
 
 @dataclass(frozen=True)

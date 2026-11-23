@@ -697,6 +697,40 @@
         },
         "budget": {
           "$ref": "#/$defs/BudgetSpec"
+        },
+        "sampling": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SamplingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sampling sent with every call (litellm engine only); unset fields are not sent."
+        },
+        "sampling_by_thinking": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/SamplingSpec"
+              },
+              "propertyNames": {
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sampling for thinking.mode on or off, applied over `sampling`. Not used when thinking.mode is auto.",
+          "title": "Sampling By Thinking"
         }
       },
       "title": "ModelSpec",
@@ -715,6 +749,138 @@
           }
         ]
       }
+    },
+    "SamplingSpec": {
+      "additionalProperties": true,
+      "description": "Sampling sent with every model call (litellm engine only). Every field is\noptional, and an unset one is not sent, so the model's server keeps its own\ndefault for it. Open models publish different values for thinking and\nnon-thinking modes; `model.sampling_by_thinking` carries those.",
+      "properties": {
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "top_p": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Top P"
+        },
+        "top_k": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Top K"
+        },
+        "min_p": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Min P"
+        },
+        "presence_penalty": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": -2,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Presence Penalty"
+        },
+        "frequency_penalty": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": -2,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Frequency Penalty"
+        },
+        "repetition_penalty": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "default": null,
+          "title": "Repetition Penalty"
+        }
+      },
+      "title": "SamplingSpec",
+      "type": "object"
     },
     "SlackReadSpec": {
       "additionalProperties": true,
