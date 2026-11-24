@@ -12,16 +12,17 @@ agents over cabal, per-agent techne, shared Archive/Library). Discussion
 doc for the daedalus maintainer, the operator, and the SRE agents
 involved — nothing here is built yet except where marked GROUND TRUTH.*
 
-## 1. Ground truth — what the runtime does today
+## 1. Ground truth — what the runtime did at 0.4.0 (2026-09-14)
 
 Correcting some drift between fleet-side sketches and the shipped
-runtime (daedalus 0.4.0, 419 tests):
+runtime (daedalus 0.4.0, 419 tests). This is a snapshot; the runtime has
+moved on (`tools.builtin` now also has `exec`):
 
 - **Hybrid is not a proposal — it's how scout runs.** `tools.builtin`
   composes with `provider: mcp|liminal` through `MultiToolProvider`;
   one merged tool list reaches the model.
 - **`tools.builtin` is a configured dict, not a name list** —
-  `files: {roots: [...]}` — and `files` is today's only group.
+  `files: {roots: [...]}` — and `files` was the only group at 0.4.0.
 - **`tools.allow` is a single global fnmatch ceiling** across all
   providers, enforced at listing (the model never sees a tool it can't
   call) AND at call time (hallucinated names miss the map). There is no
@@ -48,7 +49,7 @@ runtime (daedalus 0.4.0, 419 tests):
 The fleet pattern converging out of two fleet working sessions: domain
 agents with local builtin tools (kubectl, gcloud — fast, scoped, no hop)
 plus shared fleet capabilities through liminal (`oncall.investigate_alert`,
-`prudence.review_pr`, `archivist.search`, `thoth.search_docs`). Two
+`reviewer.review_pr`, `archivist.search`, `docs.search`). Two
 frictions:
 
 1. **Enumeration drift.** Requiring every agent.yaml to list every
@@ -102,7 +103,7 @@ kubectl_read = "client_k8s_tools.daedalus:KubectlReadProvider"
 tools:
   builtin:
     files: {roots: ["/home/agent/work"]}
-    kubectl_read: {contexts: ["vidai-prod", "vidai-dev"]}   # from the entry point
+    kubectl_read: {contexts: ["prod", "dev"]}   # from the entry point
 ```
 
 Unknown group name → same load-time BundleError as today, now listing
@@ -152,7 +153,7 @@ bundle ceiling remains the agent-side belt to the gateway's
 suspenders — two independent fail-closed layers, either alone
 sufficient to stop a surprise.
 
-### E. The visual builder's capability palette (next arc after v0.5)
+### E. The visual builder's capability palette (next arc after v0.5 in the 2026-07 plan)
 
 Liminal's card set IS the palette. The builder queries the gateway, shows
 every capability with its card (description, credentials, mutating
@@ -165,7 +166,7 @@ inspect what you got.
 ## 4. Related, deliberately not covered here
 
 - **The skills layer** (on-demand instruction packs, the
-  `gs://<client>-skills` pattern) — the four-layer model's remaining gap in
+  `gs://<bucket>/skills` pattern) — the four-layer model's remaining gap in
   the bundle format. Separate design; it will want its own bundle
   section and schema rev. Don't conflate instructions (context) with
   tools (capabilities).

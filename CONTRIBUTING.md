@@ -12,8 +12,8 @@ make check                 # ruff, then pytest -q (the same as `make lint test`)
 
 Then: branch, commit with `git commit -s` (see [Developer Certificate of
 Origin](#developer-certificate-of-origin)), open a PR. Keep the suite green: CI runs
-`ruff check src tests docker conftest.py` and `pytest -q` on Python 3.11 and 3.12 on
-every push and pull request, and both should pass. CI reports but does not block a
+`ruff check src tests docker conftest.py`, `scripts/check_arch_cards.py` and `pytest -q`
+on Python 3.11 and 3.12 on every pull request and every push to main, and all should pass. CI reports but does not block a
 merge: `main` has no branch protection.
 
 Everyone taking part in this project is expected to follow the
