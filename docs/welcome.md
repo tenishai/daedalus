@@ -22,9 +22,8 @@ every tenish project below is optional.
   mints, and its switchboard is what `tools.provider: colleagues` talks to.
 - **kobo** (optional): composes bundles and drives the operator lanes (teach, knowledge,
   tool, learnings) through cabal.
-- **kaminos** (optional): reads the `/events` trace stream for its trace pane.
 
-Nothing in daedalus imports cabal, kobo or kaminos; they call it.
+Nothing in daedalus imports cabal or kobo; they call it.
 
 ## What it can do for you
 
@@ -236,18 +235,13 @@ mcp>=2.2 for the bridge, which no engine uses; that requirement is now the `brid
 
 The distribution is `tenish-daedalus`; the import package and the CLI are `daedalus`.
 
-The tenishai repos are private for now. Installing from the git URLs below needs a GitHub
-account with read access to the tenishai organization, with git set up to use it (an SSH
-key, or a token through a credential helper); without that, the install fails at the git
-clone step.
-
 From a pinned git tag:
 
 ```bash
 pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.9.0"
 ```
 
-or from your team's package index as `tenish-daedalus`. The `techne` extra needs a
+or, optionally, from a package index your team runs, as `tenish-daedalus`. The `techne` extra needs a
 concrete source for techne: the repo's `requirements-sources.txt` pins it, so a checkout
 installs with `pip install -r requirements-sources.txt ".[techne]"`. The runtime image,
 `docker/Dockerfile`, carries techne, liminal and the a2a, slack, aws and claude-code

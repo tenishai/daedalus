@@ -15,10 +15,10 @@ the way NeXTSTEP Interface Builder edited nibs: live objects, no codegen.
 
 ## Lineage and clean-room policy
 
-Daedalus is a clean-room design. It is informed by lessons from an internal
-proprietary SDK (client_agent: Slack transport ergonomics, human-in-the-loop
-approval bridging, "agent in 50 lines" DX) and by the open tenish repos
-(techne, liminal, cabal, ladon), but **no code is carried over
+Daedalus is a clean-room design. It is informed by lessons from an earlier
+internal SDK (Slack transport ergonomics, human-in-the-loop
+approval bridging, "agent in 50 lines" DX) and by the sibling tenish repos
+(techne, liminal, cabal), but **no code is carried over
 from proprietary sources**. Where a tenish repo already solves a problem,
 daedalus integrates rather than reimplements.
 
@@ -29,7 +29,7 @@ daedalus integrates rather than reimplements.
 | Memory (episodic + knowledge) | techne | `MemoryStore` Protocol; techne is the default impl via extra |
 | Tool gateway, credential scoping | liminal | `ToolProvider` Protocol; liminal via extra, direct MCP otherwise |
 | Multi-agent orchestration, A2A broker | cabal | daedalus agents are cabal-compatible handlers; A2A transport speaks to it |
-| Secrets platform | ladon | daedalus reads env/file; ladon patterns for hygiene |
+| Secrets platform | a secrets platform | daedalus reads env/file |
 | Deploy | a deployment platform | a daedalus bundle is a deployable app |
 
 Daedalus owns: the bundle format, the runtime that loads it, transports,
@@ -76,7 +76,7 @@ model:
     budget_tokens: 4096                # added on top of max_tokens; floor 1024
   request_timeout: 120                 # seconds per model call (default 120)
   budget:
-    per_task_tokens: 200000            # reserve/refund; exhaustion -> code 702
+    per_task_tokens: 200000            # spend/remaining; exhaustion -> code 702
 
 transports:
   - kind: slack                         # no channel = every channel the app
@@ -217,9 +217,10 @@ systems interoperate without translation:
 
 | Code | Meaning | Caller should |
 |---|---|---|
-| 700 | human input required | prompt the operator |
+| 700 | human input required (reserved; nothing emits it today) | prompt the operator |
 | 701 | policy violation (ceiling/gate refused) | don't retry; surface |
 | 702 | budget exhausted | surface; maybe re-fund |
+| 703 | tool blocked (a law hook or a locked enforcement refused the call) | don't retry; surface |
 | 704 | escalation requested | route to a human |
 
 In-progress/complete/failed are plain A2A Task states, not codes. This
@@ -272,9 +273,9 @@ class ToolProvider(Protocol):
     async def call(self, name: str, payload: dict) -> str: ...
 
 class CheckpointStore(Protocol):     # save/load/drop; enables crash-resume
-class Budget(Protocol):              # reserve/refund; trips 702
+class Budget(Protocol):              # spend/remaining; the engine fails 702 at remaining() == 0
 class Approver(Protocol):            # tier 2/3 decisions (see §3)
-class Transport(Protocol):           # start/stop; delivers Tasks to the handler
+class Transport(Protocol):           # serve(handler): delivers Tasks to the handler
 ```
 
 Default implementations ship in-tree (in-memory/no-op/SQLite). The real backends
@@ -289,8 +290,9 @@ change to daedalus itself.
 ### 2.3 LLM invocation
 
 LiteLLM route strings only — no provider SDK imports in core. Per-task token
-budget (reserve → refund), and a client-side circuit breaker so a flaky
-provider degrades all loops together rather than thundering.
+budget (`spend` / `remaining`; the engine fails the task with 702 when
+`remaining()` reaches 0). There is no client-side circuit breaker in the LLM
+client; only colleague asks have one.
 
 Reasoning-model think traces are split out of the reply into
 `LLMResponse.reasoning` — never shown as the answer (first dogfood finding,
@@ -395,7 +397,8 @@ back. Persona constant, transport variable:
 
 - **cli** — `daedalus chat ./prudence` REPL; also `daedalus run` one-shot for CI.
 - **a2a** — FastAPI: serves `/.well-known/agent-card.json`, accepts
-  `message/send`, streams updates. This is the cabal-facing face.
+  `message/send` and returns the finished task; `GET /events` streams the trace.
+  This is the cabal-facing face.
 - **slack** — Socket Mode. Carries the hard-won lessons as *requirements*:
   dedupe on `(channel, ts)`, thread-state store, reaction lifecycle
   (👀 → ✅/❌), graceful degradation when tokens are absent, reconnect
@@ -602,6 +605,8 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 
 ## 6. Phasing
 
+This is the original 2026-07 plan, not what shipped; the version numbers below do not match the releases.
+
 | Phase | Deliverable |
 |---|---|
 | 0 | this doc reviewed; repo created (tenishai/daedalus) |
@@ -614,7 +619,8 @@ the directory, diffable in git, reviewable in a PR. That is the whole trick.
 
 ## 7. Open questions — resolved 2026-07-02
 
-- **Team memory: half now, half later.** techne 0.8.0 ships the egress half —
+- **Team memory: half now, half later.** (Superseded: the outbox was never built.
+  `memory.team` accepts only `none`; team egress goes through `techne.api.publish`.) techne 0.8.0 ships the egress half —
   the sync outbox with a pluggable `SyncAdapter` Protocol (entry-point
   extensible). The v0.2 techne extra therefore wires personal memory *and*
   optionally enables the outbox so curated knowledge ships to a team store.
@@ -645,7 +651,7 @@ round" resolved differently than assumed:
   JWS card signing stays deferred until something actually verifies it.
 - **Reason codes are dual-keyed.** Cabal reads
   `metadata["cabal_reason_code"]` (`core/a2a/codes.py`) — same 700/701/702/
-  704 taxonomy, 703 absent in both (shared CHP lineage). `Task.reply`
+  704 taxonomy; 703 was absent in cabal's taxonomy when read (2026-07-06). `Task.reply`
   writes `daedalus_reason_code` and `cabal_reason_code`; the reader prefers
   ours and falls back to cabal's.
 - **The bundle shape is published.** `docs/bundle.schema.json` is the
