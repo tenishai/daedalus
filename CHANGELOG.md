@@ -12,6 +12,11 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Upgrading
 
+- **The litellm engine no longer runs the tool calls of a reply cut off by `max_tokens`.**
+  Their arguments may be truncated (a half-written file, a cut command), so each now gets an
+  error tool result telling the model to re-issue it, and the loop goes on. This includes
+  tool calls salvaged from text (`tools.salvage_text_calls`). A complete reply is unchanged.
+  A bundle that relied on a cut-off call running will see one extra step instead.
 - **`LLMResponse` token counts are `int | None` now, not `int`** (issue #268). None means
   the provider reported no count; the LiteLLM adapter used to turn that into 0. Code that
   does arithmetic on `input_tokens` or `output_tokens` raises a `TypeError` on None, so it
@@ -24,6 +29,10 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **`tools.on_truncated`** (`reply`, `fail` or `continue`, default `reply`): what a reply
+  cut off by `max_tokens` with no tool call becomes on the litellm engine. `reply` keeps
+  today's behaviour; `fail` makes it a FAILED task with reason 702 so a caller can't take it
+  for finished work; `continue` asks the model to carry on, bounded by `max_steps`.
 - **A `post_draft` hook can see the run behind the reply** (issue #268). A hook with a
   second positional parameter gets a frozen `RunRecord`: the engine and model, the model
   calls (`turns`), each tool call with its outcome (`ok`, `empty`, `error`, `blocked`, or

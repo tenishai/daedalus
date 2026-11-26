@@ -112,6 +112,20 @@ _REPEAT_NOTE = (
 )
 
 
+# The result each tool call of a max_tokens-truncated reply gets instead of running.
+_TRUNCATED_CALL = (
+    'Tool call "{name}" was not executed: the reply hit the output token limit '
+    "(max_tokens {max_tokens}), so its arguments may be truncated. Re-issue the tool "
+    "call with complete arguments."
+)
+
+# tools.on_truncated: continue -- the user turn that follows a cut-off reply.
+_CONTINUE_NOTE = (
+    "Your previous reply was cut off by the output token limit before you finished. "
+    "Continue from where you stopped; if you meant to call a tool, call it now."
+)
+
+
 def _arguments_key(arguments: dict) -> str:
     """Canonical form of a call's arguments, so key order doesn't hide a repeat."""
     return json.dumps(arguments, sort_keys=True, default=str)
@@ -222,6 +236,13 @@ class LiteLLMEngine:
                 if tool_calls:
                     emit("salvage", count=len(tool_calls))
             if not tool_calls:
+                if truncated and spec.tools.on_truncated == "continue":
+                    # A reply cut off before it finished is not an answer: ask the
+                    # model to carry on. Still bounded by max_steps.
+                    emit("truncated_continue", max_tokens=spec.model.max_tokens)
+                    messages.append({"role": "assistant", "content": response.text or ""})
+                    messages.append({"role": "user", "content": _CONTINUE_NOTE})
+                    continue
                 await turn.checkpoints.drop(task.id)
                 text = response.text
                 if truncated:
@@ -229,7 +250,26 @@ class LiteLLMEngine:
                         f"\n\n[reply truncated: hit the model's max_tokens "
                         f"limit ({spec.model.max_tokens})]"
                     )
+                    if spec.tools.on_truncated == "fail":
+                        return task.reply(
+                            text, state=TaskState.FAILED, reason=ReasonCode.BUDGET_EXHAUSTED
+                        )
                 return task.reply(text)
+            if truncated:
+                # The tool calls of a reply cut off by max_tokens may carry truncated
+                # arguments (a half-written file, a cut command). Run none of them and
+                # tell the model why, so it can re-issue them (as pi does in
+                # agent-loop.ts failToolCallsFromTruncatedMessage). Salvaged text
+                # calls are cut the same way and are refused the same way.
+                emit("truncated_calls", count=len(tool_calls))
+                messages.append(_assistant_message(response.text, tool_calls))
+                for call in tool_calls:
+                    canonical = resolve(call.name) or call.name
+                    note = _TRUNCATED_CALL.format(name=canonical, max_tokens=spec.model.max_tokens)
+                    emit("tool_result", name=canonical, content=note, outcome="error")
+                    last_attempt = f"{canonical} -> {note[:200]}"
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": note})
+                continue
             if (
                 context_limit
                 and response.input_tokens is not None

@@ -209,6 +209,11 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
 - **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.
+- **`tools.on_truncated`** (litellm engine): what a reply cut off by `max_tokens` with no
+  tool call becomes. `reply` (default) returns it marked `[reply truncated ...]`, as before;
+  `fail` returns it as a FAILED task (702); `continue` asks the model to carry on, bounded by
+  `max_steps`. A cut-off reply's tool calls are never run, whatever this says: each gets an
+  error result asking the model to re-issue it.
 - **`model.budget.per_task_tokens`**: a token budget per task (litellm engine only).
 
 Both timeouts must be positive; a bundle can raise them, not turn them off.
