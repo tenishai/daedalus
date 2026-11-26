@@ -947,6 +947,22 @@
           "default": null,
           "title": "Max Repeats"
         },
+        "retry_malformed": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\\}$"
+            }
+          ],
+          "title": "Retry Malformed",
+          "description": "Re-ask up to this many times, off the record, when a reply's tool calls name no offered tool, carry non-JSON arguments or miss a required one. 0 = never (litellm engine only).",
+          "default": 0
+        },
         "salvage_text_calls": {
           "anyOf": [
             {

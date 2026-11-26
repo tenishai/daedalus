@@ -442,6 +442,22 @@ class ToolsSpec(_WarnExtra):
     # a note on its result. The stop is handled like running out of steps, so
     # on_exhausted applies. None = no limit.
     max_repeats: int | None = Field(default=None, ge=2)
+    # Ask again, off the record, when a reply's tool calls can't run as written: an
+    # unknown tool, arguments that aren't JSON, or a missing required argument. The
+    # model sees why on a scratch copy of the history; only the reply finally used is
+    # kept, so failed attempts don't become examples it copies. Each retry is a model
+    # call that counts against the budget, not against max_steps. Retries spent, the
+    # last reply is used as today. litellm engine only. 0 = never.
+    retry_malformed: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description=(
+            "Re-ask up to this many times, off the record, when a reply's tool calls "
+            "name no offered tool, carry non-JSON arguments or miss a required one. "
+            "0 = never (litellm engine only)."
+        ),
+    )
     # Run tool calls the model wrote as text inside <tool_call> or <tools> tags,
     # for models served without native tool calling (Qwen on vLLM). None = on only
     # when model.api_base is set (a self-hosted endpoint). Text salvage skips the

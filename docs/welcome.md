@@ -209,6 +209,12 @@ be started with its tool-call parser enabled; see vLLM's tool-calling docs for t
 - **`tools.max_steps`** (default 10), **`tools.context_tokens`**, **`tools.max_repeats`**:
   when the loop counts as exhausted. **`tools.on_exhausted`**: `stop` replies with the
   limit message, `wrap_up` makes one last tool-free call for a partial answer.
+- **`tools.retry_malformed`** (default 0, at most 5, litellm engine only): when a reply's
+  tool calls name no offered tool, carry arguments that aren't JSON, or leave out a required
+  argument, ask again up to this many times on a scratch copy of the history that says what
+  was wrong. Only the reply finally used is kept, so the failed attempts don't become
+  examples the model copies. Cost: each retry is a model call charged to the budget. Spent,
+  the last reply is used as before.
 - **`model.budget.per_task_tokens`**: a token budget per task (litellm engine only).
 
 Both timeouts must be positive; a bundle can raise them, not turn them off.

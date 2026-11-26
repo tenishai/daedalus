@@ -24,6 +24,15 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ### Added
 
+- **`tools.retry_malformed` asks again, off the record, when tool calls can't run.** A
+  litellm-engine reply whose calls name no offered tool, carry arguments that aren't JSON,
+  or leave out an argument the tool's schema requires is not run. The model is asked again,
+  up to `retry_malformed` times (at most 5), on a scratch copy of the history that holds
+  the bad reply and what was wrong with each call; only the reply finally used enters the
+  history. Each retry is a model call charged to the budget, not to `max_steps`, and a
+  `malformed_retry` trace event records it. Retries spent, the last reply is used as before.
+  0, the default, changes nothing.
+
 - **A `post_draft` hook can see the run behind the reply** (issue #268). A hook with a
   second positional parameter gets a frozen `RunRecord`: the engine and model, the model
   calls (`turns`), each tool call with its outcome (`ok`, `empty`, `error`, `blocked`, or
