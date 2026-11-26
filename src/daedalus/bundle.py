@@ -391,6 +391,39 @@ class WorkspaceSpec(_WarnExtra):
     )
 
 
+class CompactSpec(_WarnExtra):
+    """tools.compact: stub out old tool results once the prompt grows (litellm engine).
+
+    Absent (the default), the loop sends every tool result back on every call, as it
+    always has. Set, a call whose prompt reaches at_tokens replaces each tool result
+    older than the newest keep_recent, and longer than min_chars, with a one-line stub
+    naming the call. Message order and tool_call ids are kept, so any OpenAI-compatible
+    server accepts the result. The prompt cache breaks once at each compaction.
+    """
+
+    at_tokens: int = Field(
+        gt=0,
+        description="Compact once a model call's prompt reaches this many input tokens.",
+    )
+    keep_recent: int = Field(
+        default=4, ge=1, description="The newest tool results, which are never stubbed."
+    )
+    min_chars: int = Field(
+        default=1000,
+        ge=0,
+        description="Results this short or shorter are kept whole (a stub would not save).",
+    )
+    target_ratio: float = Field(
+        default=0.5,
+        gt=0,
+        lt=1,
+        description=(
+            "Stop stubbing once the prompt is estimated under this share of at_tokens. "
+            "Stale file views go first, then the oldest results."
+        ),
+    )
+
+
 class ToolsSpec(_WarnExtra):
     provider: Literal["none", "mcp", "liminal", "colleagues"] = "none"
     servers: list[dict] = Field(default_factory=list)
@@ -437,6 +470,9 @@ class ToolsSpec(_WarnExtra):
     # and resume() would replay the same over-limit call: it needs a larger
     # context_tokens (or a narrower ask), not more budget.
     context_tokens: int | None = Field(default=None, gt=0)
+    # Keep a long task under context_tokens by stubbing old tool results (litellm
+    # engine only). None = never: every result is resent on every call, as before.
+    compact: CompactSpec | None = None
     # Count the loop as exhausted when the model makes the same tool call, with the
     # same arguments, this many times in a row (#100); each repeat before that gets
     # a note on its result. The stop is handled like running out of steps, so
@@ -454,6 +490,20 @@ class ToolsSpec(_WarnExtra):
             "null = on only when model.api_base is set."
         ),
     )
+
+    @model_validator(mode="after")
+    def _compact_below_the_context_limit(self):
+        # A threshold at or past the hard stop would never fire: the loop stops first.
+        if (
+            self.compact is not None
+            and self.context_tokens is not None
+            and self.compact.at_tokens >= self.context_tokens
+        ):
+            raise ValueError(
+                f"tools.compact.at_tokens ({self.compact.at_tokens}) must be below "
+                f"tools.context_tokens ({self.context_tokens}), or compaction never runs"
+            )
+        return self
 
 
 #: Revision policies this runtime knows how to run. "operator" promotes only

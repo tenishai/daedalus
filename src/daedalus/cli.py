@@ -148,6 +148,11 @@ def _print_event(event: dict) -> None:
         click.echo(f"  [usage] task: {usage_text(fields)}")
     elif kind == "truncated":
         click.echo(f"  [truncated] reply cut by max_tokens ({event['max_tokens']})")
+    elif kind == "compact":
+        click.echo(
+            f"  [compact] prompt at {event['input_tokens']} tokens: stubbed "
+            f"{event['results']} old tool result(s), {event['chars_removed']} chars"
+        )
     elif kind in _OPERATOR_GATE_EVENTS and "sub" in event:
         # THE OPERATOR GATE, RENDERED, because otherwise it is not observable
         # at all (#49 r2). `docker/entrypoint.sh` runs with -v, so this
