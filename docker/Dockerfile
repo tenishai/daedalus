@@ -1,5 +1,7 @@
 # daedalus runtime base image. Agent images layer on top:
-#   FROM <ar>/daedalus-runtime:<tag>
+#   FROM ghcr.io/tenishai/daedalus-runtime:<tag>     (every vX.Y.Z release publishes it,
+#                                    .github/workflows/release.yml; or a mirror of it in
+#                                    your own registry)
 #   COPY bundle/ /bundle            (the bundle baked in; or, with no COPY at all,
 #                                    BUNDLE_ARTIFACT=<registry>/<agent>-bundle:current in the
 #                                    pod's env and the runtime pulls it at start: bundle_pull.py)
@@ -37,6 +39,11 @@
 # and a warning goes to stderr.
 # Empty stages that `--build-context techne=` / `--build-context liminal=`
 # override by name; left alone they copy nothing (see the header).
+# The tags the release workflow checks techne and liminal out at, to hand them in as the
+# named contexts below. The build itself never reads these two: they are the pins, kept
+# beside the floors they satisfy (techne's matches requirements-sources.txt).
+ARG TECHNE_VERSION=0.19.1
+ARG LIMINAL_VERSION=0.11.0
 FROM scratch AS techne
 FROM scratch AS liminal
 
@@ -65,7 +72,12 @@ ARG TARGETARCH=amd64
 RUN useradd --uid 10001 --create-home agent
 # tini as PID 1 reaps orphans: exec.run's process-group kill can leave grandchildren
 # reparented to PID 1, and daedalus doesn't wait on pids it didn't spawn.
-RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
+# python:3.12-slim lags Debian's security updates (tenishai/gojira#46), so the OS packages
+# are upgraded here. APT_REFRESH is the day on a release build: a new value makes this
+# layer run again instead of coming out of the cache.
+ARG APT_REFRESH=""
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+ && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 # litestream, for the agents whose memory is replicated to object storage (the entrypoint
 # runs it when MEMORY_REPLICA_BUCKET is set). It used to be added by each agent's own
 # Dockerfile; here once, so an agent image is the runtime and nothing else.

@@ -6,6 +6,18 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+### Added
+
+- **A release publishes the runtime image.** Pushing a `vX.Y.Z` tag runs
+  `.github/workflows/release.yml`: the whole test suite on the tagged commit, the image
+  built and run natively on arm64, the version check, a vulnerability scan, then the
+  multi-arch image to `ghcr.io/tenishai/daedalus-runtime` under the tag and the short
+  sha, with SBOM and provenance, and the GitHub release with the digest in its text.
+  Nothing else builds an image (agora issue 58). An installer that deploys agents from
+  a published image pulls this one; nobody needs a sibling checkout or an index token.
+  The Dockerfile pins the techne and liminal tags the build uses (`TECHNE_VERSION`,
+  `LIMINAL_VERSION`) and upgrades the OS packages on every release build.
+
 ### Changed
 
 - **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.

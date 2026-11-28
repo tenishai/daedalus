@@ -245,7 +245,8 @@ or, optionally, from a package index your team runs, as `tenish-daedalus`. The `
 concrete source for techne: the repo's `requirements-sources.txt` pins it, so a checkout
 installs with `pip install -r requirements-sources.txt ".[techne]"`. The runtime image,
 `docker/Dockerfile`, carries techne, liminal and the a2a, slack, aws and claude-code
-extras.
+extras; every release publishes it as `ghcr.io/tenishai/daedalus-runtime:vX.Y.Z`, so a
+deployment can start from the published image instead of building one.
 
 Then: `daedalus create <name>`, set a model (`ANTHROPIC_API_KEY`, or `OPENAI_API_BASE`,
 `OPENAI_API_KEY` and `DAEDALUS_MODEL=openai/<name>`), and `daedalus chat ./<name>`.
