@@ -1,0 +1,17 @@
+# What the release scan (release.yml) does not block on, each with its reason and the
+# change that removes it. Ignored matches are dropped from the printed table, so this
+# file is the record of what the published image knowingly carries.
+ignore:
+  # litestream v0.3.13 (docker/Dockerfile) is a Go binary from 2023-10: its stdlib and
+  # modules carry fixed findings. The 0.5 line replaced the replica format, so moving
+  # is a migration of every agent's replicas, not a version bump: tenishai/daedalus#292.
+  - package:
+      type: go-module
+      location: /usr/local/bin/litestream
+    reason: litestream 0.3.13's Go toolchain and modules; the move to 0.5 is daedalus#292
+  # litellm 1.104.2 (pinned exactly after the 1.107.0 incident) requires filelock<4;
+  # GHSA-v4x8-3wr5-3wq8 is fixed in 4.2.1. Lifted when the litellm pin moves: daedalus#293.
+  - vulnerability: GHSA-v4x8-3wr5-3wq8
+    package:
+      name: filelock
+    reason: held below 4 by litellm 1.104.2; lifted with the litellm pin, daedalus#293
