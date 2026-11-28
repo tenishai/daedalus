@@ -238,7 +238,7 @@ The distribution is `tenish-daedalus`; the import package and the CLI are `daeda
 From a pinned git tag:
 
 ```bash
-pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.9.0"
+pip install "tenish-daedalus[a2a,slack] @ git+https://github.com/tenishai/daedalus.git@v0.10.0"
 ```
 
 or, optionally, from a package index your team runs, as `tenish-daedalus`. The `techne` extra needs a

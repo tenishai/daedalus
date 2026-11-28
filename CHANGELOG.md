@@ -6,6 +6,10 @@ Issue and pull request numbers all refer to this repository, written in full.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.10.0] — 2026-11-28
+
 ### Added
 
 - **A release publishes the runtime image.** Pushing a `vX.Y.Z` tag runs

@@ -258,6 +258,9 @@ jobs:
           severity-cutoff: high
           only-fixed: true
           output-format: table
+          # What the scan does not block on, each with its reason and the issue that lifts it.
+          # Ignored matches are dropped from the table, so .grype.yaml is where they are recorded.
+          config: daedalus/.grype.yaml
 
       - name: SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
