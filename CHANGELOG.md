@@ -18,6 +18,14 @@ Issue and pull request numbers all refer to this repository, written in full.
   The Dockerfile pins the techne and liminal tags the build uses (`TECHNE_VERSION`,
   `LIMINAL_VERSION`) and upgrades the OS packages on every release build.
 
+### Fixed
+
+- **The runtime image's litestream matches the image's architecture.** `ARG TARGETARCH`
+  had a default of `amd64`; under buildx's docker-container driver that default wins over
+  `--platform`, so an arm64 build fetched the amd64 binary (`exec format error` at the first
+  replicated agent). The ARG is bare now and the build runs `litestream version` as a proof.
+  Images built for amd64 were never affected.
+
 ### Changed
 
 - **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.

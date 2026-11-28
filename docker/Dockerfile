@@ -67,7 +67,10 @@ RUN if [ -f /src/techne/pyproject.toml ]; then TECHNE="tenish-techne[vectors] @ 
  && PIP_EXTRA_INDEX_URL="$EXTRA_INDEX_URL" pip wheel --wheel-dir /wheels "$TECHNE" "$LIMINAL" "/src/daedalus[a2a,slack,aws,claude-code]" "google-cloud-aiplatform>=1.38"
 
 FROM python:3.12-slim
-ARG TARGETARCH=amd64
+# No default: BuildKit fills TARGETARCH from --platform only when the ARG is declared bare.
+# With `=amd64` the docker-container driver (what CI's setup-buildx uses) kept the default
+# and the arm64 image shipped an amd64 litestream (release.yml's first dry run, 2026-11-28).
+ARG TARGETARCH
 
 RUN useradd --uid 10001 --create-home agent
 # tini as PID 1 reaps orphans: exec.run's process-group kill can leave grandchildren
@@ -82,7 +85,8 @@ RUN apt-get update && apt-get upgrade -y --no-install-recommends \
 # runs it when MEMORY_REPLICA_BUCKET is set). It used to be added by each agent's own
 # Dockerfile; here once, so an agent image is the runtime and nothing else.
 ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${TARGETARCH}.tar.gz /tmp/litestream.tar.gz
-RUN tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz litestream && rm /tmp/litestream.tar.gz
+RUN tar -C /usr/local/bin -xzf /tmp/litestream.tar.gz litestream && rm /tmp/litestream.tar.gz \
+ && litestream version   # build proof: a binary for the wrong architecture fails here, not in a pod
 
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels "tenish-daedalus[a2a,slack,aws,claude-code]" "tenish-techne[vectors]" tenish-liminal google-cloud-aiplatform && rm -rf /wheels
